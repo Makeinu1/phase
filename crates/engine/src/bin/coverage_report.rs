@@ -313,7 +313,7 @@ fn main() {
         process::exit(0);
     };
 
-    // Load via CardDatabase::from_export() using the pre-processed card-data.json
+    // Hash and deserialize the same pre-processed card-data.json bytes.
     let export_path = path.join("card-data.json");
     let card_data_bytes = match std::fs::read(&export_path) {
         Ok(bytes) => bytes,
@@ -333,7 +333,7 @@ fn main() {
             process::exit(2);
         }
     };
-    let db = match CardDatabase::from_export(&export_path) {
+    let db = match CardDatabase::from_export_reader(card_data_bytes.as_slice()) {
         Ok(db) => db,
         Err(e) => {
             eprintln!(

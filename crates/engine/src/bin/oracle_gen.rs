@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use engine::database::card_data_provenance::CardDataProvenance;
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{
-    load_atomic_cards, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
+    load_atomic_cards_from_bytes, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
 };
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
@@ -1423,14 +1423,13 @@ fn main() {
         process::exit(1);
     }
 
-    let source_corpus_sha256 = std::fs::read(&mtgjson_path)
-        .map(|bytes| sha256_bytes(&bytes))
-        .unwrap_or_else(|error| {
-            eprintln!("Error reading {}: {error}", mtgjson_path.display());
-            process::exit(1);
-        });
+    let source_corpus_bytes = std::fs::read(&mtgjson_path).unwrap_or_else(|error| {
+        eprintln!("Error reading {}: {error}", mtgjson_path.display());
+        process::exit(1);
+    });
+    let source_corpus_sha256 = sha256_bytes(&source_corpus_bytes);
 
-    let atomic = match load_atomic_cards(&mtgjson_path) {
+    let atomic = match load_atomic_cards_from_bytes(&source_corpus_bytes) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error loading MTGJSON: {e}");
