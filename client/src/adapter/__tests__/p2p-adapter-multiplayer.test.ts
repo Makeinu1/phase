@@ -277,7 +277,7 @@ vi.mock("../ws-adapter", () => ({
       initializePregame: async () => {
         const attachment = await nativeWebSocketMocks.initializePregame();
         playerId = attachment.playerId;
-        nativeWebSocketMocks.openSockets.add(playerId);
+        if (playerId !== null) nativeWebSocketMocks.openSockets.add(playerId);
         return attachment;
       },
       waitForPlayerSlots: nativeWebSocketMocks.waitForPlayerSlots,
@@ -771,7 +771,12 @@ function commanderDraftConfig(): FormatConfig {
   };
 }
 
-function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: FormatConfig) {
+function makeHost(
+  playerCount: number,
+  gracePeriodMs = 5_000,
+  formatConfig?: FormatConfig,
+  persistence?: { gameId: string; roomCode: string },
+) {
   const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
     player: { main_deck: ["Mountain"], sideboard: [] },
@@ -786,6 +791,10 @@ function makeHost(playerCount: number, gracePeriodMs = 5_000, formatConfig?: For
     formatConfig,
     undefined,
     gracePeriodMs,
+    undefined,
+    true,
+    undefined,
+    persistence,
   );
   return { adapter, emitConnection };
 }
@@ -1109,6 +1118,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // The native client remains attached to the bridge, while its underlying
     // socket is no longer OPEN; WebSocketAdapter rejects before sending Action.
     nativeWebSocketMocks.openSockets.delete(1);
+    nativeWebSocketMocks.submitAction.mockImplementationOnce(async (playerId, _action, _actor) => {
+      nativeWebSocketMocks.preSendRejections.push(playerId ?? -1);
+      throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
+    });
     remaining.sent.length = 0;
     await adapter.concedeDisconnected(1);
 
@@ -1141,6 +1154,39 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       type: "player_conceded",
       playerId: 1,
     }));
+    adapter.dispose();
+  });
+
+  it("treats a structured Engine rejection as a definite Concede non-commit", async () => {
+    const { adapter } = makeHost(2);
+    const hostEvents: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => hostEvents.push(event));
+    await adapter.initialize();
+    const rejection = {
+      code: "invalid_action" as const,
+      disposition: "invalid" as const,
+      message: "Concede was rejected",
+      related_object_ids: [],
+    };
+    mockSubmitAction.mockRejectedValueOnce(new AdapterError(
+      AdapterErrorCode.ACTION_REJECTED,
+      rejection.message,
+      true,
+      undefined,
+      rejection,
+    ));
+
+    const outcome = await (adapter as unknown as {
+      concedePlayer: (
+        pid: number,
+        reason: string,
+        origin: "conceded",
+      ) => Promise<string>;
+    }).concedePlayer(1, "Player conceded", "conceded");
+
+    expect(outcome).toBe("definite_non_commit");
+    expect((adapter as unknown as { eliminatedSeats: Set<number> }).eliminatedSeats.has(1)).toBe(false);
+    expect(hostEvents).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
     adapter.dispose();
   });
 
@@ -3251,13 +3297,18 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   });
 
   it("kick adds token to denylist; subsequent reconnect with same token is rejected", async () => {
-    const { adapter, emitConnection } = makeHost(3, 5_000);
+    const { adapter, emitConnection } = makeHost(3, 5_000, undefined, {
+      gameId: "kick-commit",
+      roomCode: "ABCDE",
+    });
+    const hostEvents: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => hostEvents.push(event));
     await adapter.initialize();
     const g1 = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
-    await joinGuest(emitConnection, {
+    const remaining = await joinGuest(emitConnection, {
       type: "guest_deck",
       deckData: { player: { main_deck: [], sideboard: [] } },
     });
@@ -3269,7 +3320,9 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const token = setup!.playerToken;
 
     // Kick guest 1.
+    remaining.sent.length = 0;
     await adapter.kickPlayer(1, "Kicked for testing");
+    await flushPromises(20);
     // Concede submitted to engine for guest 1.
     expect(mockSubmitAction).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3278,6 +3331,15 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       }),
       1,
     );
+    expect(hostEvents.filter((event) => event.type === "playerKicked" && event.playerId === 1)).toHaveLength(1);
+    expect(await remaining.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "player_kicked",
+      playerId: 1,
+    }));
+    const savedCalls = persistenceMocks.saveP2PHostSession.mock.calls as unknown as Array<
+      [string, { eliminatedSeats: number[] }]
+    >;
+    expect(savedCalls[savedCalls.length - 1]?.[1].eliminatedSeats.filter((pid) => pid === 1)).toHaveLength(1);
 
     // Attempt reconnect with the kicked token → reconnect_rejected.
     const rejoinAttempt = await joinGuest(emitConnection, {
@@ -3291,6 +3353,60 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         (m as { type: string }).type === "reconnect_rejected",
     );
     expect(rejected).toBeDefined();
+  });
+
+  it("keeps a kicked token denied without claiming gameplay elimination after definite Concede rejection", async () => {
+    const { adapter, emitConnection } = makeHost(3, 5_000, undefined, {
+      gameId: "kick-noncommit",
+      roomCode: "ABCDE",
+    });
+    const hostEvents: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => hostEvents.push(event));
+    await adapter.initialize();
+    const kicked = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const remaining = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    const setup = (await kicked.getSentMessages()).find(
+      (m): m is { type: "game_setup"; playerToken: string } =>
+        typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
+    );
+    const token = setup!.playerToken;
+    remaining.sent.length = 0;
+    mockSubmitAction.mockRejectedValueOnce(new AdapterError(
+      AdapterErrorCode.ACTION_NOT_SENT,
+      "WebSocket not connected",
+      false,
+    ));
+
+    await adapter.kickPlayer(1, "Kicked for testing");
+
+    const savedCalls = persistenceMocks.saveP2PHostSession.mock.calls as unknown as Array<
+      [string, { kickedTokens: string[]; eliminatedSeats: number[] }]
+    >;
+    const saved = savedCalls[savedCalls.length - 1]?.[1];
+    expect(saved?.kickedTokens).toContain(token);
+    expect(saved?.eliminatedSeats).not.toContain(1);
+    expect(hostEvents).not.toContainEqual(expect.objectContaining({ type: "playerKicked", playerId: 1 }));
+    expect(await remaining.getSentMessages()).not.toContainEqual(expect.objectContaining({
+      type: "player_kicked",
+      playerId: 1,
+    }));
+    expect(await kicked.getSentMessages()).toContainEqual(expect.objectContaining({ type: "kick" }));
+
+    const rejoinAttempt = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: token,
+    });
+    expect(await rejoinAttempt.getSentMessages()).toContainEqual(expect.objectContaining({
+      type: "reconnect_rejected",
+    }));
+    adapter.dispose();
   });
 
   it("rejects reconnect with unknown token", async () => {
