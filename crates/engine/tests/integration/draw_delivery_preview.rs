@@ -15,6 +15,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
@@ -350,4 +351,78 @@ fn preview_checks_empty_library_replacements_before_exact_zero() {
         live.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
+}
+
+#[test]
+fn scrivener_child_draw_delivery_matches_live_events_and_preview() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for index in 0..5 {
+        scenario.add_card_to_library_top(P0, &format!("P0 library card {index}"));
+    }
+    scenario.add_creature_from_oracle(
+        P0,
+        "Blood Scrivener",
+        2,
+        1,
+        "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
+    );
+    let mut live = scenario.build();
+    live.state_mut().debug_mode = true;
+
+    let preview = preview_draw_delivery(live.state(), P0, 1);
+    let action = live
+        .act(GameAction::Debug(DebugAction::DrawCards {
+            player_id: P0,
+            count: 1,
+        }))
+        .expect("the draw action must succeed");
+    live.advance_until_stack_empty();
+    let card_drawn_events = action
+        .events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::CardDrawn { player_id: P0, .. }))
+        .count();
+    let draw_action_events = action
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id: P0,
+                    action: PlayerActionKind::Draw,
+                    ..
+                }
+            )
+        })
+        .count();
+    let draw_action_ledger_entries = live
+        .state()
+        .player_actions_this_turn
+        .iter()
+        .filter(|entry| **entry == (P0, PlayerActionKind::Draw))
+        .count();
+    println!(
+        "task30 F3: CardDrawn={card_drawn_events}, PlayerPerformedAction::Draw={draw_action_events}, player_actions_this_turn={draw_action_ledger_entries}"
+    );
+    let observed = (
+        preview,
+        card_drawn_events,
+        live.state().players[P0.0 as usize].hand.len(),
+        live.state().players[P0.0 as usize].life,
+        live.state().last_effect_count,
+    );
+
+    assert_eq!(
+        observed,
+        (
+            DrawDeliveryPreview::Exact { delivered: 2 },
+            2,
+            2,
+            19,
+            Some(2),
+        ),
+        "the child draw must contribute its actual delivery to the owning draw result"
+    );
 }
