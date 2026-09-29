@@ -622,8 +622,8 @@ fn canonical_raw_and_trusted_saves_require_draw_result_owners() {
         .expect_err("an unmarked typed-frame save cannot fall through to a legacy reader")
         .to_string();
     assert!(
-        unmarked_error.contains("missing a numeric resolution_state_version"),
-        "an unmarked typed-frame save must fail at the version boundary before owner validation: {unmarked_error}"
+        unmarked_error.contains("v1 resolution state must not contain resolution_frames"),
+        "an unmarked canonical typed-frame save must fail at the legacy carrier boundary: {unmarked_error}"
     );
     println!("task33 save/restore outcome={ordinary:?}");
 }
