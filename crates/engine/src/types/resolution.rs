@@ -3842,7 +3842,7 @@ fn typed_carrier_draw_sequence_frames(
 }
 
 fn has_draw_sequence_delivery_owner(value: &Value) -> bool {
-    typed_carrier_draw_sequence_frames(value, "resolution_stack")
+    typed_draw_sequence_frames(value)
         .map(|frames| {
             frames.iter().any(|frame| {
                 matches!(

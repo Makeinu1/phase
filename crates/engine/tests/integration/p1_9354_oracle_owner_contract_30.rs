@@ -484,6 +484,12 @@ fn canonical_raw_and_trusted_saves_require_draw_result_owners() {
         .expect("capture the real Dredge choice through the canonical save entry");
     let raw_wire = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
         .expect("write the same wait through the canonical raw save entry");
+    let unversioned_raw_wire = serde_json::to_value(uninterrupted.state())
+        .expect("write the same wait through the bare GameState serializer");
+    assert!(unversioned_raw_wire.get("resolution_stack").is_some());
+    assert!(unversioned_raw_wire
+        .get("resolution_state_version")
+        .is_none());
     assert_eq!(
         wire.pointer("/state/resolution_state_version")
             .and_then(Value::as_u64),
@@ -513,9 +519,16 @@ fn canonical_raw_and_trusted_saves_require_draw_result_owners() {
         .expect("raw persistence accepts its canonical save")
         .into_game_state()
         .expect("the common raw restore path accepts the real choice wait");
+    let unversioned_raw_restored =
+        serde_json::from_value::<PersistedGameState>(unversioned_raw_wire)
+            .expect("unversioned raw persistence infers the current owner-aware wire")
+            .into_game_state()
+            .expect("the common raw restore path accepts the bare GameState shape");
     let ordinary = complete_dredge_wait(uninterrupted, dredger);
     let resumed = complete_dredge_wait(GameRunner::from_state(restored), dredger);
     let raw_resumed = complete_dredge_wait(GameRunner::from_state(raw_restored), dredger);
+    let unversioned_raw_resumed =
+        complete_dredge_wait(GameRunner::from_state(unversioned_raw_restored), dredger);
     assert_eq!(
         resumed, ordinary,
         "trusted restored continuation matches uninterrupted resolution"
@@ -523,6 +536,10 @@ fn canonical_raw_and_trusted_saves_require_draw_result_owners() {
     assert_eq!(
         raw_resumed, ordinary,
         "raw restored continuation matches uninterrupted resolution"
+    );
+    assert_eq!(
+        unversioned_raw_resumed, ordinary,
+        "unversioned raw restored continuation matches uninterrupted resolution"
     );
 
     let mut cross_player = wire.clone();
@@ -604,7 +621,10 @@ fn canonical_raw_and_trusted_saves_require_draw_result_owners() {
     let unmarked_error = serde_json::from_value::<PersistedGameState>(unmarked)
         .expect_err("an unmarked typed-frame save cannot fall through to a legacy reader")
         .to_string();
-    assert!(unmarked_error.contains("requires resolution_state_version 4"));
+    assert!(
+        unmarked_error.contains("missing a numeric resolution_state_version"),
+        "an unmarked typed-frame save must fail at the version boundary before owner validation: {unmarked_error}"
+    );
     println!("task33 save/restore outcome={ordinary:?}");
 }
 
