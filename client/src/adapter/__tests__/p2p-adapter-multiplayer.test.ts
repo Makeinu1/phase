@@ -3622,6 +3622,17 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const saved = savedCalls[savedCalls.length - 1]?.[1];
     expect(saved?.kickedTokens).toContain(token);
     expect(saved?.eliminatedSeats).not.toContain(1);
+    const host = adapter as unknown as {
+      disconnectedSeats: Map<number, unknown>;
+      eliminatedSeats: Set<number>;
+      gameRunState: string;
+    };
+    expect(host.disconnectedSeats.has(1)).toBe(true);
+    expect(host.gameRunState).toBe("paused-disconnect");
+    expect(hostEvents).toContainEqual(expect.objectContaining({
+      type: "opponentDisconnectedWithChoice",
+      playerId: 1,
+    }));
     expect(hostEvents).not.toContainEqual(expect.objectContaining({ type: "playerKicked", playerId: 1 }));
     expect(await remaining.getSentMessages()).not.toContainEqual(expect.objectContaining({
       type: "player_kicked",
@@ -3636,6 +3647,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(await rejoinAttempt.getSentMessages()).toContainEqual(expect.objectContaining({
       type: "reconnect_rejected",
     }));
+    await adapter.concedeDisconnected(1);
+    expect(mockSubmitAction).toHaveBeenCalledTimes(2);
+    expect(host.eliminatedSeats.has(1)).toBe(true);
+    expect(host.gameRunState).toBe("running");
     adapter.dispose();
   });
 
