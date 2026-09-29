@@ -3802,9 +3802,11 @@ struct MultiDrawBoundaryFrame {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type")]
 enum ResolutionBoundaryFrame {
-    MultiDraw(MultiDrawBoundaryFrame),
+    MultiDraw {
+        data: MultiDrawBoundaryFrame,
+    },
     #[serde(other)]
     Other,
 }
@@ -3822,7 +3824,7 @@ fn typed_draw_sequence_frames(value: &Value) -> Result<Vec<DrawSequenceBoundaryF
         .frames
         .into_iter()
         .filter_map(|frame| match frame {
-            ResolutionBoundaryFrame::MultiDraw(frame) => Some(frame.draw_sequences.frames),
+            ResolutionBoundaryFrame::MultiDraw { data: frame } => Some(frame.draw_sequences.frames),
             ResolutionBoundaryFrame::Other => None,
         })
         .flatten()
