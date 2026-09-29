@@ -3950,7 +3950,7 @@ fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Re
             return false;
         }
 
-        let Ok(ResolutionBoundaryFrame::MultiDraw(frame)) =
+        let Ok(ResolutionBoundaryFrame::MultiDraw { data: frame }) =
             serde_json::from_value::<ResolutionBoundaryFrame>(pair[1].clone())
         else {
             return false;
