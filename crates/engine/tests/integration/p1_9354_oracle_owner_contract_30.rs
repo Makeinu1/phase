@@ -297,6 +297,30 @@ fn remove_delivery_owner_fields(value: &mut Value) -> usize {
     }
 }
 
+fn remove_non_null_delivery_owner_fields(value: &mut Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            let removed = usize::from(
+                map.get("delivery_owner")
+                    .is_some_and(|owner| !owner.is_null()),
+            );
+            if removed > 0 {
+                map.remove("delivery_owner");
+            }
+            removed
+                + map
+                    .values_mut()
+                    .map(remove_non_null_delivery_owner_fields)
+                    .sum::<usize>()
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .map(remove_non_null_delivery_owner_fields)
+            .sum(),
+        _ => 0,
+    }
+}
+
 fn contains_null(value: &Value, key: &str) -> bool {
     match value {
         Value::Object(map) => {
@@ -539,6 +563,31 @@ fn canonical_raw_and_trusted_saves_require_draw_result_owners() {
         .expect_err("raw v4 decode rejects a missing owner before restore")
         .to_string();
     assert!(raw_error.contains("missing required delivery_owner"));
+
+    for (name, value, version_path) in [
+        ("trusted", wire.clone(), "/state/resolution_state_version"),
+        ("raw", raw_wire.clone(), "/resolution_state_version"),
+    ] {
+        let mut legacy = value;
+        assert!(remove_non_null_delivery_owner_fields(&mut legacy) > 0);
+        assert!(
+            contains_null(&legacy, "delivery_owner"),
+            "{name} retains an explicit null owner in the nested typed draw frame"
+        );
+        for version in [2_u64, 3_u64] {
+            let mut versioned = legacy.clone();
+            *versioned
+                .pointer_mut(version_path)
+                .expect("the canonical version field is present") = Value::from(version);
+            let error = serde_json::from_value::<PersistedGameState>(versioned)
+                .expect_err("a present null owner cannot be relabeled as a legacy version")
+                .to_string();
+            assert!(
+                error.contains("requires resolution_state_version 4"),
+                "{name} v{version} must reject the explicit-null owner: {error}"
+            );
+        }
+    }
 
     let mut downgraded = raw_wire.clone();
     downgraded["resolution_state_version"] = Value::from(3_u64);
