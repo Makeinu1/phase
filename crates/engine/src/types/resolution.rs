@@ -98,6 +98,10 @@ pub struct OptionalEffectFrame {
     pub trigger_events: Vec<GameEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_match_count: Option<u32>,
+    /// CR 608.2c: the resolving instruction-result frame survives a choice
+    /// prompt, including save/reload before its named result is published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
 }
 
 /// CR 705.1 + CR 614.1a: Discriminates which multi-flip resolver paused for a
@@ -4383,6 +4387,7 @@ impl ResolutionStateWire {
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
                 crate::types::game_state::validate_trigger_firing_coherence(&legacy)?;
+                crate::types::game_state::validate_return_result_occurrence_coherence(&legacy)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&legacy);
                 Ok(Self { state: legacy })
@@ -4445,6 +4450,7 @@ impl ResolutionStateWire {
                     );
                 }
                 crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
+                crate::types::game_state::validate_return_result_occurrence_coherence(&projected)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&projected);
                 Ok(Self { state: projected })
@@ -5008,6 +5014,7 @@ impl LegacyOptionalEffectWire {
             // (no in-flight reproduction on a legacy-serialized optional frame).
             trigger_events: Vec::new(),
             trigger_match_count: self.pending_optional_trigger_match_count,
+            return_result_occurrence: None,
         }))
     }
 }
@@ -5806,6 +5813,7 @@ mod tests {
             .expect("empty logical group still needs its pre-delivery latch");
         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(PendingChangeZoneIteration {
+                pending_return_result_producer: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),
@@ -6406,6 +6414,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         }));
         optional_effect
             .validate(&WaitingFor::OpponentMayChoice {
@@ -6493,6 +6502,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         }));
         let optional_payload = v2_fixture_with_frames(optional_state, optional_frames);
         let restored: ResolutionStateWire = serde_json::from_value(optional_payload)
@@ -6578,6 +6588,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         })
     }
 
@@ -7015,6 +7026,7 @@ mod tests {
                 trigger_event: None,
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
+                return_result_occurrence: None,
             })
         };
         let opponent_may = WaitingFor::OpponentMayChoice {
@@ -7145,6 +7157,7 @@ mod tests {
                 trigger_event: None,
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
+                return_result_occurrence: None,
             },
         );
         apply_as_current(
@@ -8544,6 +8557,7 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         }));
         buried_optional_frames.push_inner(continuation_frame(151));
         assert!(
