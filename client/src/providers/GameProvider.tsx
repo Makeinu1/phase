@@ -44,7 +44,7 @@ import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync"
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
-import { loadP2PTerminalResult } from "../services/p2pTerminalResult";
+import { loadP2PTerminalResult, type P2PTerminalResult } from "../services/p2pTerminalResult";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
@@ -920,16 +920,20 @@ export function GameProvider({
             ]);
             signal.throwIfAborted();
 
+            const isNativeResume = savedSession?.nativeSession !== undefined;
+            let nativeTerminalContinuation: P2PTerminalResult | undefined;
             if (savedSession) {
               const terminal = await loadP2PTerminalResult(savedSession.sessionKey);
               signal.throwIfAborted();
               if (terminal) {
-                onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
-                return;
+                if (!isNativeResume) {
+                  onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
+                  return;
+                }
+                nativeTerminalContinuation = terminal;
               }
             }
 
-            const isNativeResume = savedSession?.nativeSession !== undefined;
             const isWasmResume =
               !isNativeResume
               && savedState !== null
@@ -1043,7 +1047,10 @@ export function GameProvider({
                 hostDisplayName: useMultiplayerStore.getState().displayName || undefined,
                 resumeData: isResume && savedSession
                   ? isNativeResume
-                    ? { session: savedSession }
+                    ? {
+                      session: savedSession,
+                      ...(nativeTerminalContinuation ? { terminalResult: nativeTerminalContinuation } : {}),
+                    }
                     : savedState
                       ? { state: savedState, session: savedSession }
                       : undefined
@@ -1245,13 +1252,23 @@ export function GameProvider({
                 terminalDelivery.credential,
               );
               if (cancelled) return;
-              if (refreshed && !(await replaceFullTerminalDelivery(refreshed))) {
+              const retainsLocalFinalView = refreshed !== null
+                && refreshed.key.game_code === terminalDelivery.key.game_code
+                && refreshed.key.generation === terminalDelivery.key.generation
+                && refreshed.deliveryId === terminalDelivery.deliveryId
+                && refreshed.credential === terminalDelivery.credential
+                && refreshed.finalView === undefined
+                && terminalDelivery.finalView !== undefined;
+              const effectiveRefresh = retainsLocalFinalView
+                ? { ...refreshed, finalView: terminalDelivery.finalView }
+                : refreshed;
+              if (effectiveRefresh && !(await replaceFullTerminalDelivery(effectiveRefresh))) {
                 throw new Error("Failed to retain terminal delivery");
               }
-              const display = refreshed ?? terminalDelivery;
+              const display = effectiveRefresh ?? terminalDelivery;
               void acknowledgeFullTerminalDelivery(
                 reconnectSession.serverUrl,
-                display.delivery_id,
+                display.deliveryId,
                 display.credential,
               ).catch(() => {});
               clearWsSession();
@@ -1301,7 +1318,7 @@ export function GameProvider({
             }
             void acknowledgeFullTerminalDelivery(
               reconnectSession.serverUrl,
-              bootstrap.delivery_id,
+              bootstrap.deliveryId,
               bootstrap.credential,
             ).catch(() => {});
             clearWsSession();

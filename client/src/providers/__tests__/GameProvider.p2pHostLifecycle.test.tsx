@@ -2,6 +2,7 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type TestP2PHostAdapter = {
+  constructorArgs: unknown[];
   dispose: () => void;
   initialize: () => Promise<void>;
   onEvent: (listener: unknown) => () => void;
@@ -14,14 +15,18 @@ const {
   hostRoom,
   loadGame,
   loadP2PHostSession,
+  loadP2PTerminalResult,
+  nativeEngineKeyForCurrentOrigin,
+  ensureNativeEngine,
   multiplayerStore,
   takeActiveP2PHost,
   useGameStore,
 } = vi.hoisted(() => {
   const adapters: TestP2PHostAdapter[] = [];
-  const createAdapter = (): TestP2PHostAdapter => {
+  const createAdapter = (constructorArgs: unknown[] = []): TestP2PHostAdapter => {
     let disposed = false;
     const adapter: TestP2PHostAdapter = {
+      constructorArgs,
       dispose: vi.fn(() => {
         disposed = true;
       }),
@@ -72,6 +77,9 @@ const {
     })),
     loadGame: vi.fn(),
     loadP2PHostSession: vi.fn(),
+    loadP2PTerminalResult: vi.fn<() => Promise<unknown>>(async () => null),
+    nativeEngineKeyForCurrentOrigin: vi.fn<() => { release: { version: string } } | null>(() => null),
+    ensureNativeEngine: vi.fn(async () => ({ port: 0 })),
     multiplayerStore,
     takeActiveP2PHost,
     useGameStore,
@@ -81,8 +89,8 @@ const {
 vi.mock("../../adapter/p2p-adapter", () => ({
   P2PGuestAdapter: class {},
   P2PHostAdapter: class {
-    constructor() {
-      return createAdapter();
+    constructor(...args: unknown[]) {
+      return createAdapter(args);
     }
   },
 }));
@@ -152,8 +160,8 @@ vi.mock("../../services/cedhLock", () => ({
 
 vi.mock("../../services/nativeEngine", () => ({
   canAttemptNativeEngine: () => false,
-  ensureNativeEngine: vi.fn(),
-  nativeEngineKeyForCurrentOrigin: () => null,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
 }));
 
 vi.mock("../../services/nativeEngineSocket", () => ({
@@ -174,7 +182,7 @@ vi.mock("../../services/p2pSession", () => ({
 }));
 
 vi.mock("../../services/p2pTerminalResult", () => ({
-  loadP2PTerminalResult: vi.fn(async () => null),
+  loadP2PTerminalResult,
 }));
 
 vi.mock("../../services/quickDraftPersistence", () => ({
@@ -254,6 +262,9 @@ describe("GameProvider P2P host lifecycle", () => {
       sessionKey: "session-key",
       nativeSession: undefined,
     });
+    loadP2PTerminalResult.mockResolvedValue(null);
+    nativeEngineKeyForCurrentOrigin.mockReturnValue(null);
+    ensureNativeEngine.mockResolvedValue({ port: 0 });
   });
 
   afterEach(cleanup);
@@ -315,5 +326,72 @@ describe("GameProvider P2P host lifecycle", () => {
 
     await waitFor(() => expect(gameStore.resumeP2PHost).toHaveBeenCalled());
     expect(multiplayerStore.setActivePlayerId).toHaveBeenCalledWith(0);
+  });
+
+  it("resumes a native P2P host from its durable terminal result", async () => {
+    const terminal = {
+      key: "session-key",
+      lease: { sessionKey: "session-key", hostIncarnation: "previous-host" },
+      recipient: 0,
+      revision: 7,
+      terminalId: "durable-terminal",
+      finalStateCommitment: "sha256:retained",
+      display: { winner: 0, reason: "Full terminal" },
+    };
+    const session = {
+      gameStarted: true,
+      roomCode: "ABCDE",
+      sessionKey: "session-key",
+      nativeSession: {
+        gameCode: "native-game",
+        fullKey: { game_code: "native-game", generation: 1 },
+        playerTokens: { 0: "host-token", 1: "guest-token" },
+      },
+    };
+    loadP2PHostSession.mockResolvedValue(session);
+    loadP2PTerminalResult.mockResolvedValue(terminal);
+    nativeEngineKeyForCurrentOrigin.mockReturnValue({ release: { version: "test-version" } });
+    const onP2PEvent = vi.fn();
+
+    render(
+      <GameProvider gameId="p2p-game" mode="p2p-host" onP2PEvent={onP2PEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => expect(gameStore.resumeP2PHost).toHaveBeenCalledOnce());
+    expect(ensureNativeEngine).toHaveBeenCalledWith({ release: { version: "test-version" } });
+    expect(hostRoom).toHaveBeenCalledWith(expect.any(AbortSignal), { preferredRoomCode: "ABCDE" });
+    expect(adapters).toHaveLength(1);
+    const persistence = adapters[0].constructorArgs[10] as {
+      resumeData?: { session: unknown; terminalResult?: unknown };
+    };
+    expect(persistence.resumeData).toEqual({ session, terminalResult: terminal });
+    expect(onP2PEvent).not.toHaveBeenCalledWith({ type: "terminalResult", result: terminal });
+  });
+
+  it("keeps the terminal short-circuit when no native host session can resume", async () => {
+    const terminal = {
+      key: "session-key",
+      lease: { sessionKey: "session-key", hostIncarnation: "previous-host" },
+      recipient: 0,
+      revision: 7,
+      terminalId: "durable-terminal",
+      finalStateCommitment: "sha256:retained",
+      display: { winner: 0, reason: "Full terminal" },
+    };
+    loadP2PTerminalResult.mockResolvedValue(terminal);
+    const onP2PEvent = vi.fn();
+
+    render(
+      <GameProvider gameId="p2p-game" mode="p2p-host" onP2PEvent={onP2PEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => expect(onP2PEvent).toHaveBeenCalledWith({ type: "terminalResult", result: terminal }));
+    expect(adapters).toHaveLength(0);
+    expect(hostRoom).not.toHaveBeenCalled();
+    expect(ensureNativeEngine).not.toHaveBeenCalled();
   });
 });
