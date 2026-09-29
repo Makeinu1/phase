@@ -3761,52 +3761,118 @@ fn is_redacted_client_wire_projection(object: &Map<String, Value>) -> bool {
         .all(|field| !object.contains_key(*field))
 }
 
-fn visit_draw_sequence_frames(
-    value: &Value,
-    visitor: &mut impl FnMut(&Value) -> Result<(), String>,
-) -> Result<(), String> {
-    match value {
-        Value::Object(object) => {
-            if let Some(frames) = object
-                .get("draw_sequences")
-                .and_then(|stack| stack.get("frames"))
-                .and_then(Value::as_array)
-            {
-                for frame in frames {
-                    visitor(frame)?;
-                }
-            }
-            for child in object.values() {
-                visit_draw_sequence_frames(child, visitor)?;
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                visit_draw_sequence_frames(item, visitor)?;
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+/// Presence-aware view of the one runtime field whose serde default would
+/// otherwise erase the distinction between an omitted owner and an explicit
+/// ownerless (`null`) value at the persistence boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DrawSequenceDeliveryOwnerPresence {
+    #[default]
+    Missing,
+    Present(Option<crate::types::game_state::DrawSequenceFrameId>),
+}
+
+impl<'de> Deserialize<'de> for DrawSequenceDeliveryOwnerPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::Present(Option::<
+            crate::types::game_state::DrawSequenceFrameId,
+        >::deserialize(deserializer)?))
     }
-    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct DrawSequenceBoundaryFrame {
+    #[serde(default)]
+    delivery_owner: DrawSequenceDeliveryOwnerPresence,
+    #[serde(default)]
+    remaining: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct DrawSequenceBoundaryStack {
+    #[serde(default)]
+    frames: Vec<DrawSequenceBoundaryFrame>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiDrawBoundaryFrame {
+    draw_sequences: DrawSequenceBoundaryStack,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum ResolutionBoundaryFrame {
+    MultiDraw(MultiDrawBoundaryFrame),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolutionBoundaryStack {
+    #[serde(default)]
+    frames: Vec<ResolutionBoundaryFrame>,
+}
+
+fn typed_draw_sequence_frames(value: &Value) -> Result<Vec<DrawSequenceBoundaryFrame>, String> {
+    let stack = serde_json::from_value::<ResolutionBoundaryStack>(value.clone())
+        .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))?;
+    Ok(stack
+        .frames
+        .into_iter()
+        .filter_map(|frame| match frame {
+            ResolutionBoundaryFrame::MultiDraw(frame) => Some(frame.draw_sequences.frames),
+            ResolutionBoundaryFrame::Other => None,
+        })
+        .flatten()
+        .collect())
+}
+
+fn typed_carrier_draw_sequence_frames(
+    value: &Value,
+    carrier: &str,
+) -> Result<Vec<DrawSequenceBoundaryFrame>, String> {
+    value
+        .get(carrier)
+        .map(typed_draw_sequence_frames)
+        .unwrap_or_else(|| Ok(Vec::new()))
 }
 
 fn has_draw_sequence_delivery_owner(value: &Value) -> bool {
-    let mut found = false;
-    let result = visit_draw_sequence_frames(value, &mut |frame| {
-        found |= frame
-            .as_object()
-            .is_some_and(|object| object.contains_key("delivery_owner"));
-        Ok(())
-    });
-    debug_assert!(result.is_ok());
-    found
+    typed_carrier_draw_sequence_frames(value, "resolution_stack")
+        .map(|frames| {
+            frames.iter().any(|frame| {
+                matches!(
+                    frame.delivery_owner,
+                    DrawSequenceDeliveryOwnerPresence::Present(_)
+                )
+            })
+        })
+        .unwrap_or(false)
 }
 
-fn validate_draw_sequence_delivery_owner_fields(value: &Value, version: u64) -> Result<(), String> {
-    visit_draw_sequence_frames(value, &mut |frame| {
-        let has_delivery_owner = frame
-            .as_object()
-            .is_some_and(|object| object.contains_key("delivery_owner"));
+fn validate_draw_sequence_delivery_owner_fields(
+    value: &Value,
+    version: u64,
+    legacy_frames: Option<&[Value]>,
+) -> Result<(), String> {
+    let frames = if let Some(legacy_frames) = legacy_frames {
+        legacy_frames
+            .iter()
+            .map(|frame| {
+                serde_json::from_value::<DrawSequenceBoundaryFrame>(frame.clone())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        typed_carrier_draw_sequence_frames(value, "resolution_frames")?
+    };
+    for frame in frames {
+        let has_delivery_owner = matches!(
+            frame.delivery_owner,
+            DrawSequenceDeliveryOwnerPresence::Present(_)
+        );
         if version == RESOLUTION_STATE_WIRE_VERSION && !has_delivery_owner {
             return Err(format!(
                 "resolution_state_version {version} draw sequence frame is missing required delivery_owner"
@@ -3817,8 +3883,8 @@ fn validate_draw_sequence_delivery_owner_fields(value: &Value, version: u64) -> 
                 "draw sequence delivery_owner requires resolution_state_version {RESOLUTION_STATE_WIRE_VERSION}; found {version}"
             ));
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Result<(), String> {
@@ -3882,16 +3948,17 @@ fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Re
             return false;
         }
 
-        let mut ownerless_paused_draw = false;
-        let visited = visit_draw_sequence_frames(&pair[1], &mut |frame| {
-            let Some(frame) = frame.as_object() else {
-                return Ok(());
-            };
-            ownerless_paused_draw |= !frame.contains_key("delivery_owner")
-                && frame.get("remaining").and_then(Value::as_u64) == Some(0);
-            Ok(())
-        });
-        visited.is_ok() && ownerless_paused_draw
+        let Ok(ResolutionBoundaryFrame::MultiDraw(frame)) =
+            serde_json::from_value::<ResolutionBoundaryFrame>(pair[1].clone())
+        else {
+            return false;
+        };
+        frame.draw_sequences.frames.iter().any(|frame| {
+            matches!(
+                frame.delivery_owner,
+                DrawSequenceDeliveryOwnerPresence::Missing
+            ) && frame.remaining == 0
+        })
     });
     if has_related_post_replacement_continuation {
         return Err(format!(
@@ -4191,7 +4258,9 @@ impl ResolutionStateWire {
                 ));
             }
         };
-        validate_draw_sequence_delivery_owner_fields(&value, version)?;
+        if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+            validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
+        }
         reject_ambiguous_legacy_paused_draw_result(&value, version)?;
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
@@ -4220,6 +4289,17 @@ impl ResolutionStateWire {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             GameStateDecodeMode::ResolutionWireV1 => {
+                let legacy_draw_sequence_frames = value
+                    .get("draw_sequences")
+                    .and_then(|stack| stack.get("frames"))
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                validate_draw_sequence_delivery_owner_fields(
+                    &value,
+                    version,
+                    Some(legacy_draw_sequence_frames),
+                )?;
                 crate::types::game_state::reconcile_persisted_zone_change_occurrences(
                     &mut value,
                     LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
