@@ -960,6 +960,8 @@ pub enum ServerMessage {
         reservation_token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_expires_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_metadata: Option<DraftLobbyMetadata>,
     },
     PlayerSlotsUpdate {
         slots: Vec<PlayerSlotInfo>,
@@ -2471,6 +2473,7 @@ mod tests {
             filled_seats: 2,
             reservation_token: None,
             reservation_expires_at_ms: None,
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -3315,18 +3318,29 @@ mod tests {
         }
     }
 
-    /// `Duration::UntilEvent` and `TransientContinuousEffect`'s
-    /// `duration_event_source` are new in serialized full-game state; a v77
-    /// peer cannot parse the new duration tag, so it must be refused before it
-    /// receives v78 state.
+    /// `PendingManaAbility` now carries required `chosen_counter_counts`
+    /// instead of `chosen_counter_count` (#9207); v90 state cannot decode as
+    /// v91 state, so it must be refused before state delivery.
+    /// `FormatConfig` gained `allow_experimental_dungeons`; a v89 peer fails
+    /// the flag closed to `false` and runs the game without the experimental
+    /// dungeon pool the host chose, so it must be refused before it receives
+    /// v90 state.
+    /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
+    /// serialized full-game state; a v88 peer would drop it silently and admit
+    /// a printed-cost graveyard cast the permission forbids, so it must be
+    /// refused before it receives v89 state. v89 also carries the announced
+    /// graveyard permission (CR 601.2a + CR 601.2b: the casting-menu option's
+    /// `authority`, the slot prompt's `permission`, the cast's latched terms).
+    /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
+    /// `block_capacities` (CR 509.1a + CR 101.1).
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_78_for_event_deadline_duration() {
-        assert_eq!(PROTOCOL_VERSION, 78);
+    fn protocol_version_is_91_for_composite_counter_costs() {
+        assert_eq!(PROTOCOL_VERSION, 91);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3337,7 +3351,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_78_for_event_deadline_duration` stays
+    /// `protocol_version_is_91_for_composite_counter_costs` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

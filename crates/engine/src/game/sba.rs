@@ -2621,9 +2621,11 @@ mod tests {
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
+            return_result_occurrence: None,
         });
         let paused_prompt = WaitingFor::OptionalEffectChoice {
             player: PlayerId(2),
+            decision_subject_id: None,
             source_id: source,
             description: None,
             may_trigger_key: None,
