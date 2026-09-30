@@ -1,6 +1,6 @@
 # Phase Fork ロードマップ
 
-版 1.0 — 2026-09-30 snapshot
+版 1.1 — 2026-09-30（#9388 post-merge完了と#9409現在地を反映）
 
 作業手順と判断境界は [Fork 運営契約](fork-operating-contract.md) を参照する。
 
@@ -51,12 +51,12 @@ Phase 自体を、友人同士の実際の対戦が止まらず、正しく復�
 - 共有履歴で真に最新の1操作をLIFOで戻し、当該 actor の操作に限る。秘密・乱数の境界が不明なら拒否する。既知情報を未見に戻した扱いにしない。
 - 技術方式は別 Issue で設計し、製品要件と分ける。
 
-## 現在地（2026-09-30 13:10 UTC時点）
+## 現在地（2026-09-30 17:57 UTC時点）
 
 live GitHub 状態と候補 SHA の検証を最優先し、この文書の snapshot は参考情報とする。変動する状態の正本は各Issue。詳細head・statusはIssueで更新する。
 
-- #9388 candidate `a518008…`: 21 focused tests と fmt は成功。独立review未完了。latest main との相互作用、red証拠、未完了gatesが残る。
-- #9409 は公開 head `29d0104` を出発点に Issue #20 で修正中。ローカル状態は担当タスクで確認する。protocol番号は integration base 依存なので固定しない。
+- #9388 は upstream へ 17:41:37 UTC に squash merge 済み（`f34807b6f4d10fc869eab7ff4f3f84a340d3e00a`）。最終候補 `ff2036b0810c05239f45ff8c93ab8cb2b8346901` はreview `5369473445`で承認され、PR CI `36742600156` と merge-group CI `36748854966` が成功。独立post-merge確認で関連source/testsが候補・squash・main `7c967ec4b389736df58e7d3a873688f6094064bc` で一致。追加のローカルsuite再実行は主張しない。Issue #16 は証拠を記録して完了。
+- #9409 はmaintainer integration後もopen。確認時のPR headは `b3ab5efc03537552facdf7964db97dd115071d04`、Full 96 / P2P 77、current-head CI `36751038461` はqueued。CI完了とPhase owner承認を待つ。head/statusの正本はIssue #20とlive GitHub。protocol番号はintegration baseに依存するため固定しない。
 - #9252 / #9198 / #9357 は merged。#9249 は本家R2 baselineの権限に依存。#9190 は本家workflow受入れ待ち。
 
 ## 着手と見直し
