@@ -18818,6 +18818,11 @@ mod issue_4548_deadlock_tests {
         TournamentFormat,
     };
     use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::game::game_object::GameObject;
+    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
     use server_core::draft_session::DraftSessionManager;
     use tempfile::NamedTempFile;
 
@@ -19132,12 +19137,6 @@ mod issue_4548_deadlock_tests {
     }
 
     fn terminal_final_view_fixture_state() -> GameState {
-        use engine::game::game_object::GameObject;
-        use engine::types::game_state::{GameState, WaitingFor};
-        use engine::types::identifiers::{CardId, ObjectId};
-        use engine::types::phase::Phase;
-        use engine::types::zones::Zone;
-
         fn add_object(
             state: &mut GameState,
             owner: PlayerId,
@@ -19236,8 +19235,6 @@ mod issue_4548_deadlock_tests {
 
     #[test]
     fn production_terminal_final_view_survives_database_restart_byte_exactly() {
-        use tempfile::NamedTempFile;
-
         let state = terminal_final_view_fixture_state();
         let final_view_p0 = recipient_terminal_final_view_json(&state, PlayerId(0)).unwrap();
         let final_view_p1 = recipient_terminal_final_view_json(&state, PlayerId(1)).unwrap();

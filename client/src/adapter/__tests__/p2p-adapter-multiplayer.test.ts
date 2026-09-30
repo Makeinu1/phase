@@ -488,7 +488,12 @@ beforeEach(() => {
   }));
   mockSetMultiplayerMode.mockClear();
   mockProjectSeatView.mockClear();
-  mockGetState.mockClear();
+  mocks.getState.mockReset();
+  mocks.getState.mockImplementation(async () => ({
+    players: [],
+    objects: {},
+    waiting_for: { type: "Priority", data: { player: 0 } },
+  }));
   mockGetAiActionProposal.mockClear();
   mockSubmitAiActionProposal.mockClear();
   mocks.exportPersistenceState.mockReset();

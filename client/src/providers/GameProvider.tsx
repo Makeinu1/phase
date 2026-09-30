@@ -916,6 +916,11 @@ export function GameProvider({
               // snapshot. Show its saved result before retrying idempotent ACKs.
               onP2PEventRef.current?.({ type: "terminalResult", result: cleanup.p2pResult });
               try {
+                if (!nativeEngineKey) {
+                  throw new Error("The local native engine is unavailable for terminal cleanup.");
+                }
+                await ensureNativeEngine(nativeEngineKey);
+                signal.throwIfAborted();
                 for (const delivery of cleanup.deliveries) {
                   const current = await readFullTerminalResult(
                     "native-engine://phase-server",

@@ -1033,7 +1033,7 @@ describe("WebSocketAdapter", () => {
       },
     );
 
-    it("hands terminal authority to native P2P without local commit or early ACK", () => {
+    it("hands serialized terminal authority to native P2P without local commit or early ACK", async () => {
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
         "join",
@@ -1062,17 +1062,32 @@ describe("WebSocketAdapter", () => {
         deliveryId: "recipient-delivery",
         credential: "recipient-credential",
         display: { winner: 0, reason: "Finished" },
+        finalView: {
+          players: [],
+          objects: {},
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
       };
 
-      (nativeAdapter as unknown as {
-        handleMessage: (message: { type: string; data?: unknown }) => void;
-      }).handleMessage({ type: "TerminalResult", data: { delivery } });
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({
+        type: "SessionAttached",
+        data: {
+          game_code: "NATIVE",
+          player_id: 1,
+          player_token: "guest-token",
+          full_key: { game_code: "NATIVE", generation: 1 },
+        },
+      }));
+      await expect(attached).resolves.toMatchObject({ playerId: 1 });
+      nativeSocket.dispatchSynthetic("message", JSON.stringify({ type: "TerminalResult", data: { delivery } }));
 
       expect(events).toContainEqual({ type: "terminalDelivery", delivery });
       expect(events).toContainEqual({ type: "sessionChanged", session: null });
       expect(events).not.toContainEqual(expect.objectContaining({ type: "terminalUnavailable" }));
       expect(terminalStore.commit).not.toHaveBeenCalled();
-      expect(MockWebSocket.last).toBe(ws);
+      expect(MockWebSocket.last).toBe(nativeSocket);
       nativeAdapter.dispose();
     });
 
