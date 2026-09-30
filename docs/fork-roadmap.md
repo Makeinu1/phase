@@ -20,11 +20,15 @@ Phase 自体を、友人同士の実際の対戦が止まらず、正しく復�
 
 ### 対戦継続・復旧
 
+**Exit:** 対象候補の再現ケース、正常系、兄弟事例、本番経路、中断復帰を独立検証し、本家 merge 後に最新 main で再検証して証拠を残す。
+
 - #9388 Draw continuation と #9409 Concede recovery を本家受入れまで収束する。
 - 再現ケース、正常系、兄弟事例、本番経路、中断復帰の証拠を揃え、本家 merge 後の検証をexit条件にする。CI green だけでは達成としない。
 - 全バグゼロを終わりのない目標にしない。完了後は未解決の致命症状をlive evidenceで優先判断する。
 
 ### 無料運用
+
+**Exit:** 明示した想定利用条件で Pages/Worker/R2/P2P の2人卓を作成・参加・対戦・再接続・終了まで通し、ロビーへ秘密/対戦内容が送られないことと有料必須依存の有無を確認して証拠と制限を記録する。想定規模は未実測なら未確定とする。
 
 - 最新合意は Pages / Worker / R2 と browser・host-authoritative P2P。サーバー authority の GameDO や Worker 上で全カードengineを動かす旧構想を復活させない。
 - 再現可能な build/deploy 手順、接続・再接続、静的資産・カードデータ配信を確認する。ロビーへデッキ、秘密、保存済み対戦状態を流さない。
@@ -33,22 +37,26 @@ Phase 自体を、友人同士の実際の対戦が止まらず、正しく復�
 
 ### 手動介入の一貫性
 
+**Exit:** 未対応効果の手動解決から通常進行へ復帰し、Correction が新しい誘発を起こさず、他 seat の選択・秘密情報・Room 管理を混同しない代表シナリオを実画面と production 経路で検証する。
+
 - Manual Resolution を未対応効果の正規の続行経路とし、意味付き Sandbox を保つ。Move を Draw / Destroy と誤認しない。
 - Resolution、ManualEvent、Correction を区別し、Correction から再誘発しない。actor、choice、Room、privacy の権限を分離する。HOLD は操作権を奪わない。
 - 既存の Phase authority に接続し、第二のengineを作らない。代表的な実画面シナリオから acceptance を定める。
 
 ### 安全なUndo
 
+**Exit:** 可逆な最新操作は戻せる一方、他 actor の操作や知識/乱数境界を越える操作は拒否し、既存 takeback と solo rewind が回帰しない証拠を揃える。
+
 - 既存の consensual takeback と solo rewind を維持し、任意の strict knowledge-safe Undo を追加する。
 - 共有履歴で真に最新の1操作をLIFOで戻し、当該 actor の操作に限る。秘密・乱数の境界が不明なら拒否する。既知情報を未見に戻した扱いにしない。
 - 技術方式は別 Issue で設計し、製品要件と分ける。
 
-## 現在地（2026-09-30）
+## 現在地（2026-09-30 13:10 UTC時点）
 
-変動する状態の正本は各Issue。次の短いスナップショットを古い完了報告より優先し、詳細head・statusはIssueで更新する。
+live GitHub 状態と候補 SHA の検証を最優先し、この文書の snapshot は参考情報とする。変動する状態の正本は各Issue。詳細head・statusはIssueで更新する。
 
 - #9388 candidate `a518008…`: 21 focused tests と fmt は成功。独立review未完了。latest main との相互作用、red証拠、未完了gatesが残る。
-- #9409 candidate `29d0104…`: clean。Issue #20 のrepair対象。protocol番号はintegration base依存なので固定しない。
+- #9409 は公開 head `29d0104` を出発点に Issue #20 で修正中。ローカル状態は担当タスクで確認する。protocol番号は integration base 依存なので固定しない。
 - #9252 / #9198 / #9357 は merged。#9249 は本家R2 baselineの権限に依存。#9190 は本家workflow受入れ待ち。
 
 ## 着手と見直し
