@@ -3628,8 +3628,8 @@ fn draw_replacement_count(
     }
 }
 
-/// Whether an individual count replacement must run its Draw ability through
-/// the post-replacement continuation so its child instruction can park safely.
+/// Whether an individual count replacement must run its full Draw ability
+/// through the post-replacement continuation so child draws can park safely.
 fn draw_count_replacement_requires_child_sequence(
     state: &GameState,
     rid: ReplacementId,
@@ -3647,12 +3647,8 @@ fn draw_count_replacement_requires_child_sequence(
     let Some(replacement_count) = draw_replacement_count(state, rid, event) else {
         return false;
     };
-    let has_follow_up = replacement_definition_for_id(state, rid)
-        .and_then(|definition| definition.execute.as_deref())
-        .is_some_and(|execute| execute.sub_ability.is_some());
     replacement_count > 0
         && replacement_count != *count
-        && !has_follow_up
         && state
             .active_draw_sequence()
             .is_some_and(|frame| frame.player == *player_id)
@@ -9827,6 +9823,17 @@ fn apply_single_replacement(
                                 // its draw units finish before the rider and the
                                 // parent frame resumes with its own applied set.
                                 if has_draw_count_replacement_life_rider(state, rid, &proposed) {
+                                    return Some(PostReplacementContinuation::Template(Box::new(
+                                        def.clone(),
+                                    )));
+                                }
+                                // CR 121.6b: complete a count-changing replacement's
+                                // full Draw ability as a nested child before its
+                                // follow-up runs. Keeping the whole ability here
+                                // lets a paused child delivery retain its suffix.
+                                if draw_count_replacement_requires_child_sequence(
+                                    state, rid, &proposed,
+                                ) {
                                     return Some(PostReplacementContinuation::Template(Box::new(
                                         def.clone(),
                                     )));

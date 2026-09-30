@@ -3056,7 +3056,7 @@ pub(super) fn apply_post_replacement_effect(
     };
     let mut resolved =
         build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
-    // CR 615.5 + CR 616.1g: a nested replacement may temporarily become the
+    // CR 121.6b + CR 616.1g: a nested replacement may temporarily become the
     // resident drain while this chain is suspended on its child draw. Capture
     // this continuation's own event target on the chain now so a later sibling
     // (for example, Alms Collector's "that player" draw) cannot read the nested

@@ -782,11 +782,11 @@ fn resume_draw_sequence_outcome(
         }
     }
 
-    // CR 615.5: A `Draw` with a chained follow-up leaves that follow-up in the
-    // normal pending-continuation slot. Keep this paused drain resident until
-    // that chain runs: its `PostReplacementSourceController` read still needs
-    // the prevented-event context. A draw without a parked follow-up is the
-    // terminal action of this dispatch and can retire the exact top entry now.
+    // CR 608.2c + CR 121.6b: A `Draw` with a chained follow-up leaves that
+    // follow-up in the normal pending-continuation slot. Keep this paused drain
+    // resident until that chain runs: its `PostReplacementSourceController` read
+    // still needs the prevented-event context. A draw without a parked follow-up
+    // is the terminal action of this dispatch and can retire the exact top entry now.
     // Nested replacement dispatches retain their own stack entries, so this
     // never pops an outer paused event context.
     if state.active_ability_continuation().is_none() {
