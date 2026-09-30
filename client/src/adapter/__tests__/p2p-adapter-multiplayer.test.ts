@@ -65,7 +65,9 @@ vi.mock("../../services/p2pTerminalResult", async (orig) => {
 const persistenceMocks = vi.hoisted(() => ({
   clearGame: vi.fn(async () => undefined),
   clearGameStrict: vi.fn(async () => undefined),
+  clearFullTerminalCleanupStrict: vi.fn(async () => undefined),
   clearP2PHostSession: vi.fn(async () => undefined),
+  saveFullTerminalCleanupStrict: vi.fn(async () => undefined),
   saveGame: vi.fn(async () => undefined),
   saveP2PHostSession: vi.fn(async () => undefined),
   saveResumableGameStrict: vi.fn<() => Promise<void>>(async () => undefined),
@@ -77,7 +79,9 @@ vi.mock("../../services/gamePersistence", async (orig) => {
     ...actual,
     clearGame: persistenceMocks.clearGame,
     clearGameStrict: persistenceMocks.clearGameStrict,
+    clearFullTerminalCleanupStrict: persistenceMocks.clearFullTerminalCleanupStrict,
     clearP2PHostSession: persistenceMocks.clearP2PHostSession,
+    saveFullTerminalCleanupStrict: persistenceMocks.saveFullTerminalCleanupStrict,
     saveGame: persistenceMocks.saveGame,
     saveP2PHostSession: persistenceMocks.saveP2PHostSession,
     saveResumableGameStrict: persistenceMocks.saveResumableGameStrict,
@@ -354,6 +358,7 @@ interface AsyncMockWithResolvedValueOnce {
   mockClear: () => void;
   mockResolvedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
   mockResolvedValue: (value: unknown) => AsyncMockWithResolvedValueOnce;
+  mockRejectedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
 }
 const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetAiActionProposal = mocks.getAiActionProposal as unknown as AsyncMockWithResolvedValueOnce;
@@ -506,10 +511,14 @@ beforeEach(() => {
   persistenceMocks.clearGame.mockResolvedValue(undefined);
   persistenceMocks.clearGameStrict.mockReset();
   persistenceMocks.clearGameStrict.mockResolvedValue(undefined);
+  persistenceMocks.clearFullTerminalCleanupStrict.mockReset();
+  persistenceMocks.clearFullTerminalCleanupStrict.mockResolvedValue(undefined);
   persistenceMocks.clearP2PHostSession.mockReset();
   persistenceMocks.clearP2PHostSession.mockResolvedValue(undefined);
   persistenceMocks.saveGame.mockReset();
   persistenceMocks.saveGame.mockResolvedValue(undefined);
+  persistenceMocks.saveFullTerminalCleanupStrict.mockReset();
+  persistenceMocks.saveFullTerminalCleanupStrict.mockResolvedValue(undefined);
   persistenceMocks.saveP2PHostSession.mockReset();
   persistenceMocks.saveP2PHostSession.mockResolvedValue(undefined);
   persistenceMocks.saveResumableGameStrict.mockReset();
@@ -1412,6 +1421,150 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(outcome).toBe("definite_non_commit");
     expect((adapter as unknown as { eliminatedSeats: Set<number> }).eliminatedSeats.has(1)).toBe(false);
     expect(hostEvents).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
+    adapter.dispose();
+  });
+
+  it("reconciles an unknown WASM Concede once and publishes a proven elimination once", async () => {
+    const { adapter } = makeHost(2);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    events.length = 0;
+    const committed = {
+      ...remoteState("WASM Concede committed"),
+      eliminated_players: [1],
+    } as GameState;
+    mockGetState.mockResolvedValue(committed);
+    mockSubmitAction.mockRejectedValueOnce(new Error("response lost after commit"));
+    const concede = (adapter as unknown as {
+      concedePlayer: (pid: number, reason: string, origin: "conceded") => Promise<string>;
+    }).concedePlayer.bind(adapter);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("committed");
+    expect((adapter as unknown as { eliminatedSeats: Set<number> }).eliminatedSeats.has(1)).toBe(true);
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    expect(events.filter((event) => event.type === "stateChanged")).toHaveLength(1);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("inactive");
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("does not replay an unknown WASM Concede until a later explicit request", async () => {
+    const { adapter } = makeHost(2);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    events.length = 0;
+    mockGetState.mockResolvedValue(remoteState("WASM Concede did not commit"));
+    mockSubmitAction.mockRejectedValueOnce(new Error("response lost after send"));
+    const concede = (adapter as unknown as {
+      concedePlayer: (pid: number, reason: string, origin: "conceded") => Promise<string>;
+    }).concedePlayer.bind(adapter);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("definite_non_commit");
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect((adapter as unknown as { eliminatedSeats: Set<number> }).eliminatedSeats.has(1)).toBe(false);
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
+
+    mockSubmitAction.mockResolvedValueOnce({ events: [] });
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("committed");
+    expect(mockSubmitAction).toHaveBeenCalledTimes(2);
+    adapter.dispose();
+  });
+
+  it("keeps unknown WASM Concede fenced when snapshot fails, then reconciles before retry", async () => {
+    const { adapter } = makeHost(2);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    events.length = 0;
+    mockSubmitAction.mockRejectedValueOnce(new Error("response lost after send"));
+    mockGetState.mockRejectedValueOnce(new Error("snapshot unavailable"));
+    const host = adapter as unknown as {
+      concedePlayer: (pid: number, reason: string, origin: "conceded") => Promise<string>;
+      uncertainConcedeSeats: Set<number>;
+      eliminatedSeats: Set<number>;
+    };
+    const concede = host.concedePlayer.bind(adapter);
+
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("unknown");
+    expect(host.uncertainConcedeSeats.has(1)).toBe(true);
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
+
+    mockGetState.mockResolvedValue({
+      ...remoteState("WASM Concede committed before retry"),
+      eliminated_players: [1],
+    } as GameState);
+    await expect(concede(1, "Player conceded", "conceded")).resolves.toBe("committed");
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect(host.eliminatedSeats.has(1)).toBe(true);
+    expect(host.uncertainConcedeSeats.has(1)).toBe(false);
+    expect(events.filter((event) => event.type === "playerConceded" && event.playerId === 1)).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("waits for recipient terminal authority before consuming a reconnect GameOver snapshot", async () => {
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame
+      .mockResolvedValueOnce({ playerId: 0, playerToken: "host-full-token", gameCode: "native-game", fullKey: { game_code: "native-game", generation: 6 } })
+      .mockResolvedValueOnce({ playerId: 1, playerToken: "guest-full-token", gameCode: "native-game", fullKey: { game_code: "native-game", generation: 6 } });
+    const { adapter } = makeNativeHost(2);
+    await adapter.initialize();
+    const finalState = {
+      ...remoteState("Full reconnect terminal state"),
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    } as GameState;
+    const fullKey = { game_code: "native-game", generation: 6 };
+    const terminal = (deliveryId: string, credential: string): FullTerminalDelivery => ({
+      key: fullKey,
+      terminalRevision: 19,
+      deliveryId,
+      credential,
+      display: { winner: 0, reason: "Full terminal" },
+      finalView: finalState,
+    });
+    const hostDelivery = deferred<FullTerminalDelivery | null>();
+    const guestDelivery = deferred<FullTerminalDelivery | null>();
+    nativeTerminalMocks.bootstrap.mockImplementation(async (_url, _key, token) =>
+      token === "host-full-token" ? hostDelivery.promise : guestDelivery.promise,
+    );
+    type BridgeHarness = {
+      fullKey: typeof fullKey;
+      playerTokens: Map<number, string>;
+      latestViews: Map<number, { snapshot: EngineSnapshot; events: GameEvent[]; revision: number }>;
+      terminalResume: () => Promise<unknown>;
+    };
+    const bridge = (adapter as unknown as { nativeBridge: BridgeHarness }).nativeBridge;
+    bridge.fullKey = fullKey;
+    bridge.playerTokens.set(0, "host-full-token");
+    bridge.playerTokens.set(1, "guest-full-token");
+    bridge.latestViews.set(0, {
+      snapshot: {
+        state: finalState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      },
+      events: [],
+      revision: 19,
+    });
+
+    let settled = false;
+    const pending = bridge.terminalResume().then((result) => {
+      settled = true;
+      return result;
+    });
+    await flushPromises();
+    expect(nativeTerminalMocks.bootstrap).toHaveBeenCalledTimes(2);
+    expect(settled).toBe(false);
+
+    hostDelivery.resolve(terminal("host-delivery", "host-credential"));
+    guestDelivery.resolve(terminal("guest-delivery", "guest-credential"));
+    await expect(pending).resolves.toMatchObject({ revision: 19, display: { winner: 0 } });
+    expect(settled).toBe(true);
     adapter.dispose();
   });
 
@@ -3757,6 +3910,9 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   it.each([false, true])("keeps unknown outcome fenced without authority proof (disposed=%s)", async (disposeWhilePending) => {
     const { adapter } = makeHost(2);
     await adapter.initialize();
+    if (!disposeWhilePending) {
+      mockGetState.mockRejectedValueOnce(new Error("WASM snapshot unavailable"));
+    }
     const pending = deferred<void>();
     mocks.submitAction.mockImplementationOnce(async () => {
       await pending.promise;

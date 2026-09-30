@@ -63,9 +63,13 @@ import type { BrokerClient } from "../services/brokerClient";
 import type { FullSessionKey } from "../services/multiplayerSession";
 import type { FullTerminalDelivery } from "../services/fullTerminalResult";
 import {
+  clearFullTerminalCleanupStrict,
   clearP2PHostSession,
   clearGame,
   clearGameStrict,
+  saveFullTerminalCleanupStrict,
+  type FullTerminalCleanupObligation,
+  type FullTerminalCleanupDelivery,
   type NativeAiDriverFault,
   type NativeP2PServerSession,
   type PersistedP2PHostSession,
@@ -546,15 +550,77 @@ class NativeP2PBridge {
     return [...this.playerTokens.keys()];
   }
 
-  terminalResume(): {
+  async terminalResume(): Promise<{
     revision: number;
     snapshot: EngineSnapshot;
     display: FullTerminalDelivery["display"];
-  } | null {
+  } | null> {
+    const deliveries = await this.readTerminalDeliveries();
+    if (!deliveries) return null;
     const host = this.latestViews.get(0);
-    const display = this.terminalDeliveries.get(0)?.display;
+    const display = deliveries.get(0)?.display;
     if (!host || !display || host.snapshot.state.waiting_for.type !== "GameOver") return null;
     return { revision: host.revision, snapshot: host.snapshot, display };
+  }
+
+  async terminalCleanupAuthority(
+    revision: number,
+  ): Promise<{ fullKey: FullSessionKey; terminalRevision: number; deliveries: FullTerminalCleanupDelivery[] }> {
+    const deliveries = await this.readTerminalDeliveries();
+    if (!deliveries || !this.fullKey) {
+      throw new Error("Full terminal cleanup authority is unavailable");
+    }
+    return {
+      fullKey: { ...this.fullKey },
+      terminalRevision: revision,
+      deliveries: [...deliveries].map(([recipient, delivery]) => {
+        if (delivery.terminalRevision !== revision || !delivery.finalView) {
+          throw new Error("Full terminal cleanup authority is incomplete");
+        }
+        return {
+          recipient,
+          deliveryId: delivery.deliveryId,
+          credential: delivery.credential,
+        };
+      }),
+    };
+  }
+
+  async acknowledgeTerminalCleanup(obligation: FullTerminalCleanupObligation): Promise<void> {
+    if (
+      !this.fullKey
+      || obligation.fullKey.game_code !== this.fullKey.game_code
+      || obligation.fullKey.generation !== this.fullKey.generation
+      || obligation.terminalRevision < 0
+    ) {
+      throw new Error("Full terminal cleanup obligation does not match this session");
+    }
+    for (const delivery of obligation.deliveries) {
+      if (!this.playerTokens.has(delivery.recipient)) {
+        throw new Error("Full terminal cleanup recipient is no longer bound to this session");
+      }
+      const cached = this.terminalDeliveries.get(delivery.recipient);
+      if (
+        cached
+        && (
+          cached.key.game_code !== obligation.fullKey.game_code
+          || cached.key.generation !== obligation.fullKey.generation
+          || cached.terminalRevision !== obligation.terminalRevision
+          || cached.deliveryId !== delivery.deliveryId
+          || cached.credential !== delivery.credential
+        )
+      ) {
+        throw new Error("Full terminal cleanup recipient binding changed");
+      }
+      if (!(await acknowledgeFullTerminalDelivery(
+        "native-engine://phase-server",
+        delivery.deliveryId,
+        delivery.credential,
+        () => new NativeEngineSocket(),
+      ))) {
+        throw new Error("Full terminal delivery acknowledgement was rejected");
+      }
+    }
   }
 
   async terminalFinalViews(revision: number): Promise<Map<PlayerId, GameState>> {
@@ -2084,7 +2150,7 @@ export class P2PHostAdapter implements EngineAdapter {
           this.gameRunState = "terminal";
           this.gameStarted = true;
           this.pregameSeatState.gameStarted = true;
-          const terminalResume = this.nativeBridge.terminalResume();
+          const terminalResume = await this.nativeBridge.terminalResume();
           if (this.resumeTerminalResult) {
             const retained = this.resumeTerminalResult;
             const finalView = terminalResume?.snapshot.state;
@@ -2997,9 +3063,9 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   /** A Full terminal payload is retained until every connected, eligible P2P
-   * guest has accepted the final revision and terminal result. The resumable
-   * host record is cleared before ACK, so an acknowledged Full row can never
-   * be needed by a later host resume. */
+   * guest has accepted the final revision and terminal result. A cleanup-only
+   * owner is durable before gameplay resume records are removed or Full ACKs
+   * clear recipient-private final views. */
   private async tryAcknowledgeNativeTerminal(): Promise<void> {
     const terminal = this.terminalResult;
     const bridge = this.nativeBridge;
@@ -3025,27 +3091,42 @@ export class P2PHostAdapter implements EngineAdapter {
       if (this.gameId) {
         this.nativeTerminalPersistenceClearing = true;
         try {
+          const authority = await bridge.terminalCleanupAuthority(terminal.revision);
+          const obligation: FullTerminalCleanupObligation = {
+            gameId: this.gameId,
+            p2pSessionKey: terminal.key,
+            p2pTerminalId: terminal.terminalId,
+            p2pResult: terminal,
+            fullKey: authority.fullKey,
+            terminalRevision: authority.terminalRevision,
+            deliveries: authority.deliveries,
+          };
+          await saveFullTerminalCleanupStrict(obligation);
           await clearGameStrict(this.gameId);
           this.nativeTerminalPersistenceCleared = true;
+          await bridge.acknowledgeTerminalCleanup(obligation);
+          await clearFullTerminalCleanupStrict(this.gameId);
         } catch (err) {
           this.emit({
             type: "terminalUnavailable",
-            message: err instanceof Error ? err.message : "Failed to clear native terminal resume state",
+            message: err instanceof Error ? err.message : "Native terminal cleanup is still pending",
           });
           return;
         } finally {
           this.nativeTerminalPersistenceClearing = false;
         }
+      } else {
+        try {
+          await bridge.acknowledgeTerminalDeliveries(terminal.revision);
+        } catch (err) {
+          this.emit({
+            type: "terminalUnavailable",
+            message: err instanceof Error ? err.message : "Full terminal acknowledgement failed",
+          });
+          return;
+        }
       }
-      try {
-        await bridge.acknowledgeTerminalDeliveries(terminal.revision);
-        this.nativeTerminalAcknowledged = true;
-      } catch (err) {
-        this.emit({
-          type: "terminalUnavailable",
-          message: err instanceof Error ? err.message : "Full terminal acknowledgement failed",
-        });
-      }
+      this.nativeTerminalAcknowledged = true;
     })();
     this.nativeTerminalAckPromise = pending;
     try {
@@ -4291,8 +4372,22 @@ export class P2PHostAdapter implements EngineAdapter {
     };
     const readAuthoritativeSeat = async () => {
       const bridge = this.nativeBridge;
-      if (!bridge) throw new Error("Native Full authority is unavailable");
+      if (!bridge) {
+        const snapshot = await this.wasm.getSnapshot();
+        if (this.disposed || !this.ownsAuthority()) throw new Error("Host authority was superseded");
+        const authoritative: NativeViewerUpdate = {
+          snapshot,
+          events: [],
+          revision: this.authoritativeRevision,
+        };
+        return {
+          authoritative,
+          views: new Map<PlayerId, NativeViewerUpdate>([[0, authoritative]]),
+          fanoutAlreadyCompleted: false,
+        };
+      }
       const authoritative = await bridge.reconcileConcede(pid);
+      if (this.disposed || !this.ownsAuthority()) throw new Error("Host authority was superseded");
       const views = bridge.viewerUpdates();
       const fanoutAlreadyCompleted = views.size > 0 && [...views].every(([playerId, update]) =>
         this.nativeDeliveredViews.get(playerId)?.revision === update.revision,
@@ -4317,10 +4412,15 @@ export class P2PHostAdapter implements EngineAdapter {
         this.emit(
           origin === "kick"
             ? { type: "playerKicked", playerId: pid, reason }
-            : { type: "playerConceded", playerId: pid, reason },
+          : { type: "playerConceded", playerId: pid, reason },
         );
       }
-      if (terminal) {
+      if (!this.nativeBridge && (eliminated || terminal)) {
+        const transition = this.stampBrowserMutation({ events: [], log_entries: [] }, true);
+        await this.publishHostSnapshot(transition.result);
+        await this.broadcastStateUpdate(transition, reason);
+        await this.runAiLoop();
+      } else if (terminal) {
         try {
           const hostUpdate = views.get(0);
           if (!hostUpdate) throw new Error("Full terminal host view is unavailable");
@@ -4407,14 +4507,6 @@ export class P2PHostAdapter implements EngineAdapter {
         ) {
           this.resumeIfUnblocked();
           return "definite_non_commit";
-        }
-        if (!this.nativeBridge) {
-          keepFence = true;
-          this.emit({
-            type: "error",
-            message: "Could not reconcile the Concede outcome; the seat remains fenced.",
-          });
-          return "unknown";
         }
         let reconciliation: Awaited<ReturnType<typeof readAuthoritativeSeat>>;
         try {

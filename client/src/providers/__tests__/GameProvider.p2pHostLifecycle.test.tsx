@@ -16,6 +16,10 @@ const {
   loadGame,
   loadP2PHostSession,
   loadP2PTerminalResult,
+  loadFullTerminalCleanup,
+  clearFullTerminalCleanup,
+  readFullTerminalResult,
+  acknowledgeTerminalDelivery,
   nativeEngineKeyForCurrentOrigin,
   ensureNativeEngine,
   multiplayerStore,
@@ -78,6 +82,10 @@ const {
     loadGame: vi.fn(),
     loadP2PHostSession: vi.fn(),
     loadP2PTerminalResult: vi.fn<() => Promise<unknown>>(async () => null),
+    loadFullTerminalCleanup: vi.fn<() => Promise<unknown>>(async () => null),
+    clearFullTerminalCleanup: vi.fn(async () => undefined),
+    readFullTerminalResult: vi.fn<() => Promise<unknown>>(async () => null),
+    acknowledgeTerminalDelivery: vi.fn(async () => true),
     nativeEngineKeyForCurrentOrigin: vi.fn<() => { release: { version: string } } | null>(() => null),
     ensureNativeEngine: vi.fn(async () => ({ port: 0 })),
     multiplayerStore,
@@ -103,9 +111,15 @@ vi.mock("../../adapter/wasm-adapter", () => ({
 vi.mock("../../adapter/ws-adapter", () => ({
   NativeEngineVersionMismatchError: class extends Error {},
   WebSocketAdapter: class {},
-  acknowledgeFullTerminalDelivery: vi.fn(),
+  acknowledgeFullTerminalDelivery: acknowledgeTerminalDelivery,
   bootstrapFullTerminalDelivery: vi.fn(),
-  readFullTerminalResult: vi.fn(),
+  readFullTerminalResult,
+}));
+
+vi.mock("../../services/gamePersistence", () => ({
+  clearFullTerminalCleanupStrict: clearFullTerminalCleanup,
+  loadFullTerminalCleanupStrict: loadFullTerminalCleanup,
+  loadGameStrict: vi.fn(async () => null),
 }));
 
 vi.mock("../../audio/AudioManager", () => ({
@@ -263,6 +277,10 @@ describe("GameProvider P2P host lifecycle", () => {
       nativeSession: undefined,
     });
     loadP2PTerminalResult.mockResolvedValue(null);
+    loadFullTerminalCleanup.mockResolvedValue(null);
+    clearFullTerminalCleanup.mockResolvedValue(undefined);
+    readFullTerminalResult.mockResolvedValue(null);
+    acknowledgeTerminalDelivery.mockResolvedValue(true);
     nativeEngineKeyForCurrentOrigin.mockReturnValue(null);
     ensureNativeEngine.mockResolvedValue({ port: 0 });
   });
@@ -370,16 +388,118 @@ describe("GameProvider P2P host lifecycle", () => {
     expect(onP2PEvent).not.toHaveBeenCalledWith({ type: "terminalResult", result: terminal });
   });
 
-  it("keeps the terminal short-circuit when no native host session can resume", async () => {
-    const terminal = {
-      key: "session-key",
-      lease: { sessionKey: "session-key", hostIncarnation: "previous-host" },
-      recipient: 0,
-      revision: 7,
-      terminalId: "durable-terminal",
-      finalStateCommitment: "sha256:retained",
-      display: { winner: 0, reason: "Full terminal" },
+  it.each(["missing native key", "native setup failure"])(
+    "shows a retained result despite %s",
+    async (failure) => {
+      const terminal = retainedTerminal();
+      loadP2PHostSession.mockResolvedValue({
+        gameStarted: true,
+        roomCode: "ABCDE",
+        sessionKey: "session-key",
+        nativeSession: {
+          gameCode: "native-game",
+          fullKey: { game_code: "native-game", generation: 1 },
+          playerTokens: { 0: "host-token", 1: "guest-token" },
+        },
+      });
+      loadP2PTerminalResult.mockResolvedValue(terminal);
+      if (failure === "native setup failure") {
+        nativeEngineKeyForCurrentOrigin.mockReturnValue({ release: { version: "test-version" } });
+        ensureNativeEngine.mockRejectedValueOnce(new Error("native setup rejected"));
+      }
+      const onP2PEvent = vi.fn();
+
+      render(
+        <GameProvider gameId="p2p-game" mode="p2p-host" onP2PEvent={onP2PEvent}>
+          <div />
+        </GameProvider>,
+      );
+
+      await waitFor(() => expect(onP2PEvent).toHaveBeenCalledWith({
+        type: "terminalResult",
+        result: terminal,
+      }));
+      expect(adapters).toHaveLength(0);
+      expect(hostRoom).not.toHaveBeenCalled();
+      expect(onP2PEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    },
+  );
+
+  it("retries partial terminal ACKs after restart from metadata without a final view", async () => {
+    const terminal = retainedTerminal();
+    const cleanupOwner = {
+      gameId: "p2p-game",
+      p2pSessionKey: terminal.key,
+      p2pTerminalId: terminal.terminalId,
+      p2pResult: terminal,
+      fullKey: { game_code: "native-game", generation: 1 },
+      terminalRevision: terminal.revision,
+      deliveries: [
+        { recipient: 0, deliveryId: "host-delivery", credential: "host-credential" },
+        { recipient: 1, deliveryId: "guest-delivery", credential: "guest-credential" },
+      ],
     };
+    loadFullTerminalCleanup.mockResolvedValue(cleanupOwner);
+    const readMetadataOnly = (deliveryId: string, credential: string) => ({
+      key: cleanupOwner.fullKey,
+      terminalRevision: terminal.revision,
+      deliveryId,
+      credential,
+    });
+    readFullTerminalResult
+      .mockResolvedValueOnce(readMetadataOnly("host-delivery", "host-credential"))
+      .mockResolvedValueOnce(readMetadataOnly("guest-delivery", "guest-credential"))
+      .mockResolvedValueOnce(readMetadataOnly("host-delivery", "host-credential"))
+      .mockResolvedValueOnce(readMetadataOnly("guest-delivery", "guest-credential"));
+    acknowledgeTerminalDelivery
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const onP2PEvent = vi.fn();
+
+    const firstMount = render(
+      <GameProvider gameId="p2p-game" mode="p2p-host" onP2PEvent={onP2PEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => expect(acknowledgeTerminalDelivery).toHaveBeenCalledTimes(2));
+    expect(clearFullTerminalCleanup).not.toHaveBeenCalled();
+    expect(onP2PEvent).toHaveBeenCalledWith({ type: "terminalResult", result: terminal });
+    firstMount.unmount();
+
+    const resumedEvent = vi.fn();
+    render(
+      <GameProvider gameId="p2p-game" mode="p2p-host" onP2PEvent={resumedEvent}>
+        <div />
+      </GameProvider>,
+    );
+    await waitFor(() => expect(clearFullTerminalCleanup).toHaveBeenCalledWith("p2p-game"));
+    expect(resumedEvent).toHaveBeenCalledWith({ type: "terminalResult", result: terminal });
+    expect(readFullTerminalResult).toHaveBeenCalledTimes(4);
+    expect(acknowledgeTerminalDelivery).toHaveBeenCalledTimes(4);
+    expect(acknowledgeTerminalDelivery).toHaveBeenNthCalledWith(
+      1,
+      "native-engine://phase-server",
+      "host-delivery",
+      "host-credential",
+      expect.any(Function),
+    );
+    expect(acknowledgeTerminalDelivery).toHaveBeenNthCalledWith(
+      2,
+      "native-engine://phase-server",
+      "guest-delivery",
+      "guest-credential",
+      expect.any(Function),
+    );
+    expect(loadGame).not.toHaveBeenCalled();
+    expect(loadP2PHostSession).not.toHaveBeenCalled();
+    expect(adapters).toHaveLength(0);
+    expect(hostRoom).not.toHaveBeenCalled();
+    expect(ensureNativeEngine).not.toHaveBeenCalled();
+  });
+
+  it("keeps the terminal short-circuit when no native host session can resume", async () => {
+    const terminal = retainedTerminal();
     loadP2PTerminalResult.mockResolvedValue(terminal);
     const onP2PEvent = vi.fn();
 
@@ -395,3 +515,15 @@ describe("GameProvider P2P host lifecycle", () => {
     expect(ensureNativeEngine).not.toHaveBeenCalled();
   });
 });
+
+function retainedTerminal() {
+  return {
+    key: "session-key",
+    lease: { sessionKey: "session-key", hostIncarnation: "previous-host" },
+    recipient: 0,
+    revision: 7,
+    terminalId: "durable-terminal",
+    finalStateCommitment: "sha256:retained",
+    display: { winner: 0, reason: "Full terminal" },
+  };
+}
