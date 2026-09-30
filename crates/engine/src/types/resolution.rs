@@ -3849,17 +3849,13 @@ fn typed_carrier_draw_sequence_frames(
         .unwrap_or_else(|| Ok(Vec::new()))
 }
 
-fn has_draw_sequence_delivery_owner(value: &Value) -> bool {
-    typed_draw_sequence_frames(value)
-        .map(|frames| {
-            frames.iter().any(|frame| {
-                matches!(
-                    frame.delivery_owner,
-                    DrawSequenceDeliveryOwnerPresence::Present(_)
-                )
-            })
-        })
-        .unwrap_or(false)
+fn has_draw_sequence_delivery_owner(value: &Value) -> Result<bool, String> {
+    Ok(typed_draw_sequence_frames(value)?.iter().any(|frame| {
+        matches!(
+            frame.delivery_owner,
+            DrawSequenceDeliveryOwnerPresence::Present(_)
+        )
+    }))
 }
 
 fn validate_draw_sequence_delivery_owner_fields(
@@ -4054,15 +4050,17 @@ fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Re
 /// The move below is a rename, not a reinterpretation.
 pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), String> {
     reject_wire_projection_marker(value)?;
-    let unversioned_stack_has_delivery_owner = value
-        .get("resolution_stack")
-        .is_some_and(has_draw_sequence_delivery_owner);
     let object = value
         .as_object_mut()
         .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
     if object.contains_key("resolution_state_version") {
         return Ok(());
     }
+    let unversioned_stack_has_delivery_owner = object
+        .get("resolution_stack")
+        .map(has_draw_sequence_delivery_owner)
+        .transpose()?
+        .unwrap_or(false);
     // An undeclared payload carrying BOTH carriers is ambiguous, and inferring
     // from one would move `resolution_stack` onto the `resolution_frames` key
     // and discard the declared `resolution_frames` silently. Refuse instead.
@@ -5657,6 +5655,18 @@ mod tests {
         value["resolution_state_version"] =
             Value::from(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION);
         value
+    }
+
+    #[test]
+    fn malformed_unversioned_draw_carrier_preserves_boundary_error() {
+        let mut value = serde_json::json!({
+            "resolution_stack": {
+                "frames": [{"type": "MultiDraw", "data": {"draw_sequences": {"frames": "invalid"}}}]
+            }
+        });
+        let error = declare_raw_resolution_wire(&mut value).unwrap_err();
+        assert!(error.contains("typed resolution frame boundary is malformed"));
+        assert!(value.get("resolution_state_version").is_none());
     }
 
     #[test]

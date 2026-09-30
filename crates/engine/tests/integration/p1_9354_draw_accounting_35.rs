@@ -186,4 +186,7 @@ fn dredge_choice_resume_records_completed_draw_once() {
         .expect("accepting Dredge resumes the draw");
     assert_eq!(counts(&resumed.events, runner.state(), P0), (1, 1, 1));
     runner.advance_until_stack_empty();
+    assert_eq!(counts(&[], runner.state(), P0).2, 1);
+    assert!(runner.state().active_draw_sequence().is_none());
+    assert!(runner.state().resolution_stack.is_empty());
 }

@@ -207,6 +207,14 @@ fn validate_owner(
 
 #[test]
 fn delivery_owner_validator_rejects_malformed_links() {
+    let mut valid = DrawSequenceStack::default();
+    let parent = valid.push(P0, 1);
+    valid.push(P0, 1);
+    valid.active_mut().unwrap().delivery_owner = Some(parent);
+    assert!(
+        valid.validate().is_ok(),
+        "an immediate same-player owner is valid"
+    );
     let cross_player = {
         let mut stack = DrawSequenceStack::default();
         let parent = stack.push(P0, 1);
@@ -864,10 +872,10 @@ fn malformed_cross_player_delivery_owner_fails_closed_on_completion() {
     let owner_result = runner
         .state_mut()
         .draw_sequence_frame_mut(owner)
-        .map(|frame| frame.accumulated);
-    assert_ne!(
-        owner_result,
-        Some(1),
+        .expect("the rejected delivery must leave its owner live")
+        .accumulated;
+    assert_eq!(
+        owner_result, 0,
         "a cross-player child result is never credited"
     );
 }
@@ -916,6 +924,11 @@ fn f3_observe_replacement_draw_event_and_turn_ledger_contract() {
     );
     println!("task30 F3 preview/events/action-ledger/board={observed:?}");
     assert_eq!(observed.0, DrawDeliveryPreview::Exact { delivered: 2 });
+    assert_eq!(
+        (observed.2, observed.3),
+        (2, 2),
+        "child and parent draw instructions complete once each"
+    );
     assert_eq!(
         (observed.1, observed.4, observed.5, observed.6),
         (2, 2, 19, Some(2))

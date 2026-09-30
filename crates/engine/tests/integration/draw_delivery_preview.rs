@@ -602,6 +602,14 @@ fn scrivener_child_draw_delivery_matches_live_events_and_preview() {
     println!(
         "task30 F3: CardDrawn={card_drawn_events}, PlayerPerformedAction::Draw={draw_action_events}, player_actions_this_turn={draw_action_ledger_entries}"
     );
+    assert_eq!(
+        draw_action_events, 2,
+        "child and parent instructions each complete once"
+    );
+    assert_eq!(
+        draw_action_ledger_entries, 2,
+        "completed draw instructions are recorded once"
+    );
     let observed = (
         preview,
         card_drawn_events,
