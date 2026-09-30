@@ -869,14 +869,16 @@ fn malformed_cross_player_delivery_owner_fails_closed_on_completion() {
         .expect("accept the Dredge branch");
     runner.advance_until_stack_empty();
 
-    let owner_result = runner
-        .state_mut()
-        .draw_sequence_frame_mut(owner)
-        .expect("the rejected delivery must leave its owner live")
-        .accumulated;
+    assert!(runner.state_mut().draw_sequence_frame_mut(owner).is_none());
+    let foreign_draw_actions = runner
+        .state()
+        .player_actions_this_turn
+        .iter()
+        .filter(|entry| **entry == (P1, PlayerActionKind::Draw))
+        .count();
     assert_eq!(
-        owner_result, 0,
-        "a cross-player child result is never credited"
+        foreign_draw_actions, 0,
+        "a cross-player child result must not publish a draw for its retired owner"
     );
 }
 
