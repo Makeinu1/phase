@@ -1,6 +1,6 @@
 # Phase Fork ロードマップ
 
-版 1.2 — 2026-09-30 22:29 UTC（監査所見の照合と#9409の最新maintainer統合状態を反映）
+版 1.3 — 2026-09-30 23:42 UTC（Issue18/#9303/#9304をowner-ledで保留し、bounded handoff証拠を反映）
 
 作業手順と判断境界は [Fork 運営契約](fork-operating-contract.md) を参照する。過去の境界監査所見の分類と証拠限界は [監査照合](audit-reconciliation.md) にまとめる。
 
@@ -51,12 +51,13 @@ Phase 自体を、友人同士の実際の対戦が止まらず、正しく復�
 - 共有履歴で真に最新の1操作をLIFOで戻し、当該 actor の操作に限る。秘密・乱数の境界が不明なら拒否する。既知情報を未見に戻した扱いにしない。
 - 技術方式は別 Issue で設計し、製品要件と分ける。
 
-## 現在地（2026-09-30 22:29 UTC時点）
+## 現在地（2026-09-30 23:42 UTC時点）
 
 live GitHub 状態と候補 SHA の検証を最優先し、この文書の snapshot は参考情報とする。変動する状態の正本は各Issue/PR。詳細head・statusはそれぞれの記録で更新する。
 
 - #9388 は upstream へ 17:41:37 UTC に squash merge 済み（`f34807b6f4d10fc869eab7ff4f3f84a340d3e00a`）。最終候補 `ff2036b0810c05239f45ff8c93ab8cb2b8346901` はreview `5369473445`で承認され、PR CI `36742600156` と merge-group CI `36748854966` が成功。独立post-merge確認では対象source/testsが候補・squash・当時のmain `7c967ec4b389736df58e7d3a873688f6094064bc` で一致。追加のローカルsuite再実行は主張しない。Issue #16 は証拠を記録して完了。
 - #9409 は確認時点でopen、head `b3ab5efc03537552facdf7964db97dd115071d04`。Full 96 / P2P 77 のmaintainer統合を含む候補で、current-head CI `36751038461` attempt 2 とretryされた Rust partition 9,055 testsを含め成功。最新maintainer reviewではmainの#9438によるFull 96 / P2P 78とのprotocol衝突で19:31 UTCにmerge queueから外れ、maintainer側の統合と新しいheadの検証待ち。これはCI待ちや新しい作者側コード欠陥ではない。PR head・統合状態の正本は live PR とIssue #20。protocol番号はintegration baseに依存するため固定しない。
+- Issue18/#9303/#9304 participant-choice departure lane は `PARKED_OWNER_LED / NO_CONTRIBUTOR_IMPLEMENTATION`。#9303のbounded handoffは [upstream comment](https://github.com/phase-rs/phase/issues/9303#issuecomment-5921631936) とIssue #18に記録済み。現証拠は2 control PASS / 1 production resolver + real Concede departure failureで、全spell-cast経路や一般的な選択意味の確定ではない。既存testはfrozen/unpublished。owner-ledのscope判断待ちで、独立した#9409 recovery/integration laneは継続する。
 - #9252 / #9198 / #9357 は merged。#9249 は本家R2 baselineの権限に依存。#9190 は本家workflow受入れ待ち。
 - 過去監査のfindingは [監査照合](audit-reconciliation.md) に分類した。個別Issueの受入れ条件とcurrent evidenceを優先し、一覧を全件再調査・一括修正する計画にしない。
 
