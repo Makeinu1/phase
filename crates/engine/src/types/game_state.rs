@@ -13381,6 +13381,8 @@ pub enum PersistedRestoreError {
     RehydrationFailed(String),
     #[error("persisted state has unsettled resolution ownership at priority")]
     UnsettledPriorityResolution,
+    #[error("persisted state contains an ownerless post-replacement dispatch")]
+    OwnerlessPostReplacementDispatch,
     #[error("persisted terminal-rest recovery did not make strict progress")]
     TerminalRestRecoveryExhausted,
     #[error("persisted priority state has deferred triggers that could not settle")]
@@ -13598,6 +13600,19 @@ impl PersistedGameState {
         // each caller.
         let recovered_terminal_rest =
             crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
+        // Priority-time recovery gets first chance to retire the exact terminal
+        // rest it owns. A Dispatching marker left afterward has no synchronous
+        // dispatch handle at the persistence boundary, wherever it sits in the
+        // typed frame stack or within one PostReplacement frame's drain stack.
+        if state.resolution_stack.iter().any(|frame| match frame {
+            ResolutionFrame::PostReplacement(drains) => drains
+                .drains
+                .iter()
+                .any(|drain| matches!(drain.status, DrainStatus::Dispatching)),
+            _ => false,
+        }) {
+            return Err(PersistedRestoreError::OwnerlessPostReplacementDispatch);
+        }
         Ok(PreparedPersistedGameState {
             state,
             finalization,
