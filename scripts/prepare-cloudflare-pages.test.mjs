@@ -325,6 +325,23 @@ test("accepts a valid compressed-only manifest source without inventing identity
   assert.equal(object.decodedContentSha256, createHash("sha256").update(jsonBytes).digest("hex"));
 });
 
+test("recognizes and verifies a compressed-only content-addressed card corpus", async () => {
+  const fixture = await createFixture();
+  const identityPath = path.join(fixture.inputDir, CARD_FILENAME);
+  const compressed = brotliCompressSync(CARD_BYTES);
+  await writeFile(`${identityPath}.br`, compressed);
+  await rm(identityPath);
+
+  const report = await preparePagesArtifacts(fixture.options);
+  const object = report.publicObjects.find((entry) => entry.key === CARD_FILENAME);
+  assert.equal(object.sourcePath, `${CARD_FILENAME}.br`);
+  assert.equal(object.publicUrl, CONFIG.cardDataUrl);
+  assert.equal(object.sourceRepresentation, "brotli");
+  assert.equal(object.sourceArtifacts.length, 1);
+  assert.equal(object.decodedContentSha256, createHash("sha256").update(CARD_BYTES).digest("hex"));
+  await assert.rejects(readFile(path.join(fixture.outputDir, `${CARD_FILENAME}.br`)), { code: "ENOENT" });
+});
+
 test("rejects invalid Brotli and companions with different decoded content", async (t) => {
   await t.test("invalid bytes", async () => {
     const fixture = await createFixture();

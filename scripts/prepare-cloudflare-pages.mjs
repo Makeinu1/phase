@@ -503,9 +503,13 @@ async function inspectOffloadedSources(index, manifestNames, config) {
     if (index.has("card-data.json.br")) removed.add("card-data.json.br");
   }
 
-  const rootHashedFiles = [...index.values()]
-    .filter((entry) => !entry.path.includes("/") && CARD_CORPUS_PATTERN.test(entry.path))
-    .map((entry) => entry.path.replace(/\.json$/, ""));
+  const rootHashedFiles = [...new Set(
+    [...index.values()]
+      .filter((entry) => !entry.path.includes("/"))
+      .map((entry) => entry.path.endsWith(".br") ? entry.path.slice(0, -3) : entry.path)
+      .filter((filename) => CARD_CORPUS_PATTERN.test(filename))
+      .map((filename) => filename.replace(/\.json$/, "")),
+  )].sort(compareStrings);
   const hashedNames = new Set(rootHashedFiles);
   for (const sourceName of rootHashedFiles) {
     const filename = `${sourceName}.json`;
