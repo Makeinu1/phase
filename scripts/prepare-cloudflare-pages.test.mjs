@@ -124,6 +124,14 @@ async function cleanup() {
   roots.clear();
 }
 
+async function assertCredentialRejectedWithoutEcho(promise, secret) {
+  await assert.rejects(promise, (error) => {
+    assert.match(error.message, /appears to contain a credential/);
+    assert.equal(error.message.includes(secret), false);
+    return true;
+  });
+}
+
 test.afterEach(cleanup);
 
 test("removes exact manifest and card corpus names, preserving similar and nested files", async () => {
@@ -529,9 +537,15 @@ test("produces path-independent deterministic reports and preserves source input
   assert.equal(JSON.stringify(firstReport).includes(first.outputDir), false);
 });
 
-test("CLI emits the same deterministic report as the module API", async () => {
+test("CLI round-trips bounded caller provenance into the same deterministic report as the API", async () => {
+  const artifactProvenance = {
+    sourceRevision: "a".repeat(40),
+    sourceArtifactSha256: "b".repeat(64),
+    externalEngineWasmSha256: "c".repeat(64),
+    buildRunId: "release-2026-10-01.7",
+  };
   const fixture = await createFixture();
-  const expected = await preparePagesArtifacts(fixture.options);
+  const expected = await preparePagesArtifacts({ ...fixture.options, artifactProvenance });
   await rm(fixture.outputDir, { recursive: true, force: true });
   const cliReport = execFileSync(
     process.execPath,
@@ -547,11 +561,74 @@ test("CLI emits the same deterministic report as the module API", async () => {
       CONFIG.cardDataUrl,
       "--engine-wasm-url",
       CONFIG.engineWasmUrl,
+      "--artifact-provenance-json",
+      JSON.stringify(artifactProvenance),
       "--attest-build-urls",
     ],
     { cwd: REPOSITORY_ROOT, encoding: "utf8" },
   );
   assert.deepEqual(JSON.parse(cliReport), expected);
+  assert.deepEqual(expected.callerSuppliedArtifactProvenance, {
+    status: "CALLER_SUPPLIED_NOT_LOCALLY_VERIFIED",
+    ...artifactProvenance,
+  });
+  assert.equal(expected.wasm.configuredEngineObject.sha256, null);
+  assert.equal(expected.wasm.configuredEngineObject.byteVerification, "UNVERIFIED_ABSENT");
+});
+
+test("keeps local checks and caller provenance separate and rejects unsafe provenance fields", async (t) => {
+  await t.test("empty provenance input is explicitly absent", async () => {
+    const fixture = await createFixture();
+    const report = await preparePagesArtifacts(fixture.options);
+    assert.deepEqual(report.callerSuppliedArtifactProvenance, { status: "NOT_SUPPLIED" });
+  });
+
+  await t.test("unknown fields are not copied into the report", async () => {
+    const fixture = await createFixture();
+    await assert.rejects(
+      preparePagesArtifacts({
+        ...fixture.options,
+        artifactProvenance: { sourceRevision: "a".repeat(40), operatorNote: "private text" },
+      }),
+      /no additional fields/,
+    );
+  });
+
+  await t.test("invalid identifiers and credential-like run IDs are rejected", async () => {
+    const fixture = await createFixture();
+    await assert.rejects(
+      preparePagesArtifacts({ ...fixture.options, artifactProvenance: { sourceRevision: "not-a-revision" } }),
+      /40- or 64-character lowercase Git object ID/,
+    );
+    await assert.rejects(
+      preparePagesArtifacts({
+        ...fixture.options,
+        artifactProvenance: { buildRunId: `AKIA${"A".repeat(16)}` },
+      }),
+      /safe 1-64 character identifier/,
+    );
+  });
+
+  await t.test("CLI bounds provenance JSON before parsing it", async () => {
+    const fixture = await createFixture();
+    const oversizedJson = `{"sourceRevision":"${"a".repeat(40)}"}${" ".repeat(513)}`;
+    assert.throws(
+      () => execFileSync(
+        process.execPath,
+        [
+          path.join(REPOSITORY_ROOT, "scripts", "prepare-cloudflare-pages.mjs"),
+          "--input", fixture.inputDir,
+          "--output", fixture.outputDir,
+          "--data-base-url", CONFIG.dataBaseUrl,
+          "--card-data-url", CONFIG.cardDataUrl,
+          "--engine-wasm-url", CONFIG.engineWasmUrl,
+          "--artifact-provenance-json", oversizedJson,
+        ],
+        { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+      ),
+      (error) => String(error.stderr).includes("--artifact-provenance-json exceeds 512 UTF-8 bytes"),
+    );
+  });
 });
 
 test("rejects secret-bearing and non-HTTPS URL configuration", async (t) => {
@@ -563,7 +640,10 @@ test("rejects secret-bearing and non-HTTPS URL configuration", async (t) => {
         },
       },
     });
-    await assert.rejects(preparePagesArtifacts(fixture.options), /appears to contain a credential/);
+    await assertCredentialRejectedWithoutEcho(
+      preparePagesArtifacts(fixture.options),
+      "sk_live_12345678901234567890",
+    );
   });
   await t.test("GitHub fine-grained token in URL path", async () => {
     const fixture = await createFixture({
@@ -574,7 +654,37 @@ test("rejects secret-bearing and non-HTTPS URL configuration", async (t) => {
         },
       },
     });
-    await assert.rejects(preparePagesArtifacts(fixture.options), /appears to contain a credential/);
+    await assertCredentialRejectedWithoutEcho(
+      preparePagesArtifacts(fixture.options),
+      "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ",
+    );
+  });
+  await t.test("percent-encoded Stripe-style secret in URL path", async () => {
+    const fixture = await createFixture({
+      bundleOverrides: {
+        options: {
+          dataBaseUrl: "https://assets.example.test/releases/%73k_live_12345678901234567890",
+        },
+      },
+    });
+    await assertCredentialRejectedWithoutEcho(
+      preparePagesArtifacts(fixture.options),
+      "sk_live_12345678901234567890",
+    );
+  });
+  await t.test("percent-encoded GitHub fine-grained token in URL path", async () => {
+    const fixture = await createFixture({
+      bundleOverrides: {
+        options: {
+          dataBaseUrl:
+            "https://assets.example.test/releases/%67ithub_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ",
+        },
+      },
+    });
+    await assertCredentialRejectedWithoutEcho(
+      preparePagesArtifacts(fixture.options),
+      "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ",
+    );
   });
   await t.test("query string", async () => {
     const fixture = await createFixture({

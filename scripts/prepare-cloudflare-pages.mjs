@@ -20,6 +20,13 @@ import { pipeline } from "node:stream/promises";
 export const PAGES_MAX_FILE_BYTES = 25 * 1024 * 1024;
 export const PAGES_FREE_MAX_FILES = 20_000;
 
+const MAX_ARTIFACT_PROVENANCE_JSON_BYTES = 512;
+const ARTIFACT_PROVENANCE_FIELDS = new Set([
+  "sourceRevision",
+  "sourceArtifactSha256",
+  "externalEngineWasmSha256",
+  "buildRunId",
+]);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = path.resolve(SCRIPT_DIR, "..");
 const DATA_FILES_PATH = path.join(REPOSITORY_ROOT, "data-files.json");
@@ -203,10 +210,6 @@ function validatePublicUrl(name, value) {
     fail(`${name} must be an explicit, whitespace-free public URL`);
   }
   if (/[\u0000-\u0020\\]/.test(value)) fail(`${name} contains whitespace or a backslash`);
-  if (SECRET_LIKE_PATTERN.test(value)) fail(`${name} appears to contain a credential`);
-  if (value.includes("?") || value.includes("#")) {
-    fail(`${name} must not contain a query string or fragment`);
-  }
 
   let parsed;
   try {
@@ -215,6 +218,28 @@ function validatePublicUrl(name, value) {
     fail(`${name} is not an absolute URL`);
   }
   if (parsed.protocol !== "https:") fail(`${name} must use https`);
+  const credentialBearingComponents = [
+    parsed.hostname,
+    parsed.pathname,
+    parsed.search,
+    parsed.hash,
+    parsed.username,
+    parsed.password,
+  ];
+  for (const component of credentialBearingComponents) {
+    let decodedComponent;
+    try {
+      decodedComponent = decodeURIComponent(component);
+    } catch {
+      fail(`${name} contains malformed URL encoding`);
+    }
+    if (SECRET_LIKE_PATTERN.test(component) || SECRET_LIKE_PATTERN.test(decodedComponent)) {
+      fail(`${name} appears to contain a credential`);
+    }
+  }
+  if (value.includes("?") || value.includes("#")) {
+    fail(`${name} must not contain a query string or fragment`);
+  }
   if (parsed.username || parsed.password) fail(`${name} must not include URL credentials`);
   if (!parsed.hostname) fail(`${name} must include a public hostname`);
   if (/%2f|%5c/i.test(parsed.pathname)) fail(`${name} contains an encoded path separator`);
@@ -263,6 +288,58 @@ function validateConfiguration({ dataBaseUrl, cardDataUrl, engineWasmUrl }) {
   }
 
   return { cardFilename, dataBaseUrl, cardDataUrl, engineWasmUrl, engineFilename };
+}
+
+function validateArtifactProvenance(value) {
+  if (value === undefined || value === null) return null;
+  if (
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
+    fail("artifactProvenance must be a plain object containing only allowlisted fields");
+  }
+
+  const keys = Reflect.ownKeys(value);
+  if (keys.length === 0 || keys.some((key) => typeof key !== "string" || !ARTIFACT_PROVENANCE_FIELDS.has(key))) {
+    fail("artifactProvenance must contain at least one allowlisted field and no additional fields");
+  }
+
+  const normalized = {};
+  for (const key of [
+    "sourceRevision",
+    "sourceArtifactSha256",
+    "externalEngineWasmSha256",
+    "buildRunId",
+  ]) {
+    if (!Object.hasOwn(value, key)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) {
+      fail(`artifactProvenance.${key} must be a plain data property`);
+    }
+    const fieldValue = descriptor.value;
+    if (key === "sourceRevision") {
+      if (typeof fieldValue !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(fieldValue)) {
+        fail("artifactProvenance.sourceRevision must be a 40- or 64-character lowercase Git object ID");
+      }
+    } else if (key === "sourceArtifactSha256" || key === "externalEngineWasmSha256") {
+      if (typeof fieldValue !== "string" || !/^[0-9a-f]{64}$/.test(fieldValue)) {
+        fail(`artifactProvenance.${key} must be a 64-character lowercase SHA-256 digest`);
+      }
+    } else if (
+      typeof fieldValue !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9.:-]{0,63}$/.test(fieldValue) ||
+      SECRET_LIKE_PATTERN.test(fieldValue)
+    ) {
+      fail("artifactProvenance.buildRunId must be a safe 1-64 character identifier");
+    }
+    normalized[key] = fieldValue;
+  }
+
+  if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > MAX_ARTIFACT_PROVENANCE_JSON_BYTES) {
+    fail(`artifactProvenance exceeds ${MAX_ARTIFACT_PROVENANCE_JSON_BYTES} UTF-8 bytes`);
+  }
+  return normalized;
 }
 
 function appendViteFilename(baseUrl, filename) {
@@ -713,8 +790,10 @@ export async function preparePagesArtifacts({
   cardDataUrl,
   engineWasmUrl,
   attestBuildUrls = false,
+  artifactProvenance = null,
 }) {
   if (typeof attestBuildUrls !== "boolean") fail("attestBuildUrls must be a boolean");
+  const callerSuppliedProvenance = validateArtifactProvenance(artifactProvenance);
 
   const inputPath = await requireDirectoryWithoutSymlinks(inputDir, "input");
   const outputPath = path.resolve(outputDir);
@@ -790,6 +869,12 @@ export async function preparePagesArtifacts({
         buildUsedTheseUrlValues: attestBuildUrls,
       },
     },
+    callerSuppliedArtifactProvenance: callerSuppliedProvenance
+      ? {
+          status: "CALLER_SUPPLIED_NOT_LOCALLY_VERIFIED",
+          ...callerSuppliedProvenance,
+        }
+      : { status: "NOT_SUPPLIED" },
     bundleEvidence,
     offloadedSources: removedArtifacts,
     publicObjects: offloaded.logicalObjects,
@@ -827,6 +912,14 @@ function parseArguments(args) {
     "--data-base-url",
     "--card-data-url",
     "--engine-wasm-url",
+    "--artifact-provenance-json",
+  ]);
+  const requiredValueFlags = new Set([
+    "--input",
+    "--output",
+    "--data-base-url",
+    "--card-data-url",
+    "--engine-wasm-url",
   ]);
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
@@ -843,8 +936,21 @@ function parseArguments(args) {
     index += 1;
   }
 
-  for (const flag of valueFlags) {
+  for (const flag of requiredValueFlags) {
     if (!values.has(flag)) fail(`required argument is missing: ${flag}`);
+  }
+
+  let artifactProvenance = null;
+  if (values.has("--artifact-provenance-json")) {
+    const json = values.get("--artifact-provenance-json");
+    if (Buffer.byteLength(json, "utf8") > MAX_ARTIFACT_PROVENANCE_JSON_BYTES) {
+      fail(`--artifact-provenance-json exceeds ${MAX_ARTIFACT_PROVENANCE_JSON_BYTES} UTF-8 bytes`);
+    }
+    try {
+      artifactProvenance = JSON.parse(json);
+    } catch {
+      fail("--artifact-provenance-json must be valid JSON");
+    }
   }
   return {
     inputDir: values.get("--input"),
@@ -853,6 +959,7 @@ function parseArguments(args) {
     cardDataUrl: values.get("--card-data-url"),
     engineWasmUrl: values.get("--engine-wasm-url"),
     attestBuildUrls,
+    artifactProvenance,
   };
 }
 

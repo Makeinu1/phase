@@ -20,6 +20,8 @@ readiness.
 not used, so a final path prefix such as `/releases/fall-2026` remains in the
 result. Values must be HTTPS URLs without credentials, query strings, fragments,
 recognized credential patterns, dot segments, or encoded path separators.
+Credential patterns are checked both before and after percent-decoding URL
+components; decoded values are never included in error messages or the report.
 `CARD_DATA_URL` must identify the selected
 `card-data-<16 lowercase hex>.json` source, and that name must match the first
 16 hex digits of the decoded card-data SHA-256. `ENGINE_WASM_URL` must identify
@@ -45,6 +47,7 @@ node scripts/prepare-cloudflare-pages.mjs \
   --data-base-url 'https://data.example.test/releases/fall-2026' \
   --card-data-url 'https://data.example.test/releases/fall-2026/card-data-0123456789abcdef.json' \
   --engine-wasm-url 'https://data.example.test/wasm/engine_wasm_bg-0123456789abcdef.wasm' \
+  --artifact-provenance-json '{"sourceRevision":"0123456789abcdef0123456789abcdef01234567","sourceArtifactSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","externalEngineWasmSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","buildRunId":"release-2026-10-01.7"}' \
   --attest-build-urls > /tmp/phase-pages-report.json
 ```
 
@@ -53,6 +56,20 @@ tool reads no environment files and makes no network requests. It writes the
 deterministic JSON report to stdout, so keep any report file outside the Pages
 output. Reports omit absolute input/output paths and timestamps, allowing
 equivalent trees at different absolute paths to produce equal reports.
+
+`--artifact-provenance-json` is optional and round-trips the same
+`artifactProvenance` object accepted by the module API. Its only accepted
+fields are `sourceRevision` (40- or 64-character lowercase Git object ID),
+`sourceArtifactSha256` (64-character lowercase SHA-256 of the caller's genuine
+build artifact), `externalEngineWasmSha256` (64-character lowercase SHA-256
+reported by the caller for an external engine artifact), and `buildRunId` (a
+1-64 character identifier using letters, digits, `.`, `:`, or `-`). Unknown
+fields, credential-like run IDs, and JSON larger than 512 UTF-8 bytes are
+rejected. The report labels these values
+`CALLER_SUPPLIED_NOT_LOCALLY_VERIFIED`; the preparer does not copy arbitrary
+metadata, derive local hashes from these claims, or treat them as semantic
+compatibility evidence. In particular, caller provenance does not change the
+local WASM `byteVerification` result or clear deployment-readiness blockers.
 
 ## What is copied and removed
 
