@@ -368,23 +368,35 @@ fn persisted_historical_nested_dispatching_fails_closed_before_publication() {
 /// same nested frame is legitimately paused for the live choice.
 #[test]
 fn persisted_nonresident_dispatching_drain_is_rejected() {
-    let mut snapshot = projected_capture_snapshot(include_bytes!(
+    let snapshot = projected_capture_snapshot(include_bytes!(
         "fixtures/zurs_weirding_nested_dispatching_pre_7485.json.gz"
     ));
-    let drains = snapshot["resolution_frames"]["frames"][0]["data"]["drains"]
-        .as_array_mut()
-        .expect("the historical PostReplacement frame has a drain stack");
-    let mut second = drains[0].clone();
-    drains[0]["status"] = serde_json::Value::String("Dispatching".to_string());
-    second["status"] = serde_json::Value::String("Paused".to_string());
-    drains.push(second);
+    let template = snapshot["resolution_frames"]["frames"][0]["data"]["drains"][0].clone();
+    let with_statuses = |first_status: &str, second_status: &str| {
+        let mut variant = snapshot.clone();
+        let drains = variant["resolution_frames"]["frames"][0]["data"]["drains"]
+            .as_array_mut()
+            .expect("the historical PostReplacement frame has a drain stack");
+        let mut first = template.clone();
+        let mut second = template.clone();
+        first["status"] = serde_json::Value::String(first_status.to_string());
+        second["status"] = serde_json::Value::String(second_status.to_string());
+        *drains = vec![first, second];
+        serde_json::from_value::<PersistedGameState>(variant)
+            .expect("the nested two-drain topology decodes")
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+    };
 
-    let persisted = serde_json::from_value::<PersistedGameState>(snapshot)
-        .expect("the nested direct-choice state with a paused resident decodes");
-    assert!(matches!(
-        persisted.prepare_for_restore(PersistedRestoreFinalization::Immediate),
-        Err(PersistedRestoreError::OwnerlessPostReplacementDispatch)
-    ));
+    assert!(
+        with_statuses("Paused", "Paused").is_ok(),
+        "the same two-drain topology is admissible without an ownerless dispatch"
+    );
+    for (first, second) in [("Dispatching", "Paused"), ("Paused", "Dispatching")] {
+        assert!(matches!(
+            with_statuses(first, second),
+            Err(PersistedRestoreError::OwnerlessPostReplacementDispatch)
+        ));
+    }
 }
 
 /// The historical v2 fixture differs from a supported paused direct-choice
