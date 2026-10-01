@@ -565,6 +565,17 @@ test("rejects secret-bearing and non-HTTPS URL configuration", async (t) => {
     });
     await assert.rejects(preparePagesArtifacts(fixture.options), /appears to contain a credential/);
   });
+  await t.test("GitHub fine-grained token in URL path", async () => {
+    const fixture = await createFixture({
+      bundleOverrides: {
+        options: {
+          dataBaseUrl:
+            "https://assets.example.test/releases/github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ",
+        },
+      },
+    });
+    await assert.rejects(preparePagesArtifacts(fixture.options), /appears to contain a credential/);
+  });
   await t.test("query string", async () => {
     const fixture = await createFixture({
       bundleOverrides: { options: { dataBaseUrl: `${DATA_BASE_URL}?token=hidden` } },

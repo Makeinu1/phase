@@ -34,7 +34,7 @@ const HEADERS_PATH = path.join(
 const CARD_CORPUS_PATTERN = /^card-data-([0-9a-f]{16})\.json$/;
 const ENGINE_WASM_PATTERN = /^engine_wasm_bg-([0-9a-f]{16})\.wasm$/;
 const SECRET_LIKE_PATTERN =
-  /(?:\bAIza[0-9a-z_-]{35}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bsk[-_](?:(?:live|test)[-_])?[a-z0-9_-]{16,}\b|\bgh[pousr]_[a-z0-9]{20,}\b|\bxox[baprs]-[a-z0-9-]{10,}\b|\bglpat-[a-z0-9_-]{20,}\b|\beyj[a-z0-9_-]{16,}\.[a-z0-9_-]{8,}\.|(?:api[_-]?key|access[_-]?token|authorization|private[_-]?key|secret|password)\s*[:=])/i;
+  /(?:\bAIza[0-9a-z_-]{35}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bsk[-_](?:(?:live|test)[-_])?[a-z0-9_-]{16,}\b|\bgithub_pat_[a-z0-9_]{20,}\b|\bgh[pousr]_[a-z0-9]{20,}\b|\bxox[baprs]-[a-z0-9-]{10,}\b|\bglpat-[a-z0-9_-]{20,}\b|\beyj[a-z0-9_-]{16,}\.[a-z0-9_-]{8,}\.|(?:api[_-]?key|access[_-]?token|authorization|private[_-]?key|secret|password)\s*[:=])/i;
 
 function fail(message) {
   throw new Error(message);
