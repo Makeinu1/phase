@@ -1,6 +1,6 @@
 import { diagnosticIdFor, recordDiagnostic } from "../services/troubleshooting";
 import type { ConnectionDiagnosticError, ConnectionFailureSnapshot, PeerDiagnosticError, TurnCredentialFailure } from "../services/troubleshooting";
-import { createPeer, peerTransportFactory } from "./transport";
+import { createPeer, selectPeerTransportFactory } from "./transport";
 import type { PeerTransportFactory, TransportConnectOptions, TransportConnection, TransportPeer } from "./transport";
 
 /** Unambiguous characters -- no 0/O, 1/I/L confusion */
@@ -206,9 +206,9 @@ export function connectionFailureSnapshot(conn: TransportConnection): Connection
 /** Observe the public emitter before registration, including failed registration. */
 function createObservedPeer(
   side: "Host" | "Guest",
-  config: RTCConfiguration,
+  options: { config: RTCConfiguration },
+  transportFactory: PeerTransportFactory,
   id?: string,
-  transportFactory: PeerTransportFactory = peerTransportFactory,
 ): TransportPeer {
   const identity = {};
   let peerDiagnosticId = diagnosticIdFor(identity);
@@ -216,7 +216,7 @@ function createObservedPeer(
     recordDiagnostic({ kind: "signaling", peerDiagnosticId, observedAt: Date.now(), side, event, ...(error ? { error } : {}) });
   };
   let peer: TransportPeer;
-  try { peer = createPeer(id, { config }, transportFactory); }
+  try { peer = createPeer(id, options, transportFactory); }
   catch (error) { record("constructor-error", safePeerError(error)); throw error; }
   peerDiagnosticId = diagnosticIdFor(peer);
   record("created");
@@ -464,8 +464,8 @@ async function openHostPeer(
   peerId: string,
   roomCode: string,
   allowUnavailableIdRetry: boolean,
+  transportFactory: PeerTransportFactory,
   signal?: AbortSignal,
-  transportFactory: PeerTransportFactory = peerTransportFactory,
 ): Promise<TransportPeer> {
   const maxAttempts = allowUnavailableIdRetry
     ? UNAVAILABLE_ID_RETRY_BACKOFF_MS.length + 1
@@ -474,11 +474,12 @@ async function openHostPeer(
   // Fetch ICE config once up front so all retry attempts reuse it (and we don't
   // hit the credentials endpoint per attempt).
   const config = await getPeerConfig();
+  const peerOptions = { config };
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-    const peer = createObservedPeer("Host", config, peerId, transportFactory);
+    const peer = createObservedPeer("Host", peerOptions, transportFactory, peerId);
     traceP2P("Host", "create-peer", { roomCode, peerId, attempt });
 
     try {
@@ -558,9 +559,20 @@ export async function hostRoom(
   signal?: AbortSignal,
   options: HostRoomOptions = {},
 ): Promise<HostResult> {
-  const roomCode = options.preferredRoomCode ?? generateRoomCode();
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const preferredRoomCode = options.preferredRoomCode === undefined
+    ? undefined
+    : parseRoomCode(stripPeerIdPrefix(options.preferredRoomCode));
+  if (options.preferredRoomCode !== undefined && preferredRoomCode === null) {
+    throw new Error("Invalid room code");
+  }
+  const roomCode = preferredRoomCode ?? generateRoomCode();
   const peerId = PEER_ID_PREFIX + roomCode;
-  const isResume = options.preferredRoomCode !== undefined;
+  const isResume = preferredRoomCode !== undefined;
+  const transportFactory = selectPeerTransportFactory(
+    { role: "host", hostPeerId: peerId },
+    options.transportFactory,
+  );
 
   let destroyed = false;
   const guestHandlers = new Set<(conn: TransportConnection) => void>();
@@ -578,7 +590,7 @@ export async function hostRoom(
   // seconds after the prior host's TCP drops. Only resume gets the retry
   // — fresh hosts generate random codes so the collision would be
   // unrecoverable anyway.
-  const peer = await openHostPeer(peerId, roomCode, isResume, signal, options.transportFactory);
+  const peer = await openHostPeer(peerId, roomCode, isResume, transportFactory, signal);
   maintainSignaling(peer);
   traceP2P("Host", "peer-open-final", { peerId, roomCode });
 
@@ -663,17 +675,23 @@ export async function joinRoom(
   code: string,
   signal?: AbortSignal,
   timeoutMs = JOIN_CONNECT_TIMEOUT_MS,
-  transportFactory: PeerTransportFactory = peerTransportFactory,
+  transportFactory?: PeerTransportFactory,
 ): Promise<JoinResult> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const roomCode = parseRoomCode(stripPeerIdPrefix(code));
+  if (roomCode === null) throw new Error("Invalid room code");
+  const peerId = PEER_ID_PREFIX + roomCode;
+  const selectedFactory = selectPeerTransportFactory(
+    { role: "guest", hostPeerId: peerId },
+    transportFactory,
+  );
   const config = await getPeerConfig();
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Aborted", "AbortError"));
       return;
     }
-    const peer = createObservedPeer("Guest", config, undefined, transportFactory);
-    const peerId = PEER_ID_PREFIX + code;
+    const peer = createObservedPeer("Guest", { config }, selectedFactory);
     let opened = false;
     traceP2P("Guest", "create-peer", { code, peerId });
 

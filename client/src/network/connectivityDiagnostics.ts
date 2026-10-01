@@ -1,5 +1,5 @@
 import { connectionFailureSnapshot, fetchFreshTurnConfig, PEER_CONNECT_OPTIONS, safeConnectionError, safePeerError, TurnCredentialError } from "./connection";
-import { createPeer } from "./transport";
+import { createPeer, selectPeerTransportFactory } from "./transport";
 import type { TransportConnection, TransportPeer } from "./transport";
 import { boundedDiagnosticProbe, projectCandidateStats, type DiagnosticProbeEvidence, type DiagnosticResult } from "../services/troubleshooting";
 
@@ -71,8 +71,12 @@ export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<D
     let registered = 0;
     try {
       await stage<void>(SIGNALING_TIMEOUT_MS, (resolve, reject) => {
-        for (const id of ids) {
-          const peer = createPeer(id, { config: { ...config, iceTransportPolicy: "relay" } });
+        for (const [index, id] of ids.entries()) {
+          const factory = selectPeerTransportFactory({
+            role: index === 0 ? "guest" : "host",
+            hostPeerId: ids[1],
+          });
+          const peer = createPeer(id, { config: { ...config, iceTransportPolicy: "relay" } }, factory);
           peers.push(peer);
           const onError = (error: unknown) => {
             const type = safePeerError(error);
