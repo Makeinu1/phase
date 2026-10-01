@@ -1,0 +1,61 @@
+# OneDeck runs as a separate Worker with its own LobbyDO and SignalDO
+# namespaces. Its bindings and SQLite migrations do not share official lobby
+# state or credentials.
+
+name = "onedeck-lobby"
+main = "src/onedeck.ts"
+compatibility_date = "2026-05-01"
+
+# Keep the broker-WASM build and watch inputs aligned with the shared Worker.
+# This command is for Wrangler's normal build path; the offline profile tests do
+# not run it or import generated broker output.
+[build]
+command = "bash ../scripts/build-broker-wasm.sh release"
+watch_dir = [
+  "broker-wasm/src",
+  "broker-wasm/Cargo.toml",
+  "broker-wasm/Cargo.lock",
+  "broker-wasm/.cargo/config.toml",
+  "../crates/lobby-broker/src",
+  "../crates/lobby-broker/Cargo.toml",
+  "../crates/engine/src",
+  "../crates/engine/Cargo.toml",
+  "../Cargo.toml",
+  "../.cargo/config.toml",
+  "../scripts/build-broker-wasm.sh",
+]
+
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "LobbyDO"
+
+[[durable_objects.bindings]]
+name = "SIGNAL"
+class_name = "SignalDO"
+
+# SQLite namespaces are isolated to this script. Preserve the LobbyDO migration
+# before adding the SignalDO class in the second migration.
+[[migrations]]
+tag = "onedeck-v1"
+new_sqlite_classes = ["LobbyDO"]
+
+[[migrations]]
+tag = "onedeck-v2"
+new_sqlite_classes = ["SignalDO"]
+
+# This per-IP limit throttles TURN minting; it is not an authentication or
+# spending boundary. Namespace 1007 is distinct from the official 1005/1006;
+# account-wide uniqueness remains a deployment-review check.
+[[ratelimits]]
+name = "TURN_LIMIT"
+namespace_id = "1007"
+simple = { limit = 30, period = 60 }
+
+[vars]
+# TTL is preparation for the shared TURN handler, not a validated credential
+# lifetime or spend control. The secret token is supplied out of band.
+TURN_TTL_SECONDS = "86400"
+
+# Exact browser Origin filtering narrows exposure only; it is not
+# authentication or a cost cap.
+ALLOWED_ORIGINS = "https://onedeck-play.pages.dev"
