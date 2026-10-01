@@ -142,6 +142,7 @@ interface FakeTransportPeerHandle {
   connections: Array<{ peerId: string; options: unknown; emit: (event: string, value?: unknown) => void }>;
   emit: (event: string, value?: unknown) => void;
   destroy: ReturnType<typeof vi.fn>;
+  reconnect: ReturnType<typeof vi.fn>;
 }
 
 interface FakeTransportCreation {
@@ -179,7 +180,7 @@ function makeFakeTransportFactory(creations: FakeTransportCreation[]): PeerTrans
           return connection;
         }),
         destroy: undefined,
-        reconnect: vi.fn(),
+        reconnect: undefined,
         on: (event: string, handler: FakeTransportHandler) => { peerEvents.on(event, handler); return peer; },
         once: (event: string, handler: FakeTransportHandler) => { peerEvents.once(event, handler); return peer; },
         off: (event: string, handler: FakeTransportHandler) => { peerEvents.off(event, handler); return peer; },
@@ -189,7 +190,9 @@ function makeFakeTransportFactory(creations: FakeTransportCreation[]): PeerTrans
         peerEvents.emit("close");
         peerEvents.clear();
       });
+      const reconnect = vi.fn(() => { peer.disconnected = false; });
       peer.destroy = destroy;
+      peer.reconnect = reconnect;
       const handle: FakeTransportPeerHandle = {
         peer: peer as unknown as TransportPeer,
         connections,
@@ -199,6 +202,7 @@ function makeFakeTransportFactory(creations: FakeTransportCreation[]): PeerTrans
           peerEvents.emit(event, value);
         },
         destroy,
+        reconnect,
       };
       creations.push({ id, options, handle });
       return handle.peer;
@@ -535,11 +539,28 @@ describe("bootstrap transport selector integration", () => {
     guestCreations[0].handle.connections[0].emit("open");
     const joined = await joining;
 
+    hostCreations[0].handle.emit("disconnected");
+    guestCreations[0].handle.emit("disconnected");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(hostCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
+    expect(guestCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
+    expect(hostCreations).toHaveLength(1);
+    expect(guestCreations).toHaveLength(1);
+    expect(guestCreations[0].handle.connections).toHaveLength(1);
+    expect(contexts).toHaveLength(2);
+
+    // Pending recovery timers are owned by the existing peers and disappear
+    // when both sessions are destroyed.
+    hostCreations[0].handle.emit("disconnected");
+    guestCreations[0].handle.emit("disconnected");
+
     host.destroy();
     joined.destroyPeer();
     expect(hostCreations[0].handle.destroy).toHaveBeenCalledTimes(1);
     expect(guestCreations[0].handle.destroy).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(hostCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
+    expect(guestCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 

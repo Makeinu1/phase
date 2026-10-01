@@ -8,6 +8,13 @@ const CREDENTIAL_TIMEOUT_MS = 8_000;
 const SIGNALING_TIMEOUT_MS = 10_000;
 const RELAY_TIMEOUT_MS = 15_000;
 
+class DiagnosticStageTimeout extends Error {
+  constructor() {
+    super("timeout");
+    this.name = "DiagnosticStageTimeout";
+  }
+}
+
 /** An isolated PeerJS/BinaryPack round trip, using the game's signaling defaults. */
 export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<DiagnosticResult[]> {
   signal.throwIfAborted();
@@ -56,7 +63,7 @@ export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<D
     let finished = false;
     const finish = (done: () => void) => { if (finished || stopped) return; finished = true; clearTimeout(timer); done(); };
     failStage = (error) => finish(() => reject(error));
-    timer = setTimeout(() => failStage(new Error("timeout")), timeoutMs);
+    timer = setTimeout(() => failStage(new DiagnosticStageTimeout()), timeoutMs);
     try { signal.throwIfAborted(); start((value) => finish(() => resolve(value)), failStage); }
     catch (error) { failStage(error); }
   });
@@ -100,7 +107,7 @@ export async function runConnectivityDiagnostics(signal: AbortSignal): Promise<D
       add("signaling", "pass", "signalingReady", signalingStarted);
     } catch (error) {
       signal.throwIfAborted();
-      add("signaling", "error", registered < 2 && !signalingFailure && error instanceof Error && error.message === "timeout" ? "signalingTimeout" : "signalingFailed", signalingStarted, { peerError: signalingFailure ?? safePeerError(error) });
+      add("signaling", "error", registered < 2 && !signalingFailure && error instanceof DiagnosticStageTimeout ? "signalingTimeout" : "signalingFailed", signalingStarted, { peerError: signalingFailure ?? safePeerError(error) });
       add("relay", "unavailable", "prerequisiteFailed", Date.now());
       return results;
     }

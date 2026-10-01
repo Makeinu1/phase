@@ -216,7 +216,7 @@ it("contains a selector failure as signaling failure and cleans an earlier selec
     }),
   };
   const selector = vi.fn((context: { role: "guest" | "host" }) => {
-    if (context.role === "host") throw new Error("SECRET selector failure");
+    if (context.role === "host") throw new Error("timeout");
     return factory;
   });
   transport.installPeerTransportSelector(selector);
