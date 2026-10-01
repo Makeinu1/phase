@@ -231,6 +231,7 @@ test("refuses to strip present JSON referenced by supported local bundle literal
   const references = [
     ["bare filename with query", "card-names.json?cache=1"],
     ["relative path with query", "../card-names.json?cache=1"],
+    ["relative path normalized at root", "../../card-names.json?cache=1"],
     ["root-relative path", "/card-names.json#local"],
     ["percent-decoded path", "./%63ard-names%2Ejson?raw=1"],
   ];

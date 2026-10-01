@@ -413,10 +413,13 @@ function localReferenceCandidates(literal, bundlePath) {
     }
   };
 
-  const rootRelative = decodedPath.startsWith("/") ? decodedPath.slice(1) : decodedPath;
-  addCandidate(rootRelative);
+  const rootResolved = path.posix.normalize(path.posix.join("/", decodedPath)).slice(1);
+  addCandidate(rootResolved);
   if (!decodedPath.startsWith("/")) {
-    addCandidate(path.posix.join(path.posix.dirname(bundlePath), decodedPath));
+    const bundleResolved = path.posix
+      .normalize(path.posix.join("/", path.posix.dirname(bundlePath), decodedPath))
+      .slice(1);
+    addCandidate(bundleResolved);
   }
   return [...candidates];
 }
