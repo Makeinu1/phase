@@ -564,6 +564,52 @@ describe("bootstrap transport selector integration", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("preserves compound draft IDs and passes their exact prefixed host ID to selection", async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    const transport = await import("../transport");
+    const connection = await import("../connection");
+    const hostCreations: FakeTransportCreation[] = [];
+    const guestCreations: FakeTransportCreation[] = [];
+    const hostFactory = makeFakeTransportFactory(hostCreations);
+    const guestFactory = makeFakeTransportFactory(guestCreations);
+    const contexts: Array<{ role: "host" | "guest"; hostPeerId: string }> = [];
+    const roomCode = "Draft-commander-aBc123ef";
+    const hostPeerId = `phase2-${roomCode}`;
+    vi.stubGlobal("fetch", vi.fn(async () => turnResponse()));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    transport.installPeerTransportSelector((context) => {
+      contexts.push(context);
+      return context.role === "host" ? hostFactory : guestFactory;
+    });
+
+    const hosting = connection.hostRoom(undefined, { preferredRoomCode: roomCode });
+    const joining = connection.joinRoom(roomCode);
+    expect(contexts).toEqual([
+      { role: "host", hostPeerId },
+      { role: "guest", hostPeerId },
+    ]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostCreations).toHaveLength(1);
+    expect(hostCreations[0].id).toBe(hostPeerId);
+    expect(guestCreations).toHaveLength(1);
+
+    hostCreations[0].handle.emit("open");
+    const host = await hosting;
+    guestCreations[0].handle.emit("open");
+    expect(guestCreations[0].handle.connections[0].peerId).toBe(hostPeerId);
+    guestCreations[0].handle.connections[0].emit("open");
+    const guest = await joining;
+
+    host.destroy();
+    guest.destroyPeer();
+    expect(contexts).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("selects once before ICE and reuses the exact factory, host ID and options across retries", async () => {
     vi.resetModules();
     vi.useFakeTimers();
@@ -609,8 +655,8 @@ describe("bootstrap transport selector integration", () => {
     controller.abort();
     await expect(connection.joinRoom("ABCDE", controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     await expect(connection.hostRoom(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
-    await expect(connection.joinRoom("not-a-room")).rejects.toThrow("Invalid room code");
-    await expect(connection.hostRoom(undefined, { preferredRoomCode: "not-a-room" })).rejects.toThrow("Invalid room code");
+    await expect(connection.joinRoom("")).rejects.toThrow("Invalid room code");
+    await expect(connection.hostRoom(undefined, { preferredRoomCode: "" })).rejects.toThrow("Invalid room code");
 
     const overrideCreations: FakeTransportCreation[] = [];
     const override = makeFakeTransportFactory(overrideCreations);

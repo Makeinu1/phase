@@ -429,6 +429,16 @@ export function parseRoomCode(input: string): string | null {
   return code;
 }
 
+/**
+ * Normalize either a user-facing five-character code or a caller-supplied
+ * transport identifier. Draft matches use compound, case-sensitive IDs.
+ */
+function normalizeRoomIdentifier(input: string): string | null {
+  const identifier = stripPeerIdPrefix(input);
+  if (!identifier.trim()) return null;
+  return parseRoomCode(identifier) ?? identifier;
+}
+
 export interface HostRoomOptions {
   /**
    * Reuse a specific room code instead of generating a random one. Used
@@ -562,7 +572,7 @@ export async function hostRoom(
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const preferredRoomCode = options.preferredRoomCode === undefined
     ? undefined
-    : parseRoomCode(stripPeerIdPrefix(options.preferredRoomCode));
+    : normalizeRoomIdentifier(options.preferredRoomCode);
   if (options.preferredRoomCode !== undefined && preferredRoomCode === null) {
     throw new Error("Invalid room code");
   }
@@ -678,7 +688,7 @@ export async function joinRoom(
   transportFactory?: PeerTransportFactory,
 ): Promise<JoinResult> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-  const roomCode = parseRoomCode(stripPeerIdPrefix(code));
+  const roomCode = normalizeRoomIdentifier(code);
   if (roomCode === null) throw new Error("Invalid room code");
   const peerId = PEER_ID_PREFIX + roomCode;
   const selectedFactory = selectPeerTransportFactory(
