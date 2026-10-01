@@ -73,9 +73,14 @@ local WASM `byteVerification` result or clear deployment-readiness blockers.
 
 ## What is copied and removed
 
-The preparer requires `index.html`, every logical JSON listed in the pinned
-root `data-files.json` (either its identity file or a valid Brotli companion),
-and the configured content-addressed card corpus. It copies the pinned
+The preparer requires `index.html`. For each logical JSON in the pinned
+`data-files.json` and the configured content-addressed card corpus, it validates
+any identity file or Brotli companion that is present. When neither local
+representation is present, it still prepares the shell and reports null local
+byte/hash evidence with `UNVERIFIED_ABSENT`; deployment readiness remains
+blocked with the missing object names listed. This matches the pinned Pages
+workflow, which builds with external asset URLs and removes optional local
+copies with `rm -f`. It copies the pinned
 `client/deploy/cloudflare-pages/_headers` into the new tree. An input `_headers`
 is accepted only when it is byte-identical to that source.
 
@@ -92,6 +97,15 @@ files in nested directories. A distinct `404.html` stops preparation for an
 explicit routing decision. When top-level `404.html` is absent, Cloudflare
 Pages uses its SPA fallback behavior; GitHub Pages routing behavior is
 different. The preparer does not create a replacement 404 page.
+
+Before removing a present source file, the preparer scans emitted JavaScript
+string literals for supported local JSON paths: bare filenames, root-relative
+and relative paths, optional query or fragment suffixes, and percent-encoded
+path characters. If a literal can resolve to a root source being removed, the
+preparer fails and names the bundle and source path. This is a bounded static
+check, not a JavaScript parser. Remote URLs are handled as bundle evidence;
+tree-shaken or templated locale URLs are not required to appear as literals,
+and their correspondence remains unproven when evidence is incomplete.
 
 For a Brotli companion, the report records its compressed-byte size and SHA-256
 separately from the decoded-content size and SHA-256. The intended public

@@ -37,9 +37,10 @@ const roots = new Set();
 async function createFixture({
   bundleOverrides = {},
   includePlainCardData = true,
+  includeHashedCardCorpus = true,
   includeConfiguredEngine = false,
   localWasmReference = false,
-  includeAllManifestFiles = true,
+  includeManifestFiles = true,
   baseDirectory,
 } = {}) {
   const root = baseDirectory ?? (await mkdtemp(path.join(os.tmpdir(), "pages-prep-test-")));
@@ -53,11 +54,11 @@ async function createFixture({
   );
 
   for (const filename of DATA_FILES) {
-    if (!includeAllManifestFiles && filename === DATA_FILES[0]) continue;
+    if (!includeManifestFiles) continue;
     await writeFile(path.join(inputDir, filename), JSON.stringify({ fixture: filename }));
   }
 
-  await writeFile(path.join(inputDir, CARD_FILENAME), CARD_BYTES);
+  if (includeHashedCardCorpus) await writeFile(path.join(inputDir, CARD_FILENAME), CARD_BYTES);
   if (includePlainCardData) await writeFile(path.join(inputDir, "card-data.json"), CARD_BYTES);
 
   if (includeConfiguredEngine) {
@@ -189,13 +190,69 @@ test("rejects a 16-hex card-data name whose bytes are not content-addressed by t
   await assert.rejects(readFile(fixture.outputDir), { code: "ENOENT" });
 });
 
-test("requires every manifest source or Brotli companion", async () => {
-  const fixture = await createFixture({ includeAllManifestFiles: false });
-  await assert.rejects(
-    preparePagesArtifacts(fixture.options),
-    new RegExp(`required build input is missing: ${DATA_FILES[0]}`),
-  );
-  await assert.rejects(readFile(fixture.outputDir), { code: "ENOENT" });
+test("prepares the Pages shell with missing manifest JSON marked unverified absent", async () => {
+  const fixture = await createFixture();
+  await rm(path.join(fixture.inputDir, DATA_FILES[0]));
+  const before = await snapshotTree(fixture.inputDir);
+  const report = await preparePagesArtifacts(fixture.options);
+  const missing = report.publicObjects.find((object) => object.key === DATA_FILES[0]);
+  assert.equal(missing.encodedBytesStatus, "UNVERIFIED_ABSENT");
+  assert.equal(missing.sourcePath, null);
+  assert.equal(missing.encodedBytes, null);
+  assert.equal(missing.encodedBytesSha256, null);
+  assert.equal(missing.decodedBytes, null);
+  assert.equal(missing.decodedContentSha256, null);
+  assert.deepEqual(missing.sourceArtifacts, []);
+  assert.ok(report.deploymentReadiness.blockers.some((blocker) => blocker.includes(DATA_FILES[0])));
+  assert.deepEqual(await snapshotTree(fixture.inputDir), before);
+});
+
+test("prepares a realistic shell-only input and reports absent external JSON evidence", async () => {
+  const fixture = await createFixture({
+    includeManifestFiles: false,
+    includePlainCardData: false,
+    includeHashedCardCorpus: false,
+  });
+  const before = await snapshotTree(fixture.inputDir);
+  const report = await preparePagesArtifacts(fixture.options);
+  assert.equal(report.artifactPreparation, "PASS");
+  assert.deepEqual(report.removedFromPages, []);
+  assert.equal(report.offloadedSources.length, 0);
+  assert.equal(report.publicObjects.length, DATA_FILES.length + 1);
+  assert.ok(report.publicObjects.every((object) => object.encodedBytesStatus === "UNVERIFIED_ABSENT"));
+  assert.ok(report.publicObjects.every((object) => object.encodedBytes === null && object.decodedContentSha256 === null));
+  assert.ok(report.deploymentReadiness.blockers.some((blocker) => blocker.includes("externally configured JSON objects are absent locally")));
+  assert.deepEqual(await snapshotTree(fixture.inputDir), before);
+  const outputPaths = new Set((await snapshotTree(fixture.outputDir)).map((entry) => entry.path));
+  assert.deepEqual([...outputPaths].sort(), ["_headers", "assets/app.js", "index.html"]);
+});
+
+test("refuses to strip present JSON referenced by supported local bundle literals", async (t) => {
+  const references = [
+    ["bare filename with query", "card-names.json?cache=1"],
+    ["relative path with query", "../card-names.json?cache=1"],
+    ["root-relative path", "/card-names.json#local"],
+    ["percent-decoded path", "./%63ard-names%2Ejson?raw=1"],
+  ];
+  for (const [label, localReference] of references) {
+    await t.test(label, async () => {
+      const fixture = await createFixture({
+        bundleOverrides: {
+          bundle: [
+            ...DATA_FILES.map((filename) => `${DATA_BASE_URL}/${filename}`),
+            CONFIG.cardDataUrl,
+            CONFIG.engineWasmUrl,
+            localReference,
+          ],
+        },
+      });
+      await assert.rejects(
+        preparePagesArtifacts(fixture.options),
+        /local JavaScript reference to offloaded artifact card-names\.json/,
+      );
+      await assert.rejects(readFile(fixture.outputDir), { code: "ENOENT" });
+    });
+  }
 });
 
 test("rejects a missing index.html", async () => {

@@ -381,6 +381,62 @@ function isUrlOrPath(value) {
   );
 }
 
+function localReferenceCandidates(literal, bundlePath) {
+  const value = normalizeJavaScriptString(literal);
+  if (
+    !value ||
+    value.startsWith("//") ||
+    /^[a-z][a-z\d+.-]*:/i.test(value)
+  ) {
+    return [];
+  }
+
+  const rawPath = value.split(/[?#]/, 1)[0];
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(rawPath);
+  } catch {
+    return [];
+  }
+  if (!decodedPath || decodedPath.includes("\\")) return [];
+
+  const candidates = new Set();
+  const addCandidate = (candidate) => {
+    const normalized = path.posix.normalize(candidate);
+    if (
+      normalized !== "." &&
+      normalized !== ".." &&
+      !normalized.startsWith("../") &&
+      !normalized.startsWith("/")
+    ) {
+      candidates.add(normalized);
+    }
+  };
+
+  const rootRelative = decodedPath.startsWith("/") ? decodedPath.slice(1) : decodedPath;
+  addCandidate(rootRelative);
+  if (!decodedPath.startsWith("/")) {
+    addCandidate(path.posix.join(path.posix.dirname(bundlePath), decodedPath));
+  }
+  return [...candidates];
+}
+
+async function assertNoLocalReferencesToRemovedArtifacts(inputFiles, removedPaths) {
+  if (removedPaths.length === 0) return;
+  const removed = new Set(removedPaths);
+  const bundles = inputFiles.filter((entry) => /\.(?:js|mjs|cjs)$/.test(entry.path));
+  for (const bundle of bundles) {
+    const literals = extractStringLiterals(await readFile(bundle.absolutePath, "utf8"));
+    for (const literal of literals) {
+      for (const candidate of localReferenceCandidates(literal, bundle.path)) {
+        if (removed.has(candidate)) {
+          fail(`local JavaScript reference to offloaded artifact ${candidate} in ${bundle.path}; refusing to strip it`);
+        }
+      }
+    }
+  }
+}
+
 async function inspectBundleEvidence(inputFiles, manifestNames, config) {
   const bundles = inputFiles.filter((entry) => /\.(?:js|mjs|cjs)$/.test(entry.path));
   const literals = [];
@@ -518,26 +574,26 @@ function sourcePair(index, filename) {
 }
 
 async function validateLogicalSource(index, filename) {
-  const pair = sourcePair(index, filename);
-  if (!pair.identity && !pair.brotli) {
+  const validated = await validateOptionalLogicalSource(index, filename);
+  if (!validated) {
     fail(`required build input is missing: ${filename} (or ${filename}.br)`);
   }
-  const identityInfo = pair.identity ? await artifactInfo(pair.identity) : null;
-  const brotliInfo = pair.brotli ? await artifactInfo(pair.brotli) : null;
+  return validated;
+}
 
-  if (
-    identityInfo &&
-    brotliInfo &&
-    (identityInfo.decodedBytes !== brotliInfo.decodedBytes ||
-      identityInfo.decodedContentSha256 !== brotliInfo.decodedContentSha256)
-  ) {
-    fail(`Brotli companion does not decode to ${filename}`);
-  }
-
-  const selected = brotliInfo ?? identityInfo;
+function unverifiedAbsentLogicalObject(key, publicUrl) {
   return {
-    sourceArtifacts: [identityInfo, brotliInfo].filter(Boolean),
-    selected,
+    key,
+    publicUrl,
+    expectedContentEncoding: "br",
+    sourceRepresentation: null,
+    sourcePath: null,
+    encodedBytes: null,
+    encodedBytesSha256: null,
+    encodedBytesStatus: "UNVERIFIED_ABSENT",
+    decodedBytes: null,
+    decodedContentSha256: null,
+    sourceArtifacts: [],
   };
 }
 
@@ -545,9 +601,18 @@ async function inspectOffloadedSources(index, manifestNames, config) {
   const logicalObjects = [];
   const removed = new Set();
   const sourceArtifacts = [];
+  const unverifiedAbsent = [];
 
   for (const filename of manifestNames) {
-    const { sourceArtifacts: sources, selected } = await validateLogicalSource(index, filename);
+    const validated = await validateOptionalLogicalSource(index, filename);
+    if (!validated) {
+      logicalObjects.push(
+        unverifiedAbsentLogicalObject(filename, appendViteFilename(config.dataBaseUrl, filename)),
+      );
+      unverifiedAbsent.push(filename);
+      continue;
+    }
+    const { sourceArtifacts: sources, selected } = validated;
     sourceArtifacts.push(...sources);
     if (index.has(filename)) removed.add(filename);
     if (index.has(`${filename}.br`)) removed.add(`${filename}.br`);
@@ -624,8 +689,12 @@ async function inspectOffloadedSources(index, manifestNames, config) {
     });
   }
 
-  if (!hashedNames.has(config.cardFilename.replace(/\.json$/, ""))) {
-    fail(`configured CARD_DATA_URL source is missing from the build: ${config.cardFilename}`);
+  const configuredCorpusName = config.cardFilename.replace(/\.json$/, "");
+  if (!hashedNames.has(configuredCorpusName)) {
+    if (!manifestNames.includes(config.cardFilename)) {
+      logicalObjects.push(unverifiedAbsentLogicalObject(config.cardFilename, config.cardDataUrl));
+    }
+    unverifiedAbsent.push(config.cardFilename);
   }
 
   if (plainCard && hashedNames.has(config.cardFilename.replace(/\.json$/, ""))) {
@@ -642,6 +711,7 @@ async function inspectOffloadedSources(index, manifestNames, config) {
     logicalObjects: logicalObjects.sort((left, right) => compareStrings(left.key, right.key)),
     removed: [...removed].sort(compareStrings),
     sourceArtifacts: sourceArtifacts.sort((left, right) => compareStrings(left.path, right.path)),
+    unverifiedAbsent: [...new Set(unverifiedAbsent)].sort(compareStrings),
   };
 }
 
@@ -835,8 +905,9 @@ export async function preparePagesArtifacts({
     }
   }
 
-  const bundleEvidence = await inspectBundleEvidence(inputFiles, manifestNames, config);
   const offloaded = await inspectOffloadedSources(inputIndex, manifestNames, config);
+  await assertNoLocalReferencesToRemovedArtifacts(inputFiles, offloaded.removed);
+  const bundleEvidence = await inspectBundleEvidence(inputFiles, manifestNames, config);
   for (const omitted of offloaded.removed) omittedPaths.add(omitted);
   const wasm = await inspectWasm(inputFiles, inputIndex, config);
 
@@ -847,6 +918,11 @@ export async function preparePagesArtifacts({
   if (!urlEvidenceProven(bundleEvidence)) blockers.push("one or more supplied build URL values are not fully observable in the input JavaScript bundles");
   blockers.push("an operator must verify public URL ownership, object-key routing, and the serving Content-Encoding");
   if (!localEngineVerified) blockers.push("configured external engine WASM bytes are absent, so their byte hash and URL correspondence are unverified");
+  if (offloaded.unverifiedAbsent.length > 0) {
+    blockers.push(
+      `externally configured JSON objects are absent locally, so their byte and content hashes are unverified: ${offloaded.unverifiedAbsent.join(", ")}`,
+    );
+  }
 
   const removedArtifacts = offloaded.sourceArtifacts.map((source) => ({ ...source }));
   removedArtifacts.sort((left, right) => compareStrings(left.path, right.path));
