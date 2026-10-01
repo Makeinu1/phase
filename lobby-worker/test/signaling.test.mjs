@@ -363,6 +363,40 @@ test("deduplicates offers and answers, isolates owners, and closes before a fres
   });
 });
 
+test("host close removes a live route once and leaves other guest routes usable", async () => {
+  await withPlatform(({ open, signal }) => {
+    const host = open("host_14", "host_14", "host");
+    const guest1 = open("host_14", "guest_101");
+    const guest2 = open("host_14", "guest_102");
+    guest1.socket.message(JSON.stringify(offer("conn_host_close")));
+    guest2.socket.message(JSON.stringify(offer("conn_other_live")));
+    const guest1Count = guest1.socket.sent.length;
+    const guest2Count = guest2.socket.sent.length;
+
+    host.socket.message(JSON.stringify({ type: "close", connectionId: "conn_host_close" }));
+    assert.deepEqual(messages(guest1.socket).at(-1), {
+      type: "close",
+      connectionId: "conn_host_close",
+    });
+    assert.equal(guest1.socket.sent.length, guest1Count + 1);
+    assert.equal(guest2.socket.sent.length, guest2Count);
+    assert.equal(signal.routes.size, 1);
+
+    host.socket.message(JSON.stringify({ type: "close", connectionId: "conn_host_close" }));
+    guest1.socket.message(JSON.stringify(ice("conn_host_close", "retired")));
+    assert.equal(guest1.socket.sent.length, guest1Count + 1);
+    assert.equal(signal.routes.size, 1);
+
+    guest2.socket.message(JSON.stringify(ice("conn_other_live", "still-live")));
+    assert.deepEqual(messages(host.socket).at(-1), {
+      type: "ice",
+      connectionId: "conn_other_live",
+      candidate: { candidate: "still-live" },
+      peer: "guest_102",
+    });
+  });
+});
+
 test("counts duplicate and malformed frames before cleanup", async () => {
   await withPlatform(({ open, signal }) => {
     const host = open("host_13", "host_13", "host");
@@ -514,7 +548,7 @@ test("rejects an incoming frame whose injected guest peer would exceed the byte 
 });
 
 test("enforces the 20-frame burst and refills at exactly 10 frames per second", async () => {
-  await withPlatform(({ open, signal, advance }) => {
+  await withPlatform(({ open, signal }) => {
     const host = open("host_08", "host_08", "host");
     const guest = open("host_08", "guest_71");
     const observer = open("host_08", "guest_72");
@@ -538,9 +572,35 @@ test("enforces the 20-frame burst and refills at exactly 10 frames per second", 
     for (let frame = 0; frame < 20; frame += 1) {
       guest.socket.message(JSON.stringify(ice("unknown_03")));
     }
-    advance(100);
+    advance(99);
     guest.socket.message(JSON.stringify(ice("unknown_03")));
+    assert.equal(guest.socket.closeCalls.at(-1).code, 1013);
+  });
+
+  await withPlatform(({ open, advance }) => {
+    const guest = open("host_15", "guest_74");
+    for (let frame = 0; frame < 20; frame += 1) {
+      guest.socket.message(JSON.stringify(ice("unknown_05")));
+    }
+    advance(100);
+    guest.socket.message(JSON.stringify(ice("unknown_05")));
     assert.equal(guest.socket.closeCalls.length, 0);
+    guest.socket.message(JSON.stringify(ice("unknown_05")));
+    assert.equal(guest.socket.closeCalls.at(-1).code, 1013);
+  });
+
+  await withPlatform(({ open, advance }) => {
+    const guest = open("host_16", "guest_75");
+    for (let frame = 0; frame < 20; frame += 1) {
+      guest.socket.message(JSON.stringify(ice("unknown_06")));
+    }
+    advance(10_000);
+    for (let frame = 0; frame < 20; frame += 1) {
+      guest.socket.message(JSON.stringify(ice("unknown_06")));
+    }
+    assert.equal(guest.socket.closeCalls.length, 0);
+    guest.socket.message(JSON.stringify(ice("unknown_06")));
+    assert.equal(guest.socket.closeCalls.at(-1).code, 1013);
   });
 });
 
