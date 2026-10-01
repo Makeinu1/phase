@@ -555,6 +555,16 @@ test("CLI emits the same deterministic report as the module API", async () => {
 });
 
 test("rejects secret-bearing and non-HTTPS URL configuration", async (t) => {
+  await t.test("Stripe-style secret in URL path", async () => {
+    const fixture = await createFixture({
+      bundleOverrides: {
+        options: {
+          dataBaseUrl: "https://assets.example.test/releases/sk_live_12345678901234567890",
+        },
+      },
+    });
+    await assert.rejects(preparePagesArtifacts(fixture.options), /appears to contain a credential/);
+  });
   await t.test("query string", async () => {
     const fixture = await createFixture({
       bundleOverrides: { options: { dataBaseUrl: `${DATA_BASE_URL}?token=hidden` } },
