@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -43,7 +43,7 @@ async function createFixture({
   includeManifestFiles = true,
   baseDirectory,
 } = {}) {
-  const root = baseDirectory ?? (await mkdtemp(path.join(os.tmpdir(), "pages-prep-test-")));
+  const root = baseDirectory ?? (await mkdtemp(path.join(await realpath(os.tmpdir()), "pages-prep-test-")));
   roots.add(root);
   const inputDir = path.join(root, "input");
   const outputDir = path.join(root, "output");
@@ -584,7 +584,7 @@ test("produces path-independent deterministic reports and preserves source input
   const firstAfter = await snapshotTree(first.inputDir);
   assert.deepEqual(firstAfter, firstBefore);
 
-  const secondRoot = await mkdtemp(path.join(os.tmpdir(), "pages-prep-other-path-"));
+  const secondRoot = await mkdtemp(path.join(await realpath(os.tmpdir()), "pages-prep-other-path-"));
   roots.add(secondRoot);
   const second = await createFixture({ baseDirectory: secondRoot });
   const secondReport = await preparePagesArtifacts(second.options);
