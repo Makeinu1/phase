@@ -278,14 +278,17 @@ fn resolved_grizzly_bears_restore_returns_to_the_precast_priority_boundary() {
 fn collected_conjuring_decline_restore_recovers_the_precast_state_and_rng() {
     let mut scenario = GameScenario::new_n_player(2, 0x32_95_03);
     scenario.at_phase(Phase::PreCombatMain);
-    let mountains: Vec<_> = (0..5)
-        .map(|_| scenario.add_basic_land(P0, ManaColor::Red))
-        .collect();
+    let payment_lands = [
+        scenario.add_basic_land(P0, ManaColor::Red),
+        scenario.add_basic_land(P0, ManaColor::Red),
+        scenario.add_basic_land(P0, ManaColor::Blue),
+        scenario.add_basic_land(P0, ManaColor::Green),
+    ];
     let conjuring = scenario
         .add_spell_to_hand_from_oracle(P0, "Collected Conjuring", false, COLLECTED_CONJURING)
         .with_mana_cost(ManaCost::Cost {
-            generic: 3,
-            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 2,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Red],
         })
         .id();
 
@@ -326,7 +329,7 @@ fn collected_conjuring_decline_restore_recovers_the_precast_state_and_rng() {
     let (json, rng_pos, expected_next_rng) = trusted_json_at_priority(&precast);
     let mut committed = runner.cast(conjuring).commit();
     assert_eq!(committed.state().objects[&conjuring].zone, Zone::Stack);
-    assert!(mountains
+    assert!(payment_lands
         .iter()
         .all(|id| committed.state().objects[id].tapped));
     committed
@@ -400,11 +403,11 @@ fn collected_conjuring_decline_restore_recovers_the_precast_state_and_rng() {
         Zone::Library,
         "the restored object zone agrees with Preordain's library membership"
     );
-    for id in mountains {
+    for id in payment_lands {
         assert_eq!(restored.objects[&id].zone, Zone::Battlefield);
         assert!(
             !restored.objects[&id].tapped,
-            "the trusted pre-cast restore returns the payment Mountains untapped"
+            "the trusted pre-cast restore returns every payment land untapped"
         );
     }
     assert_eq!(
