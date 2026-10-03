@@ -7,6 +7,8 @@ import { AdapterError, AdapterErrorCode, nextSnapshotSeq } from "../../../adapte
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
+import { useKeyboardShortcuts } from "../../../hooks/useKeyboardShortcuts.ts";
 import { buildEngineAdapterMock } from "../../../test/factories/engineAdapterFactory.ts";
 import {
   buildFormatConfig,
@@ -110,6 +112,11 @@ function makeHarness(gameId = "sandbox-life-correction-test"): Harness {
     },
     currentEngineState: () => engineState,
   };
+}
+
+function GameKeyboardShortcutsHarness() {
+  useKeyboardShortcuts();
+  return null;
 }
 
 function openPanel() {
@@ -495,6 +502,103 @@ describe("SandboxLifeCorrection", () => {
     expect(screen.getByRole("status")).toHaveFocus();
     expect(useGameStore.getState().gameState?.players[0]?.life).toBe(20);
     expect(harness.adapter.submitAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps native Enter and Space activation local while global shortcuts are mounted at priority", async () => {
+    const harness = makeHarness();
+    expect(useGameStore.getState().waitingFor?.type).toBe("Priority");
+    const user = userEvent.setup();
+    render(
+      <>
+        <GameKeyboardShortcutsHarness />
+        <SandboxLifeCorrection />
+      </>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Life correction" });
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    const firstDialog = await screen.findByRole("dialog", { name: "Sandbox life correction" });
+    expect(firstDialog).toHaveFocus();
+    expect(harness.adapter.submitAction).not.toHaveBeenCalled();
+
+    act(() => useUiStore.setState({ selectedCardIds: [10] }));
+    await user.keyboard("{Escape}");
+    expect(useUiStore.getState().selectedCardIds).toEqual([]);
+    expect(firstDialog).toBeInTheDocument();
+
+    await user.tab();
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    expect(cancel).toHaveFocus();
+    await user.keyboard(" ");
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(harness.adapter.submitAction).not.toHaveBeenCalled();
+
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("dialog", { name: "Sandbox life correction" })).toHaveFocus();
+    await user.tab();
+    const secondCancel = screen.getByRole("button", { name: "Cancel" });
+    expect(secondCancel).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole("combobox", { name: "Player" })).toHaveFocus();
+    await user.tab();
+    const lifeInput = screen.getByRole("spinbutton", { name: "New life total" });
+    expect(lifeInput).toHaveFocus();
+    await user.clear(lifeInput);
+    await user.type(lifeInput, "21");
+    await user.tab();
+    const apply = screen.getByRole("button", { name: "Apply correction" });
+    expect(apply).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    const firstStatus = await screen.findByRole("status");
+    expect(firstStatus).toHaveTextContent("Current committed life for You (Player 1): 21.");
+    expect(firstStatus).toHaveFocus();
+    await user.tab({ shift: true });
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(close).toHaveFocus();
+    await user.keyboard(" ");
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    expect(trigger).toHaveFocus();
+
+    await user.keyboard(" ");
+    expect(await screen.findByRole("dialog", { name: "Sandbox life correction" })).toHaveFocus();
+    await user.tab();
+    const thirdCancel = screen.getByRole("button", { name: "Cancel" });
+    expect(thirdCancel).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    expect(trigger).toHaveFocus();
+
+    await user.keyboard(" ");
+    expect(await screen.findByRole("dialog", { name: "Sandbox life correction" })).toHaveFocus();
+    await user.tab();
+    await user.tab();
+    await user.tab();
+    const secondLifeInput = screen.getByRole("spinbutton", { name: "New life total" });
+    expect(secondLifeInput).toHaveFocus();
+    await user.clear(secondLifeInput);
+    await user.type(secondLifeInput, "22");
+    await user.tab();
+    const secondApply = screen.getByRole("button", { name: "Apply correction" });
+    expect(secondApply).toHaveFocus();
+    await user.keyboard(" ");
+
+    const secondStatus = await screen.findByText("Current committed life for You (Player 1): 22.");
+    expect(secondStatus).toHaveFocus();
+    await user.tab({ shift: true });
+    const secondClose = screen.getByRole("button", { name: "Close" });
+    expect(secondClose).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    expect(trigger).toHaveFocus();
+
+    expect(harness.adapter.submitAction).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(harness.adapter.submitAction).mock.calls.map(([action]) => action)).toEqual([
+      { type: "Debug", data: { type: "SetLife", data: { player_id: 0, life: 21 } } },
+      { type: "Debug", data: { type: "SetLife", data: { player_id: 0, life: 22 } } },
+    ]);
   });
 
   it("does not apply a draft after the engine snapshot changes during editing", () => {

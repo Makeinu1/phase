@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
@@ -47,6 +47,12 @@ interface TriggerPosition {
 }
 
 type StoreSnapshot = ReturnType<typeof useGameStore.getState>;
+
+function isolateButtonActivationFromGameShortcuts(event: ReactKeyboardEvent<HTMLElement>): void {
+  if (event.key === "Enter" || event.key === " ") {
+    event.stopPropagation();
+  }
+}
 
 function isFullscreenBlockingOverlay(element: HTMLElement): boolean {
   if (element.closest("[data-sandbox-life-correction]")) return false;
@@ -566,6 +572,7 @@ export function SandboxLifeCorrection() {
             ref={triggerButtonRef}
             type="button"
             aria-expanded={open}
+            onKeyDown={isolateButtonActivationFromGameShortcuts}
             onClick={open ? closePanel : openPanel}
             style={{
               left: triggerPosition?.left ?? 8,
@@ -585,6 +592,7 @@ export function SandboxLifeCorrection() {
               role="dialog"
               aria-label={t("sandboxLifeCorrection.title")}
               tabIndex={-1}
+              onKeyDown={isolateButtonActivationFromGameShortcuts}
               className="fixed z-[130] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-lg border border-amber-700/50 bg-gray-950 p-3 text-xs text-gray-200 shadow-xl"
               style={{
                 left: panelPosition?.left ?? 8,
