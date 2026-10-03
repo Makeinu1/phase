@@ -376,7 +376,7 @@ fn collected_conjuring_decline_restore_recovers_the_precast_state_and_rng() {
         && exiled_ids == expected_uncast_ids
         && after_decline.players[P0.0 as usize].library.is_empty();
     println!(
-        "Pinned-base #9503 observation (e5af25d): orphan_signature={pinned_orphan_signature}, conjuring_zone={:?}, parent_on_stack={parent_on_stack}, stack_len={}, exiled_revealed_cards={}, library_len={}",
+        "Current-build #9503 observation: orphan_signature={pinned_orphan_signature}, conjuring_zone={:?}, parent_on_stack={parent_on_stack}, stack_len={}, exiled_revealed_cards={}, library_len={}",
         after_decline.objects[&conjuring].zone,
         after_decline.stack.len(),
         exiled_ids.len(),
