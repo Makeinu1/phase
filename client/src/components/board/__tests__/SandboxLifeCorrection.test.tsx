@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EngineAdapter, GameAction, GameEvent, GameState, SubmitResult } from "../../../adapter/types.ts";
@@ -176,6 +177,62 @@ describe("SandboxLifeCorrection", () => {
     expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
   });
 
+  it("registers no overlay observer or geometry measurement while ineligible", () => {
+    makeHarness();
+    vi.stubEnv("VITE_PHASE_SANDBOX", "");
+    const observeSpy = vi.spyOn(MutationObserver.prototype, "observe");
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+
+    try {
+      render(<SandboxLifeCorrection />);
+
+      expect(observeSpy).not.toHaveBeenCalled();
+      expect(rectSpy).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
+    } finally {
+      observeSpy.mockRestore();
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("starts and cleans up overlay and measurement listeners with eligibility", async () => {
+    const harness = makeHarness();
+    act(() => useGameStore.setState({ gameState: null }));
+    const observerSpy = vi.spyOn(MutationObserver.prototype, "observe");
+    const disconnectSpy = vi.spyOn(MutationObserver.prototype, "disconnect");
+    const addListenerSpy = vi.spyOn(window, "addEventListener");
+    const removeListenerSpy = vi.spyOn(window, "removeEventListener");
+
+    try {
+      render(<SandboxLifeCorrection />);
+      expect(observerSpy).not.toHaveBeenCalled();
+      expect(addListenerSpy.mock.calls.some(([type]) => type === "resize" || type === "scroll")).toBe(false);
+
+      act(() => useGameStore.setState({ gameState: harness.initialState }));
+      await waitFor(() => {
+        expect(observerSpy).toHaveBeenCalled();
+        expect(addListenerSpy.mock.calls.some(([type]) => type === "resize")).toBe(true);
+        expect(addListenerSpy.mock.calls.some(([type]) => type === "scroll")).toBe(true);
+      });
+
+      const addedMeasurements = addListenerSpy.mock.calls.filter(([type]) => type === "resize" || type === "scroll");
+      act(() => {
+        useGameStore.setState({ gameState: { ...harness.initialState, debug_mode: false } });
+      });
+      await waitFor(() => {
+        expect(disconnectSpy).toHaveBeenCalled();
+        expect(removeListenerSpy.mock.calls.filter(([type]) => type === "resize" || type === "scroll")).toEqual(
+          expect.arrayContaining(addedMeasurements),
+        );
+      });
+    } finally {
+      observerSpy.mockRestore();
+      disconnectSpy.mockRestore();
+      addListenerSpy.mockRestore();
+      removeListenerSpy.mockRestore();
+    }
+  });
+
   it("hides in a remote game even when this local sandbox flag is enabled", () => {
     makeHarness();
     act(() => useGameStore.setState({ gameMode: "online" }));
@@ -275,11 +332,16 @@ describe("SandboxLifeCorrection", () => {
     const blockingDialog = document.createElement("div");
     blockingDialog.setAttribute("role", "dialog");
     blockingDialog.setAttribute("aria-modal", "true");
+    const blockingAction = document.createElement("button");
+    blockingAction.textContent = "Continue in modal";
+    blockingDialog.appendChild(blockingAction);
     document.body.appendChild(blockingDialog);
+    blockingAction.focus();
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
       expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
     });
+    expect(blockingAction).toHaveFocus();
     blockingDialog.remove();
     await waitFor(() => expect(screen.getByRole("button", { name: "Life correction" })).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Apply correction" })).toBeNull();
@@ -384,6 +446,57 @@ describe("SandboxLifeCorrection", () => {
     expect(screen.getByRole("spinbutton", { name: "New life total" })).toHaveValue(20);
   });
 
+  it("returns focus to the trigger after cancel and reopens from the keyboard", async () => {
+    makeHarness();
+    const user = userEvent.setup();
+    render(<SandboxLifeCorrection />);
+    const trigger = screen.getByRole("button", { name: "Life correction" });
+
+    await user.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Sandbox life correction" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(trigger).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("dialog", { name: "Sandbox life correction" })).toHaveFocus();
+  });
+
+  it("moves focus to the result status after Apply", async () => {
+    const user = userEvent.setup();
+    const harness = makeHarness();
+    render(<SandboxLifeCorrection />);
+    await user.click(screen.getByRole("button", { name: "Life correction" }));
+    const lifeInput = screen.getByRole("spinbutton", { name: "New life total" });
+    await user.clear(lifeInput);
+    await user.type(lifeInput, "21");
+    await user.click(screen.getByRole("button", { name: "Apply correction" }));
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("Current committed life for You (Player 1): 21.");
+    expect(status).toHaveFocus();
+    expect(useGameStore.getState().engineCommitEpoch).toBe(1);
+    expect(harness.adapter.submitAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves focus to failure feedback after Apply is rejected", async () => {
+    const user = userEvent.setup();
+    const harness = makeHarness();
+    vi.mocked(harness.adapter.submitAction).mockRejectedValueOnce(
+      new AdapterError(AdapterErrorCode.ACTION_REJECTED, "Debug permission denied", false),
+    );
+    render(<SandboxLifeCorrection />);
+    await user.click(screen.getByRole("button", { name: "Life correction" }));
+    const lifeInput = screen.getByRole("spinbutton", { name: "New life total" });
+    await user.clear(lifeInput);
+    await user.type(lifeInput, "21");
+    await user.click(screen.getByRole("button", { name: "Apply correction" }));
+
+    expect(await screen.findByText("The correction could not be submitted.")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveFocus();
+    expect(useGameStore.getState().gameState?.players[0]?.life).toBe(20);
+    expect(harness.adapter.submitAction).toHaveBeenCalledTimes(1);
+  });
+
   it("does not apply a draft after the engine snapshot changes during editing", () => {
     const harness = makeHarness();
     render(<SandboxLifeCorrection />);
@@ -443,6 +556,7 @@ describe("SandboxLifeCorrection", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getByRole("button", { name: "Life correction" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "Life correction" })).not.toHaveFocus();
     expect(screen.queryByRole("button", { name: "Apply correction" })).toBeNull();
     expect(harness.adapter.submitAction).not.toHaveBeenCalled();
   });

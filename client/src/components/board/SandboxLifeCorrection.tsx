@@ -80,12 +80,17 @@ function hasBlockingOverlay(): boolean {
  * and other anchored hints are intentionally ignored: they do not claim the
  * whole viewport or expose modal semantics.
  */
-function useBlockingOverlayActive(): boolean {
+function useBlockingOverlayActive(enabled: boolean): boolean {
   const [active, setActive] = useState(
-    () => typeof document !== "undefined" && hasBlockingOverlay(),
+    () => enabled && typeof document !== "undefined" && hasBlockingOverlay(),
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!enabled) {
+      setActive(false);
+      return;
+    }
+
     const root = document.body;
     if (!root) return;
 
@@ -107,7 +112,7 @@ function useBlockingOverlayActive(): boolean {
       ],
     });
     return () => observer.disconnect();
-  }, []);
+  }, [enabled]);
 
   return active;
 }
@@ -193,7 +198,6 @@ export function SandboxLifeCorrection() {
   const gameState = useGameStore((store) => store.gameState);
   const adapter = useGameStore((store) => store.adapter);
   const playerNames = useMultiplayerStore((store) => store.playerNames);
-  const blockingOverlayActive = useBlockingOverlayActive();
   const [panelBinding, setPanelBinding] = useState<GameSessionBinding | null>(null);
   const [draft, setDraft] = useState<LifeCorrectionDraft | null>(null);
   const [feedback, setFeedback] = useState<CorrectionFeedback | null>(null);
@@ -201,9 +205,15 @@ export function SandboxLifeCorrection() {
   const [triggerPosition, setTriggerPosition] = useState<TriggerPosition | null>(null);
   const [panelPosition, setPanelPosition] = useState<PanelPosition | null>(null);
   const triggerSlotRef = useRef<HTMLSpanElement | null>(null);
+  const triggerButtonRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const feedbackStatusRef = useRef<HTMLParagraphElement | null>(null);
   const submissionRef = useRef<SubmissionToken | null>(null);
   const requestIdRef = useRef(0);
+  const wasOpenRef = useRef(false);
+  const pendingPanelFocusRef = useRef(false);
+  const restoreFocusAfterCloseRef = useRef(false);
+  const restoreFocusBindingRef = useRef<GameSessionBinding | null>(null);
 
   const currentStore = useGameStore.getState();
   const isSupportedMode = gameMode === "ai" || gameMode === "local";
@@ -216,6 +226,7 @@ export function SandboxLifeCorrection() {
     && adapter !== null
     && isSandboxGame
     && hasDebugPermission;
+  const blockingOverlayActive = useBlockingOverlayActive(isEligible);
 
   const subscribedBinding: GameSessionBinding | null = adapter
     ? { adapter, gameId, gameSessionGeneration }
@@ -268,10 +279,65 @@ export function SandboxLifeCorrection() {
   }, [blockingOverlayActive]);
 
   useLayoutEffect(() => {
+    if (open) {
+      if (!wasOpenRef.current) {
+        wasOpenRef.current = true;
+        const store = useGameStore.getState();
+        pendingPanelFocusRef.current = isEligible
+          && !blockingOverlayActive
+          && !hasBlockingOverlay()
+          && panelBinding !== null
+          && sessionMatchesStore(panelBinding, store);
+      }
+      if (pendingPanelFocusRef.current) {
+        const store = useGameStore.getState();
+        if (
+          !isEligible
+          || blockingOverlayActive
+          || hasBlockingOverlay()
+          || !panelBinding
+          || !sessionMatchesStore(panelBinding, store)
+        ) {
+          pendingPanelFocusRef.current = false;
+        } else if (panelPosition) {
+          pendingPanelFocusRef.current = false;
+          panelRef.current?.focus();
+        }
+      }
+      return;
+    }
+
+    wasOpenRef.current = false;
+    pendingPanelFocusRef.current = false;
+    if (!restoreFocusAfterCloseRef.current) return;
+    restoreFocusAfterCloseRef.current = false;
+    const focusBinding = restoreFocusBindingRef.current;
+    restoreFocusBindingRef.current = null;
+    const store = useGameStore.getState();
+    if (
+      isEligible
+      && !blockingOverlayActive
+      && !hasBlockingOverlay()
+      && focusBinding !== null
+      && sessionMatchesStore(focusBinding, store)
+    ) {
+      triggerButtonRef.current?.focus();
+    }
+  }, [open, isEligible, blockingOverlayActive, panelBinding, panelPosition]);
+
+  useLayoutEffect(() => {
+    if (!currentFeedback || currentDraft || !isEligible || blockingOverlayActive || hasBlockingOverlay()) return;
+    if (!sessionMatchesStore(currentFeedback, useGameStore.getState())) return;
+    feedbackStatusRef.current?.focus();
+  }, [currentFeedback, currentDraft, isEligible, blockingOverlayActive]);
+
+  useLayoutEffect(() => {
+    if (!isEligible || blockingOverlayActive) return;
+
     const positionPanel = () => {
       const triggerSlot = triggerSlotRef.current;
       const panel = panelRef.current;
-      if (!isEligible || blockingOverlayActive || !triggerSlot) {
+      if (!triggerSlot) {
         setTriggerPosition(null);
         setPanelPosition(null);
         return;
@@ -369,6 +435,8 @@ export function SandboxLifeCorrection() {
     : null;
 
   const closePanel = () => {
+    restoreFocusAfterCloseRef.current = true;
+    restoreFocusBindingRef.current = panelBinding;
     requestIdRef.current += 1;
     setPanelBinding(null);
     setDraft(null);
@@ -495,6 +563,7 @@ export function SandboxLifeCorrection() {
         <>
           <button
             data-sandbox-life-correction="trigger"
+            ref={triggerButtonRef}
             type="button"
             aria-expanded={open}
             onClick={open ? closePanel : openPanel}
@@ -515,6 +584,7 @@ export function SandboxLifeCorrection() {
               ref={panelRef}
               role="dialog"
               aria-label={t("sandboxLifeCorrection.title")}
+              tabIndex={-1}
               className="fixed z-[130] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-lg border border-amber-700/50 bg-gray-950 p-3 text-xs text-gray-200 shadow-xl"
               style={{
                 left: panelPosition?.left ?? 8,
@@ -607,7 +677,12 @@ export function SandboxLifeCorrection() {
                 <p role="alert" className="text-amber-200">{t("sandboxLifeCorrection.stale")}</p>
               ) : null}
               {currentFeedback && !currentDraft ? (
-                <p role="status" className={currentFeedback.status === "applied" ? "text-emerald-300" : "text-amber-200"}>
+                <p
+                  ref={feedbackStatusRef}
+                  role="status"
+                  tabIndex={-1}
+                  className={currentFeedback.status === "applied" ? "text-emerald-300" : "text-amber-200"}
+                >
                   {feedbackText}
                 </p>
               ) : null}
