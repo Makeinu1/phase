@@ -7,15 +7,28 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 
-interface LifeCorrectionDraft {
-  targetPlayerId: PlayerId;
-  value: string;
-  initialLife: number;
+interface GameSessionBinding {
   gameId: string | null;
   adapter: EngineAdapter;
   gameSessionGeneration: number;
+}
+
+interface LifeCorrectionDraft extends GameSessionBinding {
+  targetPlayerId: PlayerId;
+  value: string;
+  initialLife: number;
   engineCommitEpoch: number;
   gameState: GameState;
+}
+
+interface CorrectionFeedback extends GameSessionBinding {
+  status: "applied" | "notApplied" | "failed";
+  targetPlayerId: PlayerId;
+}
+
+interface SubmissionToken {
+  requestId: number;
+  binding: GameSessionBinding;
 }
 
 type StoreSnapshot = ReturnType<typeof useGameStore.getState>;
@@ -42,13 +55,38 @@ function captureDraft(targetPlayerId: PlayerId, store: StoreSnapshot): LifeCorre
   };
 }
 
+function sameGameSession(a: GameSessionBinding, b: GameSessionBinding): boolean {
+  return a.adapter === b.adapter
+    && a.gameId === b.gameId
+    && a.gameSessionGeneration === b.gameSessionGeneration;
+}
+
+function sessionMatchesStore(binding: GameSessionBinding, store: StoreSnapshot): boolean {
+  return store.adapter === binding.adapter
+    && store.gameId === binding.gameId
+    && store.gameSessionGeneration === binding.gameSessionGeneration;
+}
+
+function bindingForStore(store: StoreSnapshot): GameSessionBinding | null {
+  if (!store.adapter) return null;
+  return {
+    adapter: store.adapter,
+    gameId: store.gameId,
+    gameSessionGeneration: store.gameSessionGeneration,
+  };
+}
+
 function draftStillMatches(draft: LifeCorrectionDraft, store: StoreSnapshot): boolean {
-  return store.adapter === draft.adapter
-    && store.gameId === draft.gameId
-    && store.gameSessionGeneration === draft.gameSessionGeneration
+  return sessionMatchesStore(draft, store)
     && store.engineCommitEpoch === draft.engineCommitEpoch
     && store.gameState === draft.gameState
     && store.gameState?.players.find((player) => player.id === draft.targetPlayerId)?.life === draft.initialLife;
+}
+
+function expectedSetLifeDescription(targetPlayerId: PlayerId, expectedLife: number): string {
+  // The browser WASM state keeps log_player_names runtime-only and empty, so
+  // DebugAction::describe uses its exact "Player N" fallback for local/AI play.
+  return `SetLife (Player ${targetPlayerId + 1} → ${expectedLife})`;
 }
 
 function confirmsCorrection(
@@ -57,18 +95,10 @@ function confirmsCorrection(
   targetPlayerId: PlayerId,
   expectedLife: number,
 ): boolean {
-  const used = events.some((event) =>
-    event.type === "DebugActionUsed"
-    && event.data.player_id === actor
-    && event.data.description.startsWith("SetLife (")
-    && event.data.description.endsWith(` → ${expectedLife})`),
-  );
-  const changed = events.some((event) =>
-    event.type === "LifeChanged"
-    && event.data.player_id === targetPlayerId
-    && event.data.new_total === expectedLife,
-  );
-  return used && changed;
+  const debugActions = events.filter((event) => event.type === "DebugActionUsed");
+  return debugActions.length === 1
+    && debugActions[0]?.data.player_id === actor
+    && debugActions[0]?.data.description === expectedSetLifeDescription(targetPlayerId, expectedLife);
 }
 
 /** Local development affordance for the sandbox walkthrough. It uses the same
@@ -83,12 +113,11 @@ export function SandboxLifeCorrection() {
   const engineCommitEpoch = useGameStore((store) => store.engineCommitEpoch);
   const gameState = useGameStore((store) => store.gameState);
   const adapter = useGameStore((store) => store.adapter);
-  const [open, setOpen] = useState(false);
+  const [panelBinding, setPanelBinding] = useState<GameSessionBinding | null>(null);
   const [draft, setDraft] = useState<LifeCorrectionDraft | null>(null);
-  const [status, setStatus] = useState<"applied" | "notApplied" | "failed" | null>(null);
-  const [statusTargetPlayerId, setStatusTargetPlayerId] = useState<PlayerId | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const submittingRef = useRef(false);
+  const [feedback, setFeedback] = useState<CorrectionFeedback | null>(null);
+  const [submission, setSubmission] = useState<SubmissionToken | null>(null);
+  const submissionRef = useRef<SubmissionToken | null>(null);
   const requestIdRef = useRef(0);
 
   const currentStore = useGameStore.getState();
@@ -108,26 +137,53 @@ export function SandboxLifeCorrection() {
     return null;
   }
 
-  const currentDraftIsValid = draft !== null
-    && gameId === currentStore.gameId
-    && gameSessionGeneration === currentStore.gameSessionGeneration
+  const subscribedBinding: GameSessionBinding | null = adapter
+    ? { adapter, gameId, gameSessionGeneration }
+    : null;
+  const storeBinding = bindingForStore(currentStore);
+  const currentBinding = subscribedBinding !== null
+    && storeBinding !== null
+    && sameGameSession(subscribedBinding, storeBinding)
+    ? subscribedBinding
+    : null;
+  const open = panelBinding !== null
+    && currentBinding !== null
+    && sameGameSession(panelBinding, currentBinding);
+  const currentDraft = open
+    && draft !== null
+    && currentBinding !== null
+    && sameGameSession(draft, currentBinding)
+    ? draft
+    : null;
+  const currentFeedback = open
+    && feedback !== null
+    && currentBinding !== null
+    && sameGameSession(feedback, currentBinding)
+    ? feedback
+    : null;
+  const currentSubmission = submission !== null
+    && currentBinding !== null
+    && sameGameSession(submission.binding, currentBinding)
+    ? submission
+    : null;
+  const submitting = currentSubmission !== null;
+  const currentDraftIsValid = currentDraft !== null
     && engineCommitEpoch === currentStore.engineCommitEpoch
-    && draftStillMatches(draft, currentStore);
-  const draftIsStale = draft !== null && !currentDraftIsValid && !submitting;
-  const nextLife = draft ? Number(draft.value) : Number.NaN;
-  const validNewLife = draft !== null
-    && draft.value.trim().length > 0
+    && draftStillMatches(currentDraft, currentStore);
+  const draftIsStale = currentDraft !== null && !currentDraftIsValid && !submitting;
+  const nextLife = currentDraft ? Number(currentDraft.value) : Number.NaN;
+  const validNewLife = currentDraft !== null
+    && currentDraft.value.trim().length > 0
     && Number.isSafeInteger(nextLife)
     && nextLife >= -2_147_483_648
     && nextLife <= 2_147_483_647
-    && nextLife !== draft.initialLife;
+    && nextLife !== currentDraft.initialLife;
 
   const closePanel = () => {
     requestIdRef.current += 1;
-    setOpen(false);
+    setPanelBinding(null);
     setDraft(null);
-    setStatus(null);
-    setStatusTargetPlayerId(null);
+    setFeedback(null);
   };
 
   const openPanel = () => {
@@ -140,75 +196,93 @@ export function SandboxLifeCorrection() {
     if (!nextDraft) return;
 
     requestIdRef.current += 1;
+    setPanelBinding(nextDraft);
     setDraft(nextDraft);
-    setStatus(null);
-    setStatusTargetPlayerId(null);
-    setOpen(true);
+    setFeedback(null);
   };
 
   const changeTarget = (value: string) => {
+    const store = useGameStore.getState();
+    if (!panelBinding || !sessionMatchesStore(panelBinding, store)) return;
     const targetPlayerId = Number(value);
-    const nextDraft = captureDraft(targetPlayerId, useGameStore.getState());
+    const nextDraft = captureDraft(targetPlayerId, store);
     if (!nextDraft) return;
     setDraft(nextDraft);
-    setStatus(null);
-    setStatusTargetPlayerId(null);
+    setFeedback(null);
   };
 
   const submitCorrection = async () => {
-    if (submittingRef.current || !draft || !validNewLife) return;
+    if (!currentDraft || !validNewLife) return;
 
     const before = useGameStore.getState();
-    if (!draftStillMatches(draft, before)) {
-      setStatus("notApplied");
+    if (!draftStillMatches(currentDraft, before)) {
+      if (sessionMatchesStore(currentDraft, before)) {
+        setFeedback({
+          ...currentDraft,
+          status: "notApplied",
+          targetPlayerId: currentDraft.targetPlayerId,
+        });
+      }
       return;
     }
 
+    const binding = bindingForStore(before);
+    if (!binding || !sameGameSession(currentDraft, binding)) return;
+    const activeRequest = submissionRef.current;
+    if (activeRequest && sameGameSession(activeRequest.binding, binding)) return;
+
     const submittedActor = getPlayerId();
-    const requestId = requestIdRef.current;
-    submittingRef.current = true;
-    setSubmitting(true);
-    setStatus(null);
+    const token: SubmissionToken = { requestId: ++requestIdRef.current, binding };
+    submissionRef.current = token;
+    setSubmission(token);
+    setFeedback(null);
 
     try {
       await dispatch({
         type: "Debug",
         data: {
           type: "SetLife",
-          data: { player_id: draft.targetPlayerId, life: nextLife },
+          data: { player_id: currentDraft.targetPlayerId, life: nextLife },
         },
       });
 
       const after = useGameStore.getState();
-      const sameSession = after.adapter === draft.adapter
-        && after.gameId === draft.gameId
-        && after.gameSessionGeneration === draft.gameSessionGeneration;
-      const committedLife = after.gameState?.players.find((player) => player.id === draft.targetPlayerId)?.life;
+      const sameSession = sessionMatchesStore(binding, after);
+      const committedLife = after.gameState?.players.find((player) => player.id === currentDraft.targetPlayerId)?.life;
       const applied = sameSession
         && after.engineCommitEpoch > before.engineCommitEpoch
+        && after.lastCommittedSeq > before.lastCommittedSeq
         && committedLife === nextLife
         && after.events !== before.events
         && confirmsCorrection(
           after.events,
           submittedActor,
-          draft.targetPlayerId,
+          currentDraft.targetPlayerId,
           nextLife,
         );
 
-      if (requestIdRef.current === requestId) {
+      if (requestIdRef.current === token.requestId && sessionMatchesStore(binding, useGameStore.getState())) {
         setDraft(null);
-        setStatus(applied ? "applied" : "notApplied");
-        setStatusTargetPlayerId(draft.targetPlayerId);
+        setFeedback({
+          ...binding,
+          status: applied ? "applied" : "notApplied",
+          targetPlayerId: currentDraft.targetPlayerId,
+        });
       }
     } catch {
-      if (requestIdRef.current === requestId) {
+      if (requestIdRef.current === token.requestId && sessionMatchesStore(binding, useGameStore.getState())) {
         setDraft(null);
-        setStatus("failed");
-        setStatusTargetPlayerId(draft.targetPlayerId);
+        setFeedback({
+          ...binding,
+          status: "failed",
+          targetPlayerId: currentDraft.targetPlayerId,
+        });
       }
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      if (submissionRef.current === token) {
+        submissionRef.current = null;
+        setSubmission(null);
+      }
     }
   };
 
@@ -242,16 +316,16 @@ export function SandboxLifeCorrection() {
           <p className="mb-2 text-gray-400">{t("sandboxLifeCorrection.description")}</p>
           <p className="mb-3 text-[11px] text-amber-200/80">{t("sandboxLifeCorrection.scopeNote")}</p>
 
-          {statusTargetPlayerId !== null && gameState.players.some((player) => player.id === statusTargetPlayerId) ? (
+          {currentFeedback && gameState.players.some((player) => player.id === currentFeedback.targetPlayerId) ? (
             <div className="mb-2 flex items-center justify-between rounded bg-gray-900 px-2 py-1.5">
               <span className="text-gray-400">{t("sandboxLifeCorrection.currentLife")}</span>
-              <LifeTotal playerId={statusTargetPlayerId} size="sm" hideLabel />
+              <LifeTotal playerId={currentFeedback.targetPlayerId} size="sm" hideLabel />
             </div>
           ) : null}
           {submitting ? (
             <p role="status" className="mb-2 text-amber-200">{t("sandboxLifeCorrection.submitting")}</p>
           ) : null}
-          {draft && currentDraftIsValid ? (
+          {currentDraft && currentDraftIsValid ? (
             <form
               aria-label={t("sandboxLifeCorrection.title")}
               onSubmit={(event) => {
@@ -264,7 +338,7 @@ export function SandboxLifeCorrection() {
                 <span className="text-gray-300">{t("sandboxLifeCorrection.target")}</span>
                 <select
                   aria-label={t("sandboxLifeCorrection.target")}
-                  value={draft.targetPlayerId}
+                  value={currentDraft.targetPlayerId}
                   disabled={submitting}
                   onChange={(event) => changeTarget(event.currentTarget.value)}
                   className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1 text-white"
@@ -278,7 +352,7 @@ export function SandboxLifeCorrection() {
               </label>
               <div className="flex items-center justify-between rounded bg-gray-900 px-2 py-1.5">
                 <span className="text-gray-400">{t("sandboxLifeCorrection.currentLife")}</span>
-                <LifeTotal playerId={draft.targetPlayerId} size="sm" hideLabel />
+                <LifeTotal playerId={currentDraft.targetPlayerId} size="sm" hideLabel />
               </div>
               <label className="block space-y-1">
                 <span className="text-gray-300">{t("sandboxLifeCorrection.newLife")}</span>
@@ -287,15 +361,15 @@ export function SandboxLifeCorrection() {
                   step="1"
                   min="-2147483648"
                   max="2147483647"
-                  value={draft.value}
+                  value={currentDraft.value}
                   disabled={submitting}
-                  onChange={(event) => setDraft({ ...draft, value: event.currentTarget.value })}
+                  onChange={(event) => setDraft({ ...currentDraft, value: event.currentTarget.value })}
                   className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1 text-white"
                 />
               </label>
-              {status ? (
-                <p role="status" className={status === "applied" ? "text-emerald-300" : "text-amber-200"}>
-                  {t(`sandboxLifeCorrection.${status}`)}
+              {currentFeedback ? (
+                <p role="status" className={currentFeedback.status === "applied" ? "text-emerald-300" : "text-amber-200"}>
+                  {t(`sandboxLifeCorrection.${currentFeedback.status}`)}
                 </p>
               ) : null}
               <button
@@ -309,9 +383,9 @@ export function SandboxLifeCorrection() {
           ) : draftIsStale ? (
             <p role="alert" className="text-amber-200">{t("sandboxLifeCorrection.stale")}</p>
           ) : null}
-          {status && !draft ? (
-            <p role="status" className={status === "applied" ? "text-emerald-300" : "text-amber-200"}>
-              {t(`sandboxLifeCorrection.${status}`)}
+          {currentFeedback && !currentDraft ? (
+            <p role="status" className={currentFeedback.status === "applied" ? "text-emerald-300" : "text-amber-200"}>
+              {t(`sandboxLifeCorrection.${currentFeedback.status}`)}
             </p>
           ) : null}
         </div>
