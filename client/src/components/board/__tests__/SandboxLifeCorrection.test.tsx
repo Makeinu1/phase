@@ -75,7 +75,11 @@ function makeHarness(gameId = "sandbox-life-correction-test"): Harness {
 
   const nextGeneration = useGameStore.getState().gameSessionGeneration + 1;
   act(() => {
-    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    useMultiplayerStore.setState({
+      activePlayerId: 0,
+      isSpectator: false,
+      playerNames: new Map([[1, "Ada"]]),
+    });
     useGameStore.setState({
       gameId,
       gameMode: "ai",
@@ -129,7 +133,7 @@ describe("SandboxLifeCorrection", () => {
   afterEach(() => {
     cleanup();
     abandonPendingDispatches();
-    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false, playerNames: new Map() });
     useGameStore.setState({
       gameId: null,
       gameMode: null,
@@ -195,14 +199,23 @@ describe("SandboxLifeCorrection", () => {
     expect(harness.initialState.format_config?.allow_debug_actions).toBe(false);
     expect(harness.initialState.debug_mode).toBe(true);
     render(<SandboxLifeCorrection />);
-    openPanel();
-    fireEvent.change(screen.getByRole("combobox", { name: "Player" }), { target: { value: "1" } });
+    const trigger = screen.getByRole("button", { name: "Life correction" });
+    expect(trigger).toHaveClass("min-h-11", "z-[130]");
+    expect(trigger.parentElement).toBe(document.body);
+    const dialog = openPanel();
+    expect(dialog.parentElement).toBe(document.body);
+    const targetSelect = screen.getByRole("combobox", { name: "Player" });
+    expect(targetSelect).toHaveClass("min-h-11");
+    expect(screen.getByRole("option", { name: "You (Player 1)" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Ada (Player 2)" })).toBeInTheDocument();
+    fireEvent.change(targetSelect, { target: { value: "1" } });
     expect(screen.getByRole("spinbutton", { name: "New life total" })).toHaveValue(18);
+    expect(screen.getByRole("spinbutton", { name: "New life total" })).toHaveClass("min-h-11");
     setNewLife("17");
 
     fireEvent.click(screen.getByRole("button", { name: "Apply correction" }));
 
-    expect(await screen.findByText("The engine confirmed the life correction.")).toBeInTheDocument();
+    expect(await screen.findByText("Current committed life for Ada (Player 2): 17.")).toBeInTheDocument();
     expect(harness.adapter.submitAction).toHaveBeenCalledWith(
       { type: "Debug", data: { type: "SetLife", data: { player_id: 1, life: 17 } } },
       0,
@@ -217,7 +230,11 @@ describe("SandboxLifeCorrection", () => {
     ]);
     expect(useGameStore.getState().events.some((event) => event.type === "LifeChanged")).toBe(false);
     expect(harness.currentEngineState().players[1]?.life).toBe(17);
-    expect(screen.getByText("17")).toBeInTheDocument();
+    const closeButton = screen.getByRole("button", { name: "Close" });
+    expect(closeButton).toHaveClass("min-h-11", "min-w-11");
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    fireEvent.click(closeButton);
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
   });
 
   it("sends nothing when cancelled before submission and starts fresh after reopening", () => {
@@ -226,7 +243,9 @@ describe("SandboxLifeCorrection", () => {
     openPanel();
     setNewLife("23");
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    const cancelButton = screen.getByRole("button", { name: "Cancel" });
+    expect(cancelButton).toHaveClass("min-h-11", "min-w-11");
+    fireEvent.click(cancelButton);
     expect(harness.adapter.submitAction).not.toHaveBeenCalled();
 
     openPanel();
@@ -456,7 +475,7 @@ describe("SandboxLifeCorrection", () => {
       finish();
       await Promise.resolve();
     });
-    expect(await screen.findByText("The engine confirmed the life correction.")).toBeInTheDocument();
+    expect(await screen.findByText("Current committed life for You (Player 1): 21.")).toBeInTheDocument();
   });
 
   it("does not leak a submitted result into a panel closed and reopened before completion", async () => {
@@ -485,7 +504,7 @@ describe("SandboxLifeCorrection", () => {
     });
 
     expect(useGameStore.getState().gameState?.players[0]?.life).toBe(22);
-    expect(screen.queryByText("The engine confirmed the life correction.")).toBeNull();
+    expect(screen.queryByText("Current committed life for You (Player 1): 22.")).toBeNull();
     expect(screen.getByRole("alert")).toHaveTextContent("The game changed while editing.");
   });
 
@@ -495,15 +514,15 @@ describe("SandboxLifeCorrection", () => {
     openPanel();
     setNewLife("21");
     fireEvent.click(screen.getByRole("button", { name: "Apply correction" }));
-    expect(await screen.findByText("The engine confirmed the life correction.")).toBeInTheDocument();
+    expect(await screen.findByText("Current committed life for You (Player 1): 21.")).toBeInTheDocument();
 
     makeHarness("sandbox-after-replacement");
 
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.queryByText("The engine confirmed the life correction.")).toBeNull();
+    expect(screen.queryByText("Current committed life for You (Player 1): 21.")).toBeNull();
     openPanel();
     expect(screen.getByRole("spinbutton", { name: "New life total" })).toHaveValue(20);
-    expect(screen.queryByText("The engine confirmed the life correction.")).toBeNull();
+    expect(screen.queryByText("Current committed life for You (Player 1): 21.")).toBeNull();
     expect(harness.adapter.submitAction).toHaveBeenCalledTimes(1);
   });
 
@@ -525,7 +544,7 @@ describe("SandboxLifeCorrection", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     openPanel();
     expect(screen.queryByText("Correction submitted; closing this panel will not cancel it.")).toBeNull();
-    expect(screen.queryByText("The engine confirmed the life correction.")).toBeNull();
+    expect(screen.queryByText("Current committed life for You (Player 1): 21.")).toBeNull();
 
     await act(async () => {
       finish();
@@ -533,7 +552,7 @@ describe("SandboxLifeCorrection", () => {
     });
 
     expect(useGameStore.getState().gameState?.players[0]?.life).toBe(20);
-    expect(screen.queryByText("The engine confirmed the life correction.")).toBeNull();
+    expect(screen.queryByText("Current committed life for You (Player 1): 21.")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(replacement.adapter.submitAction).not.toHaveBeenCalled();
   });
