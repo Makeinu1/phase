@@ -212,8 +212,6 @@ export function SandboxLifeCorrection() {
     }
   };
 
-  const draftGameState = draft?.gameState;
-
   return (
     <div className="relative">
       <button
