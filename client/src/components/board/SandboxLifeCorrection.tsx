@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
@@ -26,7 +26,6 @@ interface LifeCorrectionDraft extends GameSessionBinding {
 interface CorrectionFeedback extends GameSessionBinding {
   status: "applied" | "notApplied" | "failed";
   targetPlayerId: PlayerId;
-  committedLife: number | null;
 }
 
 interface SubmissionToken {
@@ -48,6 +47,70 @@ interface TriggerPosition {
 }
 
 type StoreSnapshot = ReturnType<typeof useGameStore.getState>;
+
+function isFullscreenBlockingOverlay(element: HTMLElement): boolean {
+  if (element.closest("[data-sandbox-life-correction]")) return false;
+
+  const style = window.getComputedStyle(element);
+  if (style.position !== "fixed" || style.pointerEvents === "none") return false;
+  const zIndex = Number.parseInt(style.zIndex, 10);
+  if (!Number.isFinite(zIndex) || zIndex < 40) return false;
+
+  const rect = element.getBoundingClientRect();
+  return rect.left <= 0
+    && rect.top <= 0
+    && rect.right >= window.innerWidth
+    && rect.bottom >= window.innerHeight;
+}
+
+function hasBlockingOverlay(): boolean {
+  if (typeof document === "undefined" || !document.body) return false;
+  if (document.querySelector(
+    '[aria-modal="true"], [data-engine-lost-reason], [data-unhandled-waiting-for]',
+  )) {
+    return true;
+  }
+
+  return Array.from(document.querySelectorAll<HTMLElement>(".fixed.inset-0"))
+    .some(isFullscreenBlockingOverlay);
+}
+
+/**
+ * Keep this leaf out of modal/recovery layers that cover the game. Coachmarks
+ * and other anchored hints are intentionally ignored: they do not claim the
+ * whole viewport or expose modal semantics.
+ */
+function useBlockingOverlayActive(): boolean {
+  const [active, setActive] = useState(
+    () => typeof document !== "undefined" && hasBlockingOverlay(),
+  );
+
+  useEffect(() => {
+    const root = document.body;
+    if (!root) return;
+
+    const update = () => {
+      const next = hasBlockingOverlay();
+      setActive((current) => current === next ? current : next);
+    };
+    update();
+
+    const observer = new MutationObserver(update);
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: [
+        "aria-modal",
+        "data-engine-lost-reason",
+        "data-unhandled-waiting-for",
+      ],
+    });
+    return () => observer.disconnect();
+  }, []);
+
+  return active;
+}
 
 function sandboxFlagEnabled(): boolean {
   return import.meta.env.DEV && Reflect.get(import.meta.env, "VITE_PHASE_SANDBOX") === "1";
@@ -130,6 +193,7 @@ export function SandboxLifeCorrection() {
   const gameState = useGameStore((store) => store.gameState);
   const adapter = useGameStore((store) => store.adapter);
   const playerNames = useMultiplayerStore((store) => store.playerNames);
+  const blockingOverlayActive = useBlockingOverlayActive();
   const [panelBinding, setPanelBinding] = useState<GameSessionBinding | null>(null);
   const [draft, setDraft] = useState<LifeCorrectionDraft | null>(null);
   const [feedback, setFeedback] = useState<CorrectionFeedback | null>(null);
@@ -146,6 +210,12 @@ export function SandboxLifeCorrection() {
   const debugPlayers = gameState?.debug_permitted;
   const hasDebugPermission = !debugPlayers || debugPlayers.length === 0 || debugPlayers.includes(localPlayerId);
   const isSandboxGame = gameState?.debug_mode === true;
+  const isEligible = sandboxFlagEnabled()
+    && isSupportedMode
+    && gameState !== null
+    && adapter !== null
+    && isSandboxGame
+    && hasDebugPermission;
 
   const subscribedBinding: GameSessionBinding | null = adapter
     ? { adapter, gameId, gameSessionGeneration }
@@ -189,19 +259,39 @@ export function SandboxLifeCorrection() {
     && nextLife <= 2_147_483_647
     && nextLife !== currentDraft.initialLife;
 
+  useEffect(() => {
+    if (!blockingOverlayActive) return;
+    requestIdRef.current += 1;
+    setPanelBinding(null);
+    setDraft(null);
+    setFeedback(null);
+  }, [blockingOverlayActive]);
+
   useLayoutEffect(() => {
     const positionPanel = () => {
       const triggerSlot = triggerSlotRef.current;
       const panel = panelRef.current;
-      if (!triggerSlot) return;
+      if (!isEligible || blockingOverlayActive || !triggerSlot) {
+        setTriggerPosition(null);
+        setPanelPosition(null);
+        return;
+      }
 
       const triggerRect = triggerSlot.getBoundingClientRect();
-      setTriggerPosition({
+      const nextTriggerPosition = {
         left: triggerRect.left,
         top: triggerRect.top,
         width: triggerRect.width,
         height: triggerRect.height,
-      });
+      };
+      setTriggerPosition((current) =>
+        current?.left === nextTriggerPosition.left
+          && current.top === nextTriggerPosition.top
+          && current.width === nextTriggerPosition.width
+          && current.height === nextTriggerPosition.height
+          ? current
+          : nextTriggerPosition,
+      );
       if (!open || !panel) return;
 
       const panelRect = panel.getBoundingClientRect();
@@ -220,26 +310,43 @@ export function SandboxLifeCorrection() {
         ? Math.max(viewportPadding, triggerRect.top - gap - panelHeight)
         : triggerRect.bottom + gap;
 
-      setPanelPosition({ left, top, maxHeight: availableHeight });
+      setPanelPosition((current) =>
+        current?.left === left && current.top === top && current.maxHeight === availableHeight
+          ? current
+          : { left, top, maxHeight: availableHeight },
+      );
     };
 
     positionPanel();
+    const triggerSlot = triggerSlotRef.current;
+    const flexWidget = triggerSlot?.closest<HTMLElement>("[data-flex-zone]");
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(positionPanel);
+    if (triggerSlot) resizeObserver?.observe(triggerSlot);
+    if (panelRef.current) resizeObserver?.observe(panelRef.current);
+
+    // DraggableWidget moves the HUD with Framer Motion transforms. Those
+    // coordinates change without scroll/resize events, so follow its inline
+    // motion style updates and keep the body portal attached to the HUD.
+    const anchorObserver = flexWidget && typeof MutationObserver !== "undefined"
+      ? new MutationObserver(positionPanel)
+      : null;
+    if (flexWidget && anchorObserver) {
+      anchorObserver.observe(flexWidget, { attributes: true, attributeFilter: ["style"] });
+    }
+
     window.addEventListener("resize", positionPanel);
     window.addEventListener("scroll", positionPanel, true);
     return () => {
+      resizeObserver?.disconnect();
+      anchorObserver?.disconnect();
       window.removeEventListener("resize", positionPanel);
       window.removeEventListener("scroll", positionPanel, true);
     };
-  }, [open, submitting, currentFeedback?.status]);
+  }, [isEligible, blockingOverlayActive, open, submitting, currentFeedback?.status]);
 
-  if (
-    !sandboxFlagEnabled()
-    || !isSupportedMode
-    || !gameState
-    || !adapter
-    || !isSandboxGame
-    || !hasDebugPermission
-  ) {
+  if (!isEligible || blockingOverlayActive || !gameState) {
     return null;
   }
 
@@ -249,11 +356,14 @@ export function SandboxLifeCorrection() {
       : playerNames.get(playerId) ?? t("sandboxLifeCorrection.opponent");
     return t("sandboxLifeCorrection.player", { name, seat: playerId + 1 });
   };
+  const currentFeedbackLife = currentFeedback?.status === "applied"
+    ? gameState.players.find((player) => player.id === currentFeedback.targetPlayerId)?.life ?? null
+    : null;
   const feedbackText = currentFeedback
-    ? currentFeedback.status === "applied" && currentFeedback.committedLife !== null
+    ? currentFeedback.status === "applied" && currentFeedbackLife !== null
       ? t("sandboxLifeCorrection.applied", {
         player: playerIdentity(currentFeedback.targetPlayerId),
-        life: currentFeedback.committedLife,
+        life: currentFeedbackLife,
       })
       : t(`sandboxLifeCorrection.${currentFeedback.status}`)
     : null;
@@ -300,7 +410,6 @@ export function SandboxLifeCorrection() {
           ...currentDraft,
           status: "notApplied",
           targetPlayerId: currentDraft.targetPlayerId,
-          committedLife: null,
         });
       }
       return;
@@ -347,7 +456,6 @@ export function SandboxLifeCorrection() {
           ...binding,
           status: applied ? "applied" : "notApplied",
           targetPlayerId: currentDraft.targetPlayerId,
-          committedLife: applied ? committedLife ?? null : null,
         });
       }
     } catch {
@@ -357,7 +465,6 @@ export function SandboxLifeCorrection() {
           ...binding,
           status: "failed",
           targetPlayerId: currentDraft.targetPlayerId,
-          committedLife: null,
         });
       }
     } finally {
@@ -370,7 +477,12 @@ export function SandboxLifeCorrection() {
 
   return (
     <>
-      <span ref={triggerSlotRef} aria-hidden="true" className="inline-flex">
+      <span
+        ref={triggerSlotRef}
+        data-sandbox-life-correction-anchor=""
+        aria-hidden="true"
+        className="inline-flex"
+      >
         <button
           type="button"
           tabIndex={-1}
@@ -382,6 +494,7 @@ export function SandboxLifeCorrection() {
       {createPortal(
         <>
           <button
+            data-sandbox-life-correction="trigger"
             type="button"
             aria-expanded={open}
             onClick={open ? closePanel : openPanel}
@@ -398,6 +511,7 @@ export function SandboxLifeCorrection() {
           </button>
           {open ? (
             <div
+              data-sandbox-life-correction="panel"
               ref={panelRef}
               role="dialog"
               aria-label={t("sandboxLifeCorrection.title")}

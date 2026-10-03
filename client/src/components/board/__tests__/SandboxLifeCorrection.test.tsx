@@ -122,6 +122,20 @@ function setNewLife(value: string) {
   });
 }
 
+function positionedRect(left: number, top: number, width = 120, height = 44): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+    width,
+    height,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
 describe("SandboxLifeCorrection", () => {
   beforeEach(() => {
     vi.stubEnv("DEV", true);
@@ -194,6 +208,108 @@ describe("SandboxLifeCorrection", () => {
     expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
   });
 
+  it("measures the trigger when sandbox eligibility becomes true after mount", async () => {
+    const harness = makeHarness();
+    act(() => useGameStore.setState({ gameState: null }));
+    const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-sandbox-life-correction-anchor")
+        ? positionedRect(72, 118)
+        : originalGetBoundingClientRect.call(this);
+    });
+
+    try {
+      render(<SandboxLifeCorrection />);
+      expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
+
+      act(() => useGameStore.setState({ gameState: harness.initialState }));
+
+      const trigger = await screen.findByRole("button", { name: "Life correction" });
+      expect(trigger.style.left).toBe("72px");
+      expect(trigger.style.top).toBe("118px");
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("keeps the body portal aligned while the draggable HUD transform moves", async () => {
+    makeHarness();
+    const { container } = render(
+      <div data-flex-zone="playerHud">
+        <SandboxLifeCorrection />
+      </div>,
+    );
+    const anchor = container.querySelector<HTMLElement>("[data-sandbox-life-correction-anchor]");
+    const flexWidget = container.querySelector<HTMLElement>('[data-flex-zone="playerHud"]');
+    expect(anchor).not.toBeNull();
+    expect(flexWidget).not.toBeNull();
+
+    let left = 32;
+    vi.spyOn(anchor!, "getBoundingClientRect").mockImplementation(() => positionedRect(left, 64));
+    const trigger = screen.getByRole("button", { name: "Life correction" });
+    left = 172;
+    await act(async () => {
+      flexWidget!.setAttribute("style", "transform: translate(140px, 0px)");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(trigger.style.left).toBe("172px");
+    expect(trigger.style.top).toBe("64px");
+  });
+
+  it("suppresses itself for blocking overlays and engine recovery, but ignores coachmarks", async () => {
+    makeHarness();
+    render(
+      <>
+        <SandboxLifeCorrection />
+        <div data-coachmark="sandbox-walkthrough" className="fixed z-[120]">
+          Coachmark
+        </div>
+      </>,
+    );
+
+    expect(screen.getByRole("button", { name: "Life correction" })).toBeInTheDocument();
+    expect(screen.getByText("Coachmark")).toBeInTheDocument();
+    openPanel();
+
+    const blockingDialog = document.createElement("div");
+    blockingDialog.setAttribute("role", "dialog");
+    blockingDialog.setAttribute("aria-modal", "true");
+    document.body.appendChild(blockingDialog);
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
+      expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    });
+    blockingDialog.remove();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Life correction" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Apply correction" })).toBeNull();
+
+    const recoveryModal = document.createElement("div");
+    recoveryModal.setAttribute("data-engine-lost-reason", "STATE_LOST");
+    document.body.appendChild(recoveryModal);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull());
+    recoveryModal.remove();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Life correction" })).toBeInTheDocument());
+  });
+
+  it("suppresses itself under a full-screen blocking layer without modal ARIA", async () => {
+    makeHarness();
+    render(<SandboxLifeCorrection />);
+    expect(screen.getByRole("button", { name: "Life correction" })).toBeInTheDocument();
+
+    const overlay = document.createElement("div");
+    overlay.className = "fixed inset-0 z-50";
+    overlay.style.position = "fixed";
+    overlay.style.inset = "0";
+    overlay.style.zIndex = "50";
+    overlay.getBoundingClientRect = () => positionedRect(0, 0, window.innerWidth, window.innerHeight);
+    document.body.appendChild(overlay);
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull());
+    overlay.remove();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Life correction" })).toBeInTheDocument());
+  });
+
   it("submits SetLife through useGameDispatch and confirms the committed engine snapshot", async () => {
     const harness = makeHarness();
     expect(harness.initialState.format_config?.allow_debug_actions).toBe(false);
@@ -230,6 +346,22 @@ describe("SandboxLifeCorrection", () => {
     ]);
     expect(useGameStore.getState().events.some((event) => event.type === "LifeChanged")).toBe(false);
     expect(harness.currentEngineState().players[1]?.life).toBe(17);
+    harness.setEngineLife(1, 16);
+    const previousSnapshot = useGameStore.getState().gameState!;
+    const laterSnapshot: GameState = {
+      ...previousSnapshot,
+      players: previousSnapshot.players.map((player) =>
+        player.id === 1 ? { ...player, life: 16 } : player,
+      ),
+    };
+    act(() => {
+      useGameStore.getState().commitEngineSnapshot(
+        { state: laterSnapshot, legalResult: buildLegalActionsResult(), seq: nextSnapshotSeq() },
+        { events: [], logEntries: [] },
+      );
+    });
+    expect(screen.getByText("Current committed life for Ada (Player 2): 16.")).toBeInTheDocument();
+    expect(screen.queryByText("Current committed life for Ada (Player 2): 17.")).toBeNull();
     const closeButton = screen.getByRole("button", { name: "Close" });
     expect(closeButton).toHaveClass("min-h-11", "min-w-11");
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
