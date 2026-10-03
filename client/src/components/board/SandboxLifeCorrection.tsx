@@ -48,12 +48,6 @@ interface TriggerPosition {
 
 type StoreSnapshot = ReturnType<typeof useGameStore.getState>;
 
-function isolateButtonActivationFromGameShortcuts(event: ReactKeyboardEvent<HTMLElement>): void {
-  if (event.key === "Enter" || event.key === " ") {
-    event.stopPropagation();
-  }
-}
-
 function isFullscreenBlockingOverlay(element: HTMLElement): boolean {
   if (element.closest("[data-sandbox-life-correction]")) return false;
 
@@ -449,6 +443,14 @@ export function SandboxLifeCorrection() {
     setFeedback(null);
   };
 
+  const isolateKeyboardFromGameShortcuts = (event: ReactKeyboardEvent<HTMLElement>) => {
+    // This leaf owns all keydown interactions, including Escape and game-wide
+    // shortcuts such as undo/tap-for-mana. Do not prevent native activation,
+    // text editing, or focus navigation, and leave keyup to global listeners.
+    event.stopPropagation();
+    if (event.key === "Escape" && open) closePanel();
+  };
+
   const openPanel = () => {
     const store = useGameStore.getState();
     const targetPlayerId = store.gameState?.players.some((player) => player.id === localPlayerId)
@@ -572,7 +574,7 @@ export function SandboxLifeCorrection() {
             ref={triggerButtonRef}
             type="button"
             aria-expanded={open}
-            onKeyDown={isolateButtonActivationFromGameShortcuts}
+            onKeyDown={isolateKeyboardFromGameShortcuts}
             onClick={open ? closePanel : openPanel}
             style={{
               left: triggerPosition?.left ?? 8,
@@ -592,7 +594,7 @@ export function SandboxLifeCorrection() {
               role="dialog"
               aria-label={t("sandboxLifeCorrection.title")}
               tabIndex={-1}
-              onKeyDown={isolateButtonActivationFromGameShortcuts}
+              onKeyDown={isolateKeyboardFromGameShortcuts}
               className="fixed z-[130] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-lg border border-amber-700/50 bg-gray-950 p-3 text-xs text-gray-200 shadow-xl"
               style={{
                 left: panelPosition?.left ?? 8,

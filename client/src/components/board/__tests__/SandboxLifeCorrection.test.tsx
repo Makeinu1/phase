@@ -11,6 +11,7 @@ import { useUiStore } from "../../../stores/uiStore.ts";
 import { useKeyboardShortcuts } from "../../../hooks/useKeyboardShortcuts.ts";
 import { buildEngineAdapterMock } from "../../../test/factories/engineAdapterFactory.ts";
 import {
+  buildManaPaymentWaitingFor,
   buildFormatConfig,
   buildLegalActionsResult,
   gameStateFactory,
@@ -504,7 +505,7 @@ describe("SandboxLifeCorrection", () => {
     expect(harness.adapter.submitAction).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps native Enter and Space activation local while global shortcuts are mounted at priority", async () => {
+  it("keeps all trigger and panel keydowns local while preserving native activation and focus navigation", async () => {
     const harness = makeHarness();
     expect(useGameStore.getState().waitingFor?.type).toBe("Priority");
     const user = userEvent.setup();
@@ -523,10 +524,16 @@ describe("SandboxLifeCorrection", () => {
     expect(harness.adapter.submitAction).not.toHaveBeenCalled();
 
     act(() => useUiStore.setState({ selectedCardIds: [10] }));
+    const stateBeforeEscape = useGameStore.getState().gameState;
     await user.keyboard("{Escape}");
-    expect(useUiStore.getState().selectedCardIds).toEqual([]);
-    expect(firstDialog).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(useUiStore.getState().selectedCardIds).toEqual([10]);
+    expect(useGameStore.getState().gameState).toBe(stateBeforeEscape);
+    expect(harness.adapter.submitAction).not.toHaveBeenCalled();
 
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("dialog", { name: "Sandbox life correction" })).toHaveFocus();
     await user.tab();
     const cancel = screen.getByRole("button", { name: "Cancel" });
     expect(cancel).toHaveFocus();
@@ -599,6 +606,133 @@ describe("SandboxLifeCorrection", () => {
       { type: "Debug", data: { type: "SetLife", data: { player_id: 0, life: 21 } } },
       { type: "Debug", data: { type: "SetLife", data: { player_id: 0, life: 22 } } },
     ]);
+  });
+
+  it("dismisses locally on Escape while auto-pass is active without changing game or selection", async () => {
+    const harness = makeHarness();
+    const autoPassState: GameState = {
+      ...harness.initialState,
+      auto_pass: { 0: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+    };
+    const dispatch = vi.fn().mockResolvedValue([]);
+    act(() => {
+      useGameStore.setState({ gameState: autoPassState, waitingFor: autoPassState.waiting_for, dispatch });
+      useUiStore.setState({ selectedCardIds: [10, 20] });
+    });
+    const user = userEvent.setup();
+    render(
+      <>
+        <GameKeyboardShortcutsHarness />
+        <SandboxLifeCorrection />
+      </>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Life correction" });
+    await user.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "Sandbox life correction" });
+    dialog.focus();
+    const stateBeforeEscape = useGameStore.getState().gameState;
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(useGameStore.getState().gameState).toBe(stateBeforeEscape);
+    expect(useGameStore.getState().gameState?.auto_pass).toEqual(autoPassState.auto_pass);
+    expect(useUiStore.getState().selectedCardIds).toEqual([10, 20]);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(harness.adapter.submitAction).not.toHaveBeenCalled();
+  });
+
+  it("keeps Escape and T local during ManaPayment while the outside T shortcut still dispatches", async () => {
+    const harness = makeHarness();
+    const waitingFor = buildManaPaymentWaitingFor();
+    const paymentState: GameState = { ...harness.initialState, waiting_for: waitingFor };
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const tapAction: GameAction = {
+      type: "TapLandForMana",
+      data: {
+        selection: {
+          source: { object_id: 17, incarnation: 1 },
+          ability_index: null,
+          mana_type: "Green",
+          output: { type: "Concrete", data: "Green" },
+          atomic_combination: null,
+          restrictions: [],
+          penalty: "None",
+          taps_for_mana: [],
+        },
+      },
+    };
+    act(() => {
+      useGameStore.setState({
+        gameState: paymentState,
+        waitingFor,
+        dispatch,
+        manaPaymentShortcutActions: [tapAction],
+      });
+    });
+    const user = userEvent.setup();
+    render(
+      <>
+        <GameKeyboardShortcutsHarness />
+        <SandboxLifeCorrection />
+        <button type="button">Outside control</button>
+      </>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Life correction" });
+    await user.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "Sandbox life correction" });
+    dialog.focus();
+    const stateBeforeShortcut = useGameStore.getState().gameState;
+    await user.keyboard("t");
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(useGameStore.getState().gameState).toBe(stateBeforeShortcut);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Sandbox life correction" })).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(useGameStore.getState().gameState).toBe(stateBeforeShortcut);
+    expect(useGameStore.getState().waitingFor).toBe(waitingFor);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(harness.adapter.submitAction).not.toHaveBeenCalled();
+
+    screen.getByRole("button", { name: "Outside control" }).focus();
+    await user.keyboard("t");
+    expect(dispatch).toHaveBeenCalledWith(tapAction);
+  });
+
+  it("does not run Z undo inside the boundary and preserves the global shortcut outside", async () => {
+    const harness = makeHarness();
+    const undo = vi.fn().mockResolvedValue(undefined);
+    const history = [harness.initialState];
+    act(() => useGameStore.setState({ stateHistory: history, undo }));
+    const user = userEvent.setup();
+    render(
+      <>
+        <GameKeyboardShortcutsHarness />
+        <SandboxLifeCorrection />
+        <button type="button">Outside control</button>
+      </>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Life correction" });
+    trigger.focus();
+    await user.keyboard("z");
+    expect(undo).not.toHaveBeenCalled();
+
+    await user.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "Sandbox life correction" });
+    dialog.focus();
+    const stateBeforeUndoShortcut = useGameStore.getState().gameState;
+    await user.keyboard("z");
+    expect(undo).not.toHaveBeenCalled();
+    expect(useGameStore.getState().stateHistory).toBe(history);
+    expect(useGameStore.getState().gameState).toBe(stateBeforeUndoShortcut);
+
+    screen.getByRole("button", { name: "Outside control" }).focus();
+    await user.keyboard("z");
+    expect(undo).toHaveBeenCalledTimes(1);
   });
 
   it("does not apply a draft after the engine snapshot changes during editing", () => {
