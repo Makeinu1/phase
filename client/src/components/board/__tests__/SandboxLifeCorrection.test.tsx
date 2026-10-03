@@ -7,7 +7,11 @@ import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { buildEngineAdapterMock } from "../../../test/factories/engineAdapterFactory.ts";
-import { buildLegalActionsResult, gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
+import {
+  buildFormatConfig,
+  buildLegalActionsResult,
+  gameStateFactory,
+} from "../../../test/factories/gameStateFactory.ts";
 import { abandonPendingDispatches } from "../../../game/dispatch.ts";
 import { SandboxLifeCorrection } from "../SandboxLifeCorrection.tsx";
 
@@ -26,7 +30,7 @@ function makeSandboxGameState(): GameState {
     ...state,
     active_player: 1,
     turn_decision_controller: 0,
-    format_config: { ...state.format_config, allow_debug_actions: true },
+    format_config: buildFormatConfig({ ...state.format_config, allow_debug_actions: true }),
     debug_permitted: [0],
   };
 }
