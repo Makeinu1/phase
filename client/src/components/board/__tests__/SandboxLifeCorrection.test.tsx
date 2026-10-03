@@ -31,8 +31,9 @@ function makeSandboxGameState(): GameState {
     ...state,
     active_player: 1,
     turn_decision_controller: 0,
-    format_config: buildFormatConfig({ ...state.format_config, allow_debug_actions: true }),
+    format_config: buildFormatConfig({ ...state.format_config, allow_debug_actions: false }),
     debug_permitted: [0],
+    debug_mode: true,
   };
 }
 
@@ -166,8 +167,33 @@ describe("SandboxLifeCorrection", () => {
     expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
   });
 
+  it("requires engine debug mode even when the format flag is off", () => {
+    const harness = makeHarness();
+    expect(harness.initialState.format_config?.allow_debug_actions).toBe(false);
+    act(() => {
+      useGameStore.setState({ gameState: { ...harness.initialState, debug_mode: false } });
+    });
+
+    render(<SandboxLifeCorrection />);
+
+    expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
+  });
+
+  it("hides when the local seat is not engine-permitted to submit debug actions", () => {
+    const harness = makeHarness();
+    act(() => {
+      useGameStore.setState({ gameState: { ...harness.initialState, debug_permitted: [1] } });
+    });
+
+    render(<SandboxLifeCorrection />);
+
+    expect(screen.queryByRole("button", { name: "Life correction" })).toBeNull();
+  });
+
   it("submits SetLife through useGameDispatch and confirms the committed engine snapshot", async () => {
     const harness = makeHarness();
+    expect(harness.initialState.format_config?.allow_debug_actions).toBe(false);
+    expect(harness.initialState.debug_mode).toBe(true);
     render(<SandboxLifeCorrection />);
     openPanel();
     fireEvent.change(screen.getByRole("combobox", { name: "Player" }), { target: { value: "1" } });

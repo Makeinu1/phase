@@ -124,7 +124,7 @@ export function SandboxLifeCorrection() {
   const isSupportedMode = gameMode === "ai" || gameMode === "local";
   const debugPlayers = gameState?.debug_permitted;
   const hasDebugPermission = !debugPlayers || debugPlayers.length === 0 || debugPlayers.includes(localPlayerId);
-  const isSandboxGame = gameState?.format_config?.allow_debug_actions === true;
+  const isSandboxGame = gameState?.debug_mode === true;
 
   if (
     !sandboxFlagEnabled()
