@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
@@ -242,7 +242,7 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
     vi.mocked(dispatchAction).mockReset();
     vi.mocked(dispatchAction).mockResolvedValue(undefined);
     vi.mocked(dispatchInteraction).mockReset();
-    vi.mocked(dispatchInteraction).mockResolvedValue(undefined);
+    vi.mocked(dispatchInteraction).mockResolvedValue({ status: "applied" });
   });
 
   afterEach(() => {
@@ -397,6 +397,53 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
     });
     expect(dispatchAction).not.toHaveBeenCalled();
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
+  });
+
+  it("closes the fan after an applied interaction reply", async () => {
+    seed({ viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }) });
+
+    fireEvent.click(fanCard("Freed from the Real"));
+    expect(dispatchInteraction).toHaveBeenCalledOnce();
+    await act(async () => {
+      await vi.mocked(dispatchInteraction).mock.results[0]?.value;
+    });
+
+    expect(useUiStore.getState().attachmentFanHostId).toBeNull();
+    expect(document.querySelector("[data-attachment-fan]")).toBeNull();
+  });
+
+  it("keeps a replacement fan open when the old interaction reply is discarded", async () => {
+    let settleOldReply!: (outcome: Awaited<ReturnType<typeof dispatchInteraction>>) => void;
+    vi.mocked(dispatchInteraction).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        settleOldReply = resolve;
+      }),
+    );
+    seed({ viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }) });
+
+    fireEvent.click(fanCard("Freed from the Real"));
+    expect(dispatchInteraction).toHaveBeenCalledOnce();
+
+    act(() => {
+      useUiStore.setState({ attachmentFanHostId: null });
+    });
+    expect(document.querySelector("[data-attachment-fan]")).toBeNull();
+
+    act(() => {
+      useGameStore.setState({
+        gameState: makeState({ attachments: [BOOTS_ID] }),
+        viewerInteraction: projection([BOOTS_ID], { published: [BOOTS_ID] }),
+      });
+      useUiStore.setState({ attachmentFanHostId: HOST_ID });
+    });
+    expect(isSelectable("Swiftfoot Boots")).toBe(true);
+
+    await act(async () => {
+      settleOldReply({ status: "stale" });
+    });
+
+    expect(useUiStore.getState().attachmentFanHostId).toBe(HOST_ID);
+    expect(isSelectable("Swiftfoot Boots")).toBe(true);
   });
 
   it("leaves the fan open when the centralized interaction dispatcher rejects", async () => {

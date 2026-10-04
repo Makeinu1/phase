@@ -863,9 +863,11 @@ export async function dispatchAiActionProposal(
 export async function dispatchInteraction(
   submission: InteractionSubmission,
   actor: number = getPlayerId(),
-): Promise<void> {
+): Promise<{ status: "applied" | "stale" }> {
   const { adapter, gameState, gameMode, gameSessionGeneration } = useGameStore.getState();
-  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
+  if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return { status: "stale" };
+  }
 
   const generation = dispatchGeneration;
   const session: BoundGameSession = { adapter, generation: gameSessionGeneration };
@@ -879,18 +881,19 @@ export async function dispatchInteraction(
       );
     }
     const result = await adapter.submitInteraction(submission, actor);
-    if (!isDispatchContextCurrent(generation, session)) return;
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
 
     const snapshot = await adapter.getSnapshot();
-    if (!isDispatchContextCurrent(generation, session)) return;
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
 
     useGameStore.getState().commitEngineSnapshot(snapshot, {
       events: result.events,
       logEntries: result.log_entries ?? [],
       extraState: { restoredStackAutomation: null },
     });
+    return { status: "applied" };
   } catch (err) {
-    if (!isDispatchContextCurrent(generation, session)) return;
+    if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
 
     reportActionError(err);
     throw err;

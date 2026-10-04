@@ -225,7 +225,7 @@ describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
     });
     useGameStore.setState({ adapter, gameState: beforeInteraction, gameMode: "ai" });
 
-    await dispatchInteraction(interactionSubmission, 0);
+    await expect(dispatchInteraction(interactionSubmission, 0)).resolves.toEqual({ status: "applied" });
 
     expect(submitInteraction).toHaveBeenCalledOnce();
     expect(useGameStore.getState().gameState).toEqual(afterInteraction);
@@ -271,7 +271,7 @@ describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
     // The old adapter completes after the replacement and returns its own old
     // snapshot. The dispatch must not write that result into the new session.
     releaseOldSubmit({ events: [] });
-    await delayedInteraction;
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
 
     expect(oldGetSnapshot).not.toHaveBeenCalled();
     expect(useGameStore.getState().adapter).toBe(replacementAdapter);
@@ -307,7 +307,7 @@ describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
     expect(useGameStore.getState().gameSessionGeneration).toBe(generation);
 
     releaseSubmit({ events: [] });
-    await delayedInteraction;
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
 
     expect(oldGetSnapshot).not.toHaveBeenCalled();
     expect(useGameStore.getState().waitingFor).toBeNull();
@@ -352,7 +352,7 @@ describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
       legalResult: buildLegalActionsResult(),
       seq: nextSnapshotSeq(),
     });
-    await delayedInteraction;
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
 
     expect(useGameStore.getState().adapter).toBe(replacementAdapter);
     expect(useGameStore.getState().gameSessionGeneration).toBe(replacementGeneration);
@@ -389,7 +389,7 @@ describe("clearPromptOverlayState dispatch-pipeline recovery", () => {
     useGameStore.getState().commitEngineSnapshot(await replacementAdapter.getSnapshot());
 
     rejectOldSubmit(new Error("old session interaction failed"));
-    await expect(delayedInteraction).resolves.toBeUndefined();
+    await expect(delayedInteraction).resolves.toEqual({ status: "stale" });
 
     expect(useAppNotificationStore.getState().notification).toBeNull();
     expect(useGameStore.getState().adapter).toBe(replacementAdapter);
