@@ -35,6 +35,8 @@ use crate::types::game_state::{
     PayCostKind, PileSide, PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+#[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+use crate::types::interaction::ManualResolutionDecision;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
     InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
@@ -159,6 +161,8 @@ enum HumanResponseModel {
     DirectChoices,
     SideboardPartition,
     NumberRange(NumberResponseAction),
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    ManualResolution,
     LoopShortcut,
 }
 
@@ -287,6 +291,8 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::UntapChoice { .. } => HumanResponseModel::DirectChoices,
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        WaitingFor::ManualResolution { .. } => HumanResponseModel::ManualResolution,
         WaitingFor::BetweenGamesSideboard { .. } => HumanResponseModel::SideboardPartition,
         WaitingFor::ManaPayment { .. } | WaitingFor::ManaSourceSelection { .. } => {
             HumanResponseModel::DirectChoices
@@ -396,6 +402,12 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::UnlessPayment { .. }
         | WaitingFor::CombatTaxPayment { .. } => (
+            InteractionWaitingForCode::Choose,
+            None,
+            Some(InteractionSlotKind::Single),
+        ),
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        WaitingFor::ManualResolution { .. } => (
             InteractionWaitingForCode::Choose,
             None,
             Some(InteractionSlotKind::Single),
@@ -2234,6 +2246,19 @@ fn direct_choice_projection(
     semantic_owner: PlayerId,
 ) -> Result<Option<DirectChoiceProjection>, InteractionReasonCode> {
     let actions = match waiting_for {
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        WaitingFor::ManualResolution {
+            player,
+            stack_entry_id,
+            ..
+        } => {
+            if *player != semantic_owner {
+                return Err(InteractionReasonCode::InvalidAuthorityState);
+            }
+            vec![GameAction::FinishManualResolution {
+                stack_entry_id: *stack_entry_id,
+            }]
+        }
         WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -4175,7 +4200,11 @@ fn selection_projection(
     }
 
     Ok(match waiting_for {
-        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. } => None,
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        WaitingFor::ManualResolution { .. } => None,
+        WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
+            => None,
         WaitingFor::OpeningHandBottomCards { pending, .. } => pending
             .iter()
             .find(|entry| entry.player == semantic_owner)
@@ -5595,6 +5624,10 @@ fn project_action_payload(
     surfaces: &mut Vec<InteractionPresentationSurface>,
 ) {
     match action {
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::DesignateManualResolution { .. }
+        | GameAction::FinishManualResolution { .. }
+        | GameAction::ApplyManualLifeLoss { .. } => {}
         GameAction::PassPriority
         | GameAction::CancelCast
         | GameAction::BackToManaPayment
@@ -6476,6 +6509,14 @@ fn project_prompt_payload(
 fn action_code(action: &GameAction) -> InteractionActionCode {
     match action {
         GameAction::PassPriority => InteractionActionCode::PassPriority,
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::DesignateManualResolution { .. } => {
+            InteractionActionCode::DesignateManualResolution
+        }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::FinishManualResolution { .. } => InteractionActionCode::FinishManualResolution,
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::ApplyManualLifeLoss { .. } => InteractionActionCode::ManualLifeLoss,
         GameAction::ChooseMeldPair { .. } => InteractionActionCode::ChooseMeldPair,
         GameAction::ChooseEntryAttackTarget { .. } => {
             InteractionActionCode::ChooseEntryAttackTarget
@@ -8324,6 +8365,50 @@ fn opportunity_for_slot(
                 InteractionAvailability::InputRequired,
             )
         }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        HumanResponseModel::ManualResolution => {
+            let projection = match direct_choice_projection(
+                &filtered_state.waiting_for,
+                filtered_state,
+                semantic_owner,
+            ) {
+                Ok(Some(projection)) => projection,
+                Ok(None) => unreachable!("manual-resolution model requires a Finish candidate"),
+                Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
+            };
+            let choices = direct_choices(&slot.interaction_id, &projection, filtered_state);
+            (
+                InteractionOpportunity {
+                    interaction_id: slot.interaction_id.clone(),
+                    response: InteractionOpportunityResponse::Schema {
+                        spec: InteractionResponseSpec::ManualResolution {
+                            min_life_loss: 1,
+                            max_life_loss: i32::MAX as u32,
+                            confirm: ConfirmSemantics::Explicit,
+                        },
+                        candidates: choices,
+                    },
+                    surfaces: vec![
+                        InteractionPresentationSurface::Summary {
+                            code: InteractionSummaryCode::Decision,
+                        },
+                        InteractionPresentationSurface::Amount {
+                            min: 1,
+                            max: i32::MAX as u32,
+                            total: None,
+                        },
+                    ],
+                    progress: InteractionProgress {
+                        selected: 0,
+                        minimum: 1,
+                        maximum: Some(1),
+                        aggregate: None,
+                        confirmable: false,
+                    },
+                },
+                InteractionAvailability::InputRequired,
+            )
+        }
         HumanResponseModel::DirectChoices => {
             let projection = match direct_choice_projection(
                 &filtered_state.waiting_for,
@@ -9070,6 +9155,8 @@ fn attachment_fans_for_slot(
         | HumanResponseModel::SideboardPartition
         | HumanResponseModel::NumberRange(_)
         | HumanResponseModel::LoopShortcut => Vec::new(),
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        HumanResponseModel::ManualResolution => Vec::new(),
     };
     attachment_fans_for_object_choices(filtered_state, &slot.interaction_id, model, object_choices)
 }
@@ -9545,6 +9632,8 @@ fn bound_outbound_spec(
         | InteractionResponseSpec::Text { .. }
         | InteractionResponseSpec::DeckPartition { .. }
         | InteractionResponseSpec::Number { .. } => {}
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        InteractionResponseSpec::ManualResolution { .. } => {}
     }
     Ok(())
 }
@@ -9593,6 +9682,11 @@ fn bound_outbound_response(
                 }
             }
         }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        InteractionResponse::ManualResolution { decision } => match decision {
+            ManualResolutionDecision::Finish { choice_id } => budget.string(choice_id.as_str())?,
+            ManualResolutionDecision::LoseOwnLife { .. } => {}
+        },
         InteractionResponse::Text { value } => budget.string(value)?,
         InteractionResponse::Number { .. } | InteractionResponse::ShortcutReply { .. } => {}
     }
@@ -9717,6 +9811,11 @@ fn validate_response_bounds(response: &InteractionResponse) -> Result<(), Intera
             }
             Ok(())
         }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        InteractionResponse::ManualResolution { decision } => match decision {
+            ManualResolutionDecision::Finish { choice_id } => bound_string(choice_id.as_str()),
+            ManualResolutionDecision::LoseOwnLife { .. } => Ok(()),
+        },
         InteractionResponse::Number { .. } | InteractionResponse::ShortcutReply { .. } => Ok(()),
     }
 }
@@ -10372,6 +10471,61 @@ fn materialize_direct_choice_response(
             minimum: 1,
             maximum: Some(1),
             aggregate: None,
+            confirmable: true,
+        },
+    ))
+}
+
+#[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+fn materialize_manual_resolution_response(
+    interaction_id: &InteractionId,
+    waiting_for: &WaitingFor,
+    semantic_owner: PlayerId,
+    response: &InteractionResponse,
+) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
+    let WaitingFor::ManualResolution {
+        player,
+        stack_entry_id,
+    } = waiting_for
+    else {
+        return Err(InteractionReasonCode::InvalidAuthorityState);
+    };
+    if *player != semantic_owner {
+        return Err(InteractionReasonCode::InvalidAuthorityState);
+    }
+    let (action, aggregate) = match response {
+        InteractionResponse::ManualResolution {
+            decision: ManualResolutionDecision::Finish { choice_id },
+        } if *choice_id == interaction_choice_id(interaction_id, 'p', 0) => (
+            GameAction::FinishManualResolution {
+                stack_entry_id: *stack_entry_id,
+            },
+            None,
+        ),
+        InteractionResponse::ManualResolution {
+            decision: ManualResolutionDecision::Finish { .. },
+        } => return Err(InteractionReasonCode::UnknownChoice),
+        InteractionResponse::ManualResolution {
+            decision: ManualResolutionDecision::LoseOwnLife { amount },
+        } if (1..=i32::MAX as u32).contains(amount) => (
+            GameAction::ApplyManualLifeLoss {
+                stack_entry_id: *stack_entry_id,
+                amount: *amount,
+            },
+            Some(*amount as i32),
+        ),
+        InteractionResponse::ManualResolution { .. } => {
+            return Err(InteractionReasonCode::ConstraintUnsatisfied)
+        }
+        _ => return Err(InteractionReasonCode::MalformedResponse),
+    };
+    Ok((
+        action,
+        InteractionProgress {
+            selected: 1,
+            minimum: 1,
+            maximum: Some(1),
+            aggregate,
             confirmable: true,
         },
     ))
@@ -11159,6 +11313,15 @@ fn materialize_response(
                 .filter(|projection| projection.action == expected_action)
                 .ok_or(InteractionReasonCode::UnsupportedResponse)?;
             return materialize_number_response(projection, response);
+        }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        HumanResponseModel::ManualResolution => {
+            return materialize_manual_resolution_response(
+                interaction_id,
+                &filtered_state.waiting_for,
+                semantic_owner,
+                response,
+            );
         }
         HumanResponseModel::LoopShortcut => {
             let projection = loop_shortcut_projection(&filtered_state.waiting_for)?;

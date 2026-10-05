@@ -41,6 +41,34 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             Ordering::Equal
         }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::DesignateManualResolution { stack_entry_id: a0 } => {
+            let GameAction::DesignateManualResolution { stack_entry_id: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::FinishManualResolution { stack_entry_id: a0 } => {
+            let GameAction::FinishManualResolution { stack_entry_id: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::ApplyManualLifeLoss {
+            stack_entry_id: a0,
+            amount: a1,
+        } => {
+            let GameAction::ApplyManualLifeLoss {
+                stack_entry_id: b0,
+                amount: b1,
+            } = b
+            else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
         GameAction::ChooseMeldPair {
             source_id: a0,
             partner_id: a1,

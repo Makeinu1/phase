@@ -37,6 +37,17 @@ pub enum ReplacementDeferred {
     SubstitutionContinuation { applied: u32 },
 }
 
+/// Failure modes for an explicitly bounded life-loss application. Manual
+/// resolution uses this narrow form so replacement-adjusted quantities are
+/// checked before the shared CR 119.3 edit narrows them to `i32`.
+#[derive(Debug)]
+pub(crate) enum BoundedLifeLossError {
+    ReplacementDeferred(ReplacementDeferred),
+    ExceedsMaximum,
+    UnsupportedReplacementQuantity,
+    UnsupportedReplacementSubstitution,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubstitutionDrainOutcome {
     Completed,
@@ -295,6 +306,38 @@ pub fn apply_life_loss(
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, ReplacementDeferred> {
+    apply_life_loss_with_maximum(state, player_id, amount, None, events).map_err(
+        |error| match error {
+            BoundedLifeLossError::ReplacementDeferred(deferred) => deferred,
+            BoundedLifeLossError::ExceedsMaximum
+            | BoundedLifeLossError::UnsupportedReplacementQuantity
+            | BoundedLifeLossError::UnsupportedReplacementSubstitution => {
+                unreachable!("the unbounded life-loss path has no checked replacement quantity")
+            }
+        },
+    )
+}
+
+/// CR 119.3 through the same replacement/edit authority as
+/// [`apply_life_loss`], with a caller-owned maximum checked after replacement
+/// application but before any signed life edit or event conversion.
+pub(crate) fn apply_life_loss_bounded(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    maximum: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, BoundedLifeLossError> {
+    apply_life_loss_with_maximum(state, player_id, amount, Some(maximum), events)
+}
+
+fn apply_life_loss_with_maximum(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    maximum: Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, BoundedLifeLossError> {
     if amount == 0 {
         return Ok(0);
     }
@@ -308,8 +351,32 @@ pub fn apply_life_loss(
         amount,
         applied: HashSet::new(),
     };
-    match replacement::replace_event(state, proposed, events) {
+    let replacement_result = match maximum {
+        Some(maximum) => replacement::replace_bounded_life_loss(state, proposed, maximum, events)
+            .map_err(|error| match error {
+            replacement::BoundedLifeLossReplacementError::QuantityOverflow
+            | replacement::BoundedLifeLossReplacementError::ExceedsMaximum => {
+                BoundedLifeLossError::ExceedsMaximum
+            }
+            replacement::BoundedLifeLossReplacementError::UnsupportedQuantity => {
+                BoundedLifeLossError::UnsupportedReplacementQuantity
+            }
+            replacement::BoundedLifeLossReplacementError::UnsupportedSubstitution => {
+                BoundedLifeLossError::UnsupportedReplacementSubstitution
+            }
+        })?,
+        None => replacement::replace_event(state, proposed, events),
+    };
+    match replacement_result {
         ReplacementResult::Execute(event) => {
+            if maximum.is_some_and(|maximum| match &event {
+                ProposedEvent::LifeLoss {
+                    player_id, amount, ..
+                } => *amount > maximum || !life_loss_edit_fits(state, *player_id, *amount),
+                _ => false,
+            }) {
+                return Err(BoundedLifeLossError::ExceedsMaximum);
+            }
             let lost = apply_life_loss_after_replacement(state, event, events);
             // CR 614.6: A replacement that substitutes another effect must
             // finish that effect before the original resolution may continue.
@@ -318,7 +385,9 @@ pub fn apply_life_loss(
                 SubstitutionDrainOutcome::Deferred => {
                     // The root loss is FINAL at this point — `lost` is what the
                     // player actually paid. Only the substitute is unfinished.
-                    Err(ReplacementDeferred::SubstitutionContinuation { applied: lost })
+                    Err(BoundedLifeLossError::ReplacementDeferred(
+                        ReplacementDeferred::SubstitutionContinuation { applied: lost },
+                    ))
                 }
             }
         }
@@ -330,7 +399,9 @@ pub fn apply_life_loss(
                 SubstitutionDrainOutcome::Deferred => {
                     // Fully prevented: no life left the player, so nothing
                     // downstream may narrate a loss.
-                    Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+                    Err(BoundedLifeLossError::ReplacementDeferred(
+                        ReplacementDeferred::SubstitutionContinuation { applied: 0 },
+                    ))
                 }
             }
         }
@@ -338,9 +409,22 @@ pub fn apply_life_loss(
             // CR 616.1: Multiple competing replacements — player must choose.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
-            Err(ReplacementDeferred::ReplacementChoice)
+            Err(BoundedLifeLossError::ReplacementDeferred(
+                ReplacementDeferred::ReplacementChoice,
+            ))
         }
     }
+}
+
+fn life_loss_edit_fits(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
+    let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
+        return false;
+    };
+    i32::try_from(amount)
+        .ok()
+        .and_then(|amount| player.life.checked_sub(amount))
+        .is_some()
+        && player.life_lost_this_turn.checked_add(amount).is_some()
 }
 
 /// CR 120.3a: Damage dealt to a player normally causes that player to lose

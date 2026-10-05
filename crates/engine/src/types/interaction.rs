@@ -492,6 +492,12 @@ pub enum ConfirmSemantics {
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub enum InteractionActionCode {
     PassPriority,
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    DesignateManualResolution,
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    FinishManualResolution,
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    ManualLifeLoss,
     ChooseMeldPair,
     ChooseEntryAttackTarget,
     PlayLand,
@@ -1019,6 +1025,14 @@ pub enum InteractionResponseSpec {
         max: u32,
         confirm: ConfirmSemantics,
     },
+    /// Native-only manual-resolution decision. `candidates` contains the exact Finish action;
+    /// the bounded amount branch is materialized by the engine from this same interaction.
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    ManualResolution {
+        min_life_loss: u32,
+        max_life_loss: u32,
+        confirm: ConfirmSemantics,
+    },
     /// CR 732.2a: the loop-shortcut declaration. `count` is the picker's window and
     /// `preview` states what the counts inside that window actually DO, per axis — see
     /// [`InteractionShortcutPreview`] for why each element's count travels with its
@@ -1485,6 +1499,11 @@ pub enum InteractionResponse {
     Number {
         value: u32,
     },
+    /// Native-only response union for the experimental manual-resolution prompt.
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    ManualResolution {
+        decision: ManualResolutionDecision,
+    },
     Shortcut {
         decision: InteractionShortcutDecision,
         pins: Vec<InteractionShortcutPin>,
@@ -1492,6 +1511,25 @@ pub enum InteractionResponse {
     ShortcutReply {
         reply: InteractionShortcutReply,
     },
+}
+
+/// One explicit operation offered by the native manual-resolution prompt.
+#[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum ManualResolutionDecision {
+    Finish { choice_id: InteractionChoiceId },
+    LoseOwnLife { amount: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
