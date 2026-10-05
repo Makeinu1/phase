@@ -4,7 +4,7 @@ import { takeSandboxUndoConsent, useSandboxUndoConsentStore } from "../sandboxUn
 beforeEach(() => { useSandboxUndoConsentStore.setState({ agreed: false }); });
 afterEach(() => { vi.unstubAllEnvs(); });
 describe("Sandbox Undo connection consent", () => {
-  it("is off without explicit agreement and is consumed by one attempt", () => {
+  it("is off without explicit agreement and is consumed by one adapter construction", () => {
     vi.stubEnv("DEV", true);
     vi.stubEnv("VITE_PHASE_SANDBOX", "1");
     expect(takeSandboxUndoConsent()).toBe(false);

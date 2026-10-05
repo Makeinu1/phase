@@ -2470,6 +2470,7 @@ export class P2PHostAdapter implements EngineAdapter {
         for (const [pid, session] of this.guestSessions) {
           const token = this.playerTokens.get(pid)!;
           try {
+            await this.prepareSandboxUndoObserverFor(session);
             const projected = await this.projectTransitionForViewer(
               pid,
               transition.result.events,
@@ -2605,7 +2606,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.isSandboxPrecastUndoConfigured() || !this.ownsAuthority()
       || !this.wasmHostOwner || !this.gameStarted || this.gameRunState !== "running"
       || this.terminalResult !== null || this.playerCount !== 2
-      || this.undoSyncFatalFailure || this.undoSyncInputBlocked || this.guestSessions.size !== 1) return null;
+      || this.undoSyncFatalFailure || this.guestSessions.size !== 1) return null;
     const [playerId, session] = [...this.guestSessions.entries()][0];
     return !this.disconnectedSeats.has(playerId) && this.undoSyncNegotiatedSessions.has(session) ? session : null;
   }
@@ -2617,17 +2618,34 @@ export class P2PHostAdapter implements EngineAdapter {
       }
     };
     assertCurrent();
-    let status = await this.wasm.hostPrecastUndoStatus(owner);
+    const status = await this.wasm.hostPrecastUndoStatus(owner);
     assertCurrent();
-    if (!status.enabled) {
-      status = await this.wasm.enableHostPrecastUndo(owner, status.binding);
-      assertCurrent();
-    }
     return status;
+  }
+
+  /** Prepare after engine install and before publishing the consent-bearing setup frame. */
+  private async prepareSandboxUndoObserverFor(session: PeerSession): Promise<void> {
+    const owner = this.wasmHostOwner;
+    if (!owner || this.playerCount !== 2 || !this.undoSyncCapabilityFor(session)) return;
+    const isCurrent = () => !this.disposed && !this.undoSyncFatalFailure && this.ownsAuthority() && this.wasmHostOwner === owner
+      && ([...this.guestSessions.values()].includes(session) || [...this.pendingReconnectSessions.values()].includes(session))
+      && this.undoSyncCapabilityFor(session) !== undefined;
+    if (!isCurrent()) throw new Error("Sandbox Undo setup session was replaced");
+    const wasBlocked = this.undoSyncInputBlocked;
+    this.undoSyncInputBlocked = true;
+    try {
+      const status = await this.wasm.hostPrecastUndoStatus(owner);
+      if (!isCurrent()) throw new Error("Sandbox Undo setup session was replaced");
+      if (!status.enabled) await this.wasm.enableHostPrecastUndo(owner, status.binding);
+      if (!isCurrent()) throw new Error("Sandbox Undo setup session was replaced");
+    } finally {
+      if (!wasBlocked && !this.undoSyncFatalFailure && !this.undoSyncBarrier?.isInputBlocked) this.undoSyncInputBlocked = false;
+    }
   }
 
   /** Only availability leaves the adapter; binding/receipt/checkpoint stay private. */
   async sandboxPrecastUndoAvailable(): Promise<boolean> {
+    if (this.undoSyncInputBlocked) return false;
     const session = this.sandboxUndoSession();
     const owner = this.wasmHostOwner;
     if (!session || !owner) return false;
@@ -2640,22 +2658,39 @@ export class P2PHostAdapter implements EngineAdapter {
     const run = async () => {
       const session = this.sandboxUndoSession();
       const owner = this.wasmHostOwner;
-      if (!session || !owner) throw new Error("Sandbox Undo requires both seats' current consent");
-      const status = await this.sandboxUndoStatus(session, owner);
-      if (!status.enabled || status.phase !== "Armed" || status.receipt === null) {
-        throw new Error("No armed host checkpoint");
-      }
-      const receipt = status.receipt;
-      await this.beginUndoSynchronization(crypto.randomUUID(), async () => {
-        // The barrier already checked its peer/authority and drained mutations.
-        if (this.wasmHostOwner !== owner || this.undoSyncRestoreSession !== session) {
-          throw new Error("Sandbox Undo host owner was replaced");
+      if (!session || !owner || this.undoSyncInputBlocked) throw new Error("Sandbox Undo requires both seats' current consent");
+      // Stop new mutations synchronously; settle earlier work BEFORE reading the
+      // receipt. An unavailable preflight has attempted no restore and sends no
+      // barrier frame, so it can safely refuse without terminating the match.
+      this.undoSyncInputBlocked = true;
+      let barrierStarted = false;
+      try {
+        await this.waitForBrowserMutationAndDeliveryDrain();
+        const status = await this.sandboxUndoStatus(session, owner);
+        if (!status.enabled || status.phase !== "Armed" || status.receipt === null) {
+          throw new Error("No armed host checkpoint");
         }
-        const restored = await this.wasm.restoreHostPrecastUndo(owner, status.binding, receipt);
-        if (this.wasmHostOwner !== owner || this.undoSyncRestoreSession !== session
-          || this.disposed || !this.ownsAuthority()) throw new Error("Sandbox Undo result became stale");
-        await adopt(restored.snapshot);
-      });
+        const receipt = status.receipt;
+        // Synchronous handoff: begin() re-locks before yielding. No input can
+        // interleave between the preparation lock and the existing barrier.
+        this.undoSyncInputBlocked = false;
+        const synchronized = this.beginUndoSynchronization(crypto.randomUUID(), async () => {
+          const assertCurrent = () => {
+            if (this.sandboxUndoSession() !== session || this.wasmHostOwner !== owner
+              || this.undoSyncRestoreSession !== session) throw new Error("Sandbox Undo result became stale");
+          };
+          assertCurrent();
+          const restored = await this.wasm.restoreHostPrecastUndo(owner, status.binding, receipt);
+          assertCurrent();
+          await adopt(restored.snapshot);
+        });
+        barrierStarted = true;
+        await synchronized;
+      } finally {
+        if (!barrierStarted && !this.undoSyncFatalFailure && !this.undoSyncBarrier?.isInputBlocked) {
+          this.undoSyncInputBlocked = false;
+        }
+      }
     };
     const flight = run().finally(() => {
       if (this.sandboxPrecastUndoFlight === flight) this.sandboxPrecastUndoFlight = null;
@@ -4043,6 +4078,9 @@ export class P2PHostAdapter implements EngineAdapter {
   private async completeReconnectAfterHandoff(pid: PlayerId, session: PeerSession): Promise<void> {
     try {
       const handoff = await this.reconnectHandoff(pid);
+      if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
+
+      await this.prepareSandboxUndoObserverFor(session);
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
       const undoSyncCapability = this.undoSyncCapabilityFor(session);

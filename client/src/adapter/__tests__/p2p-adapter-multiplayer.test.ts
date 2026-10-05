@@ -449,8 +449,8 @@ vi.mock("../wasm-adapter", () => {
 const mockInitialize = mocks.initialize;
 let uuidCounter = 0;
 beforeEach(() => {
-  mocks.hostPrecastUndoStatus.mockReset();
-  mocks.enableHostPrecastUndo.mockReset();
+  mocks.hostPrecastUndoStatus.mockReset().mockResolvedValue({ binding: "1.0.0", enabled: false, phase: "Empty", receipt: null });
+  mocks.enableHostPrecastUndo.mockReset().mockResolvedValue({ binding: "1.0.0", enabled: true, phase: "Empty", receipt: null });
   mocks.restoreHostPrecastUndo.mockReset();
   uuidCounter = 0;
   nativeWebSocketMocks.real = false;
@@ -5681,6 +5681,7 @@ describe("Undo synchronization adapter integration", () => {
       const pending = deferred<{ binding: string; enabled: boolean; phase: string; receipt: string }>();
       mocks.hostPrecastUndoStatus.mockReturnValueOnce(pending.promise);
       const request = pair.host.restoreSandboxPrecastUndo(async () => undefined);
+      await flushPromises(10);
       pair.host.dispose();
       pending.resolve({ binding: "1.2.3", enabled: true, phase: "Armed", receipt: "9" });
       await expect(request).rejects.toThrow("replaced");
@@ -5698,6 +5699,72 @@ describe("Undo synchronization adapter integration", () => {
       const messages = await pair.hostConnection.getSentMessages();
       expect(messages.some((message) => (message as P2PMessage).type === "state_update" && "undoSync" in (message as object))).toBe(false);
       expect(pair.hostEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    } finally { pair.guest.dispose(); pair.host.dispose(); }
+  });
+
+  it("prepares the disabled observer before setup publication and permits mutations only afterwards", async () => {
+    const pair = makeUndoPeerPair(async () => undefined);
+    const enable = deferred<{ binding: string; enabled: boolean; phase: string; receipt: null }>();
+    mocks.enableHostPrecastUndo.mockReturnValueOnce(enable.promise);
+    const initialized = pair.initialize();
+    try {
+      await vi.waitFor(() => expect(mocks.enableHostPrecastUndo).toHaveBeenCalled(), { timeout: 2_000, interval: 5 });
+      expect(mocks.enableHostPrecastUndo).toHaveBeenCalledWith(expect.any(Symbol), "1.0.0");
+      expect((await pair.hostConnection.getSentMessages()).some((message) => (message as P2PMessage).type === "game_setup")).toBe(false);
+      await expect(pair.host.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow("Undo synchronization");
+      enable.resolve({ binding: "1.0.0", enabled: true, phase: "Empty", receipt: null });
+      await initialized;
+      await pair.host.submitAction({ type: "PassPriority" }, 0);
+      expect(mocks.enableHostPrecastUndo.mock.invocationCallOrder[0]).toBeLessThan(mocks.submitAction.mock.invocationCallOrder[0]);
+    } finally { enable.resolve({ binding: "1.0.0", enabled: true, phase: "Empty", receipt: null }); pair.guest.dispose(); pair.host.dispose(); await initialized.catch(() => undefined); }
+  });
+
+  it("drains a prior action before reading the receipt and refuses an invalidated checkpoint without closing", async () => {
+    const pair = makeUndoPeerPair(async () => undefined);
+    try {
+      await pair.initialize();
+      const action = deferred<{ events: [] }>();
+      mocks.submitAction.mockReturnValueOnce(action.promise);
+      const earlier = pair.host.submitAction({ type: "PassPriority" }, 0);
+      const readsBefore = mocks.hostPrecastUndoStatus.mock.calls.length;
+      mocks.hostPrecastUndoStatus.mockResolvedValue({ binding: "1.0.0", enabled: true, phase: "Invalidated", receipt: null });
+      const refused = pair.host.restoreSandboxPrecastUndo(async () => undefined);
+      const refusal = expect(refused).rejects.toThrow("No armed");
+      await flushPromises(10);
+      expect(mocks.hostPrecastUndoStatus.mock.calls.length).toBe(readsBefore);
+      await expect(pair.host.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow("Undo synchronization");
+      action.resolve({ events: [] });
+      await earlier;
+      await refusal;
+      expect(mocks.restoreHostPrecastUndo).not.toHaveBeenCalled();
+      expect(pair.hostEvents.mock.calls.some(([event]) => event.type === "error")).toBe(false);
+      await expect(pair.host.submitAction({ type: "PassPriority" }, 0)).resolves.toEqual({ events: [] });
+    } finally { pair.guest.dispose(); pair.host.dispose(); }
+  });
+
+  it("does not adopt a deferred restore after fatal pause begins even before disposal finishes", async () => {
+    const pair = makeUndoPeerPair(async () => undefined);
+    try {
+      await pair.initialize();
+      const result = deferred<{ status: object; snapshot: EngineSnapshot }>();
+      const farewell = deferred<boolean>();
+      mocks.hostPrecastUndoStatus.mockResolvedValue({ binding: "1.0.0", enabled: true, phase: "Armed", receipt: "7" });
+      mocks.restoreHostPrecastUndo.mockReturnValueOnce(result.promise);
+      const adopt = vi.fn(async () => undefined);
+      const request = pair.host.restoreSandboxPrecastUndo(adopt);
+      const rejected = expect(request).rejects.toThrow();
+      await flushPromises(20);
+      expect(mocks.restoreHostPrecastUndo).toHaveBeenCalledOnce();
+      const realSend = (pair.host as unknown as { send: (...args: unknown[]) => Promise<boolean> }).send.bind(pair.host);
+      const send = vi.spyOn(pair.host as unknown as { send: (...args: unknown[]) => Promise<boolean> }, "send")
+        .mockImplementation((...args) => (args[1] as P2PMessage).type === "host_left" ? farewell.promise : realSend(...args));
+      pair.host.requestPause();
+      result.resolve({ status: {}, snapshot: await mocks.getSnapshot() as unknown as EngineSnapshot });
+      await flushPromises(20);
+      expect(adopt).not.toHaveBeenCalled();
+      await rejected;
+      farewell.resolve(true);
+      send.mockRestore();
     } finally { pair.guest.dispose(); pair.host.dispose(); }
   });
 
