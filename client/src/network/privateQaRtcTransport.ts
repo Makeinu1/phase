@@ -786,8 +786,7 @@ class PrivateQaConnection implements TransportConnection {
   }
 
   private async flushRemoteCandidates(): Promise<void> {
-    const candidates = this.pendingCandidates;
-    this.pendingCandidates.length = 0;
+    const candidates = this.pendingCandidates.splice(0);
     for (const candidate of candidates) await this.addRemoteCandidate(candidate);
   }
 

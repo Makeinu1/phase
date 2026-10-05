@@ -99,6 +99,7 @@ class FakeDataChannel extends EventTarget {
 class FakeRTCPeerConnection extends EventTarget {
   static readonly all = new Map<string, FakeRTCPeerConnection>();
   static maxMessageSize = 65_536;
+  static nextRemoteOfferHold: { promise: Promise<void>; onStarted: () => void } | null = null;
   readonly id = uuid();
   readonly sctp = { maxMessageSize: FakeRTCPeerConnection.maxMessageSize } as RTCSctpTransport;
   connectionState: RTCPeerConnectionState = "new";
@@ -140,6 +141,12 @@ class FakeRTCPeerConnection extends EventTarget {
     this.remoteDescription = description as RTCSessionDescription;
     this.remoteId = description.sdp.slice(description.sdp.indexOf(":") + 1);
     if (description.type === "offer") this.pairIncomingDataChannel();
+    if (description.type === "offer" && FakeRTCPeerConnection.nextRemoteOfferHold) {
+      const hold = FakeRTCPeerConnection.nextRemoteOfferHold;
+      FakeRTCPeerConnection.nextRemoteOfferHold = null;
+      hold.onStarted();
+      await hold.promise;
+    }
     await Promise.resolve();
     this.tryConnect();
   }
@@ -193,6 +200,7 @@ beforeEach(() => {
   FakeBroadcastChannel.dataChannelFrameSizes.length = 0;
   FakeRTCPeerConnection.all.clear();
   FakeRTCPeerConnection.maxMessageSize = 65_536;
+  FakeRTCPeerConnection.nextRemoteOfferHold = null;
   vi.stubGlobal("crypto", { randomUUID: uuid });
   vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel as unknown as typeof BroadcastChannel);
   vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection as unknown as typeof RTCPeerConnection);
@@ -452,6 +460,72 @@ describe("private QA RTC transport", () => {
     renewedHost.destroy();
     guestPeer.destroy();
     candidateChannel.close();
+    hostFactory.dispose();
+    guestFactory.dispose();
+  });
+
+  it("drains candidates queued while the remote offer description is pending exactly once", async () => {
+    const hostFactory = createPrivateQaRtcTransportFactory(namespace);
+    const guestFactory = createPrivateQaRtcTransportFactory(namespace);
+    const hostPeer = hostFactory.create(roomId);
+    const guestPeer = guestFactory.create();
+    const hostOpened = onceOpen(hostPeer);
+    const guestOpened = onceOpen(guestPeer);
+    const incoming = new Promise<TransportConnection>((resolve) => {
+      hostPeer.on("connection", resolve);
+    });
+    await Promise.all([hostOpened, guestOpened]);
+
+    let releaseRemoteDescription!: () => void;
+    const remoteDescriptionGate = new Promise<void>((resolve) => { releaseRemoteDescription = resolve; });
+    let markRemoteDescriptionStarted!: () => void;
+    const remoteDescriptionStarted = new Promise<void>((resolve) => { markRemoteDescriptionStarted = resolve; });
+    FakeRTCPeerConnection.nextRemoteOfferHold = {
+      promise: remoteDescriptionGate,
+      onStarted: markRemoteDescriptionStarted,
+    };
+
+    const guestConnection = guestPeer.connect(roomId, { serialization: "binary", reliable: true });
+    const hostConnection = await incoming;
+    await remoteDescriptionStarted;
+    const offer = FakeBroadcastChannel.sent
+      .map(({ data }) => typeof data === "string" ? JSON.parse(data) as Record<string, unknown> : null)
+      .find((signal) => signal?.type === "offer");
+    expect(offer).not.toBeNull();
+
+    const hostPc = hostConnection.peerConnection as unknown as FakeRTCPeerConnection;
+    const guestTabId = guestFactory.snapshot().peers[0]?.tabPeerId;
+    const candidateChannel = new FakeBroadcastChannel(`${signalPrefix}${namespace}`);
+    const queuedCandidate = {
+      protocol: "phase-private-qa-rtc-v1",
+      namespace,
+      room: roomId,
+      from: guestTabId,
+      to: roomId,
+      connectionId: offer?.connectionId,
+      type: "candidate",
+      candidate: { candidate: "candidate:queued-during-description", sdpMid: "0", sdpMLineIndex: 0 },
+    };
+    candidateChannel.postMessage(JSON.stringify(queuedCandidate));
+    candidateChannel.postMessage(JSON.stringify(queuedCandidate));
+    await tick();
+    expect(hostPc.appliedCandidates.some((candidate) => candidate?.candidate === "candidate:queued-during-description")).toBe(false);
+
+    releaseRemoteDescription();
+    await vi.waitFor(() => {
+      expect(hostPc.appliedCandidates.filter((candidate) => candidate?.candidate === "candidate:queued-during-description")).toHaveLength(1);
+      expect(guestConnection.open).toBe(true);
+      expect(hostConnection.open).toBe(true);
+    });
+
+    candidateChannel.postMessage(JSON.stringify(queuedCandidate));
+    await tick();
+    expect(hostPc.appliedCandidates.filter((candidate) => candidate?.candidate === "candidate:queued-during-description")).toHaveLength(1);
+
+    candidateChannel.close();
+    guestConnection.close();
+    hostPeer.destroy();
+    guestPeer.destroy();
     hostFactory.dispose();
     guestFactory.dispose();
   });
