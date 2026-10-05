@@ -1,0 +1,178 @@
+name: Fork Undo F verified artifact consumers
+
+on:
+  push:
+    branches: [experiment/undo-f-actions-e10955dc]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-undo-f-consumers-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  F_SOURCE_SHA: e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+  F_PRODUCER_SHA: 387b7542a901d711cbef2868e686b29726c905f0
+  CARGO_BUILD_JOBS: '1'
+
+jobs:
+  native-test:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Cross-run artifact reads require this additional read permission.
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Verify the pinned native input without compiling
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/native-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py native-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py native \
+            "$GITHUB_WORKSPACE/native-payload" "$GITHUB_WORKSPACE/reused-inputs/native.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/native-payload" 21eda8d2e38a7b25a95297a773a68420895c8c60a4ce3e20786a1b4d3c53667b "$F_PRODUCER_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: matrix.shard == 1
+        with:
+          name: undo-f-pinned-native-input
+          path: reused-inputs
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Run this native partition without Cargo metadata or compilation
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/native-test-evidence
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cargo-nextest nextest run --help > "$RUNNER_TEMP/undo-f-nextest-run-help.txt"
+          for OPTION in --archive-file --workspace-remap --extract-to --partition; do
+            grep -F -- "$OPTION" "$RUNNER_TEMP/undo-f-nextest-run-help.txt" > /dev/null
+          done
+          for KIND in core boundary; do
+            mkdir -p "$RUNNER_TEMP/undo-f-$KIND"
+            test -d "$RUNNER_TEMP/undo-f-$KIND" && test -w "$RUNNER_TEMP/undo-f-$KIND"
+            FILTER=()
+            if [ "$KIND" = boundary ]; then
+              FILTER=(-E 'test(host_precast_undo::tests::)')
+            fi
+            python3 ../control/scripts/ci/undo-f-guard.py "native-$KIND-shard-$SHARD" \
+              cargo-nextest nextest run --profile ci "${FILTER[@]}" \
+              --partition "count:$SHARD/2" \
+              --archive-file "$GITHUB_WORKSPACE/native-payload/$KIND.tar.zst" \
+              --workspace-remap "$GITHUB_WORKSPACE/source" \
+              --extract-to "$RUNNER_TEMP/undo-f-$KIND" --status-level all --final-status-level all
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-reused-native-shard-${{ matrix.shard }}-evidence
+          path: native-test-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  wasm-test:
+    # No native dependency: failures in another lane cannot suppress this job.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Verify the pinned actual WASM input
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py wasm-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/wasm-payload" "$GITHUB_WORKSPACE/reused-inputs/wasm.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: undo-f-pinned-wasm-input
+          path: reused-inputs
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Chromium actual-engine module-worker capability (not app UI or RTC acceptance)
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/browser-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py browser-capability \
+            node ../control/scripts/ci/undo-f-browser.mjs "$GITHUB_WORKSPACE/wasm-payload" "$F_EVIDENCE"
+      - name: Inspect actual bindings and install frozen client dependencies
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py reused-bindings \
+            node ../control/scripts/ci/undo-f-bindings.mjs "$GITHUB_WORKSPACE/wasm-payload"
+          python3 ../control/scripts/ci/undo-f-guard.py client-dependencies \
+            pnpm --dir client install --frozen-lockfile
+          cp "$GITHUB_WORKSPACE/wasm-payload/engine_wasm.js" client/src/wasm/
+          cp "$GITHUB_WORKSPACE/wasm-payload/engine_wasm_bg.wasm" client/src/wasm/
+      - name: Existing real-WASM integration (not Undo behavior)
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py existing-real-wasm-tests \
+            pnpm --dir client exec vitest run --config vitest.integration.config.ts \
+            --pool=forks --isolate --coverage.enabled=false --reporter=verbose \
+            src/game/__tests__/wasmLegalActions.integration.test.ts \
+            src/data/__tests__/formatRegistry.integration.test.ts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-reused-wasm-and-browser-evidence
+          path: |
+            wasm-test-evidence
+            browser-evidence
+          if-no-files-found: warn
+          retention-days: 7

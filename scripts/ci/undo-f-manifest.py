@@ -34,9 +34,11 @@ if mode == "create":
               "scope": "functional validation; new Undo WASM behavior/browser/RTC NOT RUN"}
     manifest.write_text(json.dumps(record, indent=2) + "\n")
 elif mode == "verify":
-    assert len(expected) == 1 and sha(manifest) == expected[0], "producer manifest digest mismatch"
+    assert len(expected) in (1, 2) and sha(manifest) == expected[0], "producer manifest digest mismatch"
     record = json.loads(manifest.read_text())
-    assert record["source_sha"] == SOURCE and record["workflow_sha"] == os.environ["GITHUB_SHA"]
+    producer = expected[1] if len(expected) == 2 else os.environ["GITHUB_SHA"]
+    assert len(producer) == 40 and all(c in "0123456789abcdef" for c in producer)
+    assert record["source_sha"] == SOURCE and record["workflow_sha"] == producer
     assert record["files"]
     for name, identity in record["files"].items():
         relative = Path(name)

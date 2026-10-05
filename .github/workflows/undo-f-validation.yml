@@ -1,8 +1,7 @@
 name: Fork Undo F validation
 
 on:
-  push:
-    branches: [experiment/undo-f-actions-e10955dc]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -238,6 +237,7 @@ jobs:
 
   wasm-test:
     needs: wasm-build
+    if: always() && needs.wasm-build.result == 'success' && github.repository == 'Makeinu1/phase'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
