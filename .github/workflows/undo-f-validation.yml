@@ -127,7 +127,14 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           python3 ../control/scripts/ci/undo-f-manifest.py verify "$GITHUB_WORKSPACE/native-payload" "$MANIFEST_SHA"
+          cargo-nextest nextest run --help > "$RUNNER_TEMP/undo-f-nextest-run-help.txt"
+          for OPTION in --archive-file --workspace-remap --extract-to --partition; do
+            grep -F -- "$OPTION" "$RUNNER_TEMP/undo-f-nextest-run-help.txt" > /dev/null
+          done
           for KIND in core boundary; do
+            # nextest 0.9.146 canonicalizes this directory before extraction.
+            mkdir -p "$RUNNER_TEMP/undo-f-$KIND"
+            test -d "$RUNNER_TEMP/undo-f-$KIND" && test -w "$RUNNER_TEMP/undo-f-$KIND"
             FILTER=()
             if [ "$KIND" = boundary ]; then
               FILTER=(-E 'test(host_precast_undo::tests::)')
