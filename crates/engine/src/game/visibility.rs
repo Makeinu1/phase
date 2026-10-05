@@ -80,6 +80,8 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         },
         // Keep this complete rather than using a catch-all: new pause states
         // must explicitly decide whether they carry paid-cast authority.
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        WaitingFor::ManualResolution { .. } => {}
         WaitingFor::Priority { .. }
         | WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }

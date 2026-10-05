@@ -26,6 +26,10 @@ interaction-bindings = ["dep:ts-rs"]
 # `combo-verify` tool bin, including the scenario harness it drives. Excluded
 # from the default lib / WASM surface.
 combo-verify = ["test-support"]
+# Native-only experiment for pausing and explicitly finishing one ordinary
+# human-owned hand-cast nonpermanent spell. Never enabled by production or WASM
+# consumers.
+manual_resolution_prototype = []
 
 [dependencies]
 serde = { workspace = true }
@@ -121,6 +125,14 @@ path = "src/bin/coverage_parse_diff.rs"
 name = "resolution-face-census"
 path = "src/bin/resolution_face_census.rs"
 required-features = ["test-support"]
+
+# This source is also registered in the shared integration harness. Keep the
+# explicit focused target so the bounded native prototype checks do not need
+# to link the full engine integration corpus (which exceeded the executor's
+# memory budget in a prior run).
+[[test]]
+name = "manual_resolution_prototype"
+path = "tests/integration/manual_resolution_prototype.rs"
 
 [build-dependencies]
 # build.rs converts data/known-tokens.toml → JSON in OUT_DIR so the runtime
