@@ -17,6 +17,15 @@ const MAX_CANDIDATE_QUEUE = 128;
 const MAX_CONNECTIONS_PER_PEER = 1;
 const MAX_FRAME_BYTES = 16_300;
 const MAX_BUFFERED_BYTES = 512 * 1024;
+const FRAME_HEADER_BYTES = 16;
+const FRAME_MAGIC = 0x50515231; // "PQR1"
+const MAX_LOGICAL_MESSAGE_BYTES = 256 * 1024;
+const MAX_MESSAGE_PARTS = 65_535;
+const MAX_CANDIDATES_PER_CONNECTION = 128;
+const MAX_RETIRED_CONNECTIONS = 256;
+const RETIRED_CONNECTION_TTL_MS = 60_000;
+const CONNECTION_SETUP_TIMEOUT_MS = 30_000;
+const MESSAGE_REASSEMBLY_TIMEOUT_MS = 30_000;
 
 type SignalBase = {
   protocol: typeof SIGNAL_PROTOCOL;
@@ -58,6 +67,7 @@ export interface PrivateQaConnectionSnapshot {
   channelState: RTCDataChannelState | null;
   ordered: boolean | null;
   negotiatedMaxMessageSize: number | null;
+  maxLogicalMessageBytes: number;
   framesSent: number;
   bytesSent: number;
   framesReceived: number;
@@ -140,6 +150,10 @@ function safeCount(value: number): number {
   return Math.min(value, Number.MAX_SAFE_INTEGER);
 }
 
+function candidateKey(candidate: RTCIceCandidateInit | null): string {
+  return candidate === null ? "<end-of-candidates>" : JSON.stringify(candidate);
+}
+
 /**
  * Creates an opt-in, owner-preview-only factory. Its room namespace is never
  * stored, and its peer identity is newly generated for this tab on each page
@@ -166,6 +180,7 @@ export function createPrivateQaRtcTransportFactory(namespace: string): PeerTrans
   const tabId = globalThis.crypto.randomUUID();
   const channel = new BroadcastChannel(`${SIGNAL_CHANNEL_PREFIX}${namespace}`);
   const peers = new Set<PrivateQaPeer>();
+  const retiredConnections = new Map<string, number>();
   let disposed = false;
 
   const postSignal = (signal: PrivateRtcSignal) => {
@@ -193,10 +208,14 @@ export function createPrivateQaRtcTransportFactory(namespace: string): PeerTrans
       if (disposed) throw new Error("Private QA RTC transport is disposed");
       if (id !== undefined && !isPeerId(id)) throw new TypeError("Private QA RTC peer ID is invalid");
       if (peers.size >= 8) throw new Error("Private QA RTC tab peer limit reached");
+      if (id !== undefined && [...peers].some((peer) => !peer.destroyed && peer.advertisedId === id)) {
+        throw new Error("Private QA RTC peer ID is already active in this tab");
+      }
       const peer = new PrivateQaPeer({
         tabId,
         id,
         namespace,
+        retiredConnections,
         postSignal,
         unregisterPeer,
       });
@@ -219,6 +238,7 @@ export function createPrivateQaRtcTransportFactory(namespace: string): PeerTrans
       if (disposed) return;
       disposed = true;
       for (const peer of [...peers]) peer.destroy();
+      retiredConnections.clear();
       channel.removeEventListener("message", onMessage);
       channel.close();
     },
@@ -230,6 +250,7 @@ interface PrivateQaPeerOptions {
   tabId: string;
   id?: string;
   namespace: string;
+  retiredConnections: Map<string, number>;
   postSignal: (signal: PrivateRtcSignal) => void;
   unregisterPeer: (peer: PrivateQaPeer) => void;
 }
@@ -246,6 +267,7 @@ class PrivateQaPeer implements TransportPeer {
   private readonly handlers = new Map<EventName<PeerEvents>, Set<StoredHandler>>();
   private readonly onceWrappers = new Map<EventName<PeerEvents>, Map<StoredHandler, Set<StoredHandler>>>();
   private readonly connections = new Map<string, PrivateQaConnection>();
+  private readonly retiredConnections: Map<string, number>;
   private openEmitted = false;
 
   constructor(options: PrivateQaPeerOptions) {
@@ -253,6 +275,7 @@ class PrivateQaPeer implements TransportPeer {
     this.id = options.id ?? options.tabId;
     this.advertisedId = options.id ?? null;
     this.namespace = options.namespace;
+    this.retiredConnections = options.retiredConnections;
     this.postSignal = options.postSignal;
     this.unregisterPeer = options.unregisterPeer;
   }
@@ -284,7 +307,7 @@ class PrivateQaPeer implements TransportPeer {
       connectionId,
       signalAddress: peerId,
       postSignal: this.postSignal,
-      onClose: () => this.connections.delete(connectionId),
+      onClose: () => this.connectionClosed(connectionId),
     });
     this.connections.set(connectionId, connection);
     void connection.startOffer().catch((error: unknown) => connection.fail(error));
@@ -309,9 +332,11 @@ class PrivateQaPeer implements TransportPeer {
 
   receiveSignal(signal: PrivateRtcSignal): void {
     if (this.destroyed || signal.from === this.tabId) return;
+    this.pruneRetiredConnections();
 
     if (signal.type === "offer") {
       if (!this.advertisedId || signal.room !== this.advertisedId || signal.to !== this.advertisedId) return;
+      if (this.retiredConnections.has(signal.connectionId)) return;
       if (this.connections.size >= MAX_CONNECTIONS_PER_PEER || this.connections.has(signal.connectionId)) return;
       if ([...this.connections.values()].some((connection) => connection.peer === signal.from)) return;
       const connection = new PrivateQaConnection({
@@ -323,7 +348,7 @@ class PrivateQaPeer implements TransportPeer {
         connectionId: signal.connectionId,
         signalAddress: signal.from,
         postSignal: this.postSignal,
-        onClose: () => this.connections.delete(signal.connectionId),
+        onClose: () => this.connectionClosed(signal.connectionId),
       });
       this.connections.set(signal.connectionId, connection);
       this.emit("connection", connection);
@@ -401,6 +426,24 @@ class PrivateQaPeer implements TransportPeer {
       catch { /* Listener failures must not prevent other listeners from running. */ }
     }
   }
+
+  private connectionClosed(connectionId: string): void {
+    this.connections.delete(connectionId);
+    this.pruneRetiredConnections();
+    this.retiredConnections.set(connectionId, Date.now() + RETIRED_CONNECTION_TTL_MS);
+    while (this.retiredConnections.size > MAX_RETIRED_CONNECTIONS) {
+      const oldest = this.retiredConnections.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.retiredConnections.delete(oldest);
+    }
+  }
+
+  private pruneRetiredConnections(): void {
+    const now = Date.now();
+    for (const [connectionId, expiresAt] of this.retiredConnections) {
+      if (expiresAt <= now) this.retiredConnections.delete(connectionId);
+    }
+  }
 }
 
 interface PrivateQaConnectionOptions {
@@ -413,6 +456,16 @@ interface PrivateQaConnectionOptions {
   signalAddress: string;
   postSignal: (signal: PrivateRtcSignal) => void;
   onClose: () => void;
+}
+
+interface InboundMessageAssembly {
+  sequence: number;
+  totalBytes: number;
+  partCount: number;
+  nextPart: number;
+  receivedBytes: number;
+  parts: Uint8Array[];
+  timer: ReturnType<typeof setTimeout>;
 }
 
 class PrivateQaConnection implements TransportConnection {
@@ -428,6 +481,8 @@ class PrivateQaConnection implements TransportConnection {
   private readonly handlers = new Map<EventName<ConnectionEvents>, Set<StoredHandler>>();
   private readonly onceWrappers = new Map<EventName<ConnectionEvents>, Map<StoredHandler, Set<StoredHandler>>>();
   private readonly pendingCandidates: (RTCIceCandidateInit | null)[] = [];
+  private readonly remoteCandidateKeys = new Set<string>();
+  private readonly localCandidateKeys = new Set<string>();
   private localCandidates: (RTCIceCandidateInit | null)[] = [];
   private remoteTabId: string | null;
   private channel: RTCDataChannel | null = null;
@@ -439,6 +494,11 @@ class PrivateQaConnection implements TransportConnection {
   private bytesSent = 0;
   private framesReceived = 0;
   private bytesReceived = 0;
+  private nextSendSequence = 1;
+  private nextReceiveSequence = 1;
+  private openEventEmitted = false;
+  private setupTimer: ReturnType<typeof setTimeout>;
+  private inboundAssembly: InboundMessageAssembly | null = null;
   private readonly onIceCandidate: (event: RTCPeerConnectionIceEvent) => void;
   private readonly onDataChannel: (event: RTCDataChannelEvent) => void;
   private readonly onConnectionState: () => void;
@@ -465,6 +525,7 @@ class PrivateQaConnection implements TransportConnection {
     this.peerConnection.addEventListener("icecandidate", this.onIceCandidate);
     this.peerConnection.addEventListener("datachannel", this.onDataChannel);
     this.peerConnection.addEventListener("connectionstatechange", this.onConnectionState);
+    this.setupTimer = setTimeout(() => this.fail(new Error("Private QA RTC connection setup timed out")), CONNECTION_SETUP_TIMEOUT_MS);
   }
 
   get open(): boolean { return !this.closedState && this.channel?.readyState === "open"; }
@@ -517,6 +578,13 @@ class PrivateQaConnection implements TransportConnection {
     if (signal.type === "candidate") {
       if (this.remoteTabId !== null && signal.from !== this.remoteTabId) return;
       if (this.remoteTabId === null) this.remoteTabId = signal.from;
+      const key = candidateKey(signal.candidate);
+      if (this.remoteCandidateKeys.has(key)) return;
+      if (this.remoteCandidateKeys.size >= MAX_CANDIDATES_PER_CONNECTION) {
+        this.fail(new RangeError("Private QA RTC ICE candidate count exceeded its bound"));
+        return;
+      }
+      this.remoteCandidateKeys.add(key);
       if (!this.remoteDescriptionReady) {
         if (this.pendingCandidates.length >= MAX_CANDIDATE_QUEUE) {
           this.fail(new RangeError("Private QA RTC ICE candidate queue exceeded its bound"));
@@ -536,13 +604,42 @@ class PrivateQaConnection implements TransportConnection {
     const negotiatedMax = this.negotiatedMaxMessageSize();
     if (negotiatedMax === null) throw new Error("Private QA RTC negotiated SCTP max-message-size is unavailable");
     const frameLimit = Math.min(MAX_FRAME_BYTES, negotiatedMax);
-    if (bytes.byteLength > frameLimit) {
-      throw new RangeError(`Private QA RTC frame is ${bytes.byteLength} bytes; maximum is ${frameLimit}`);
+    const payloadLimit = frameLimit - FRAME_HEADER_BYTES;
+    if (payloadLimit <= 0) {
+      throw new RangeError("Private QA RTC negotiated SCTP message limit is too small for the bounded frame header");
     }
-    if (this.channel.bufferedAmount + bytes.byteLength > MAX_BUFFERED_BYTES) {
+    if (bytes.byteLength > MAX_LOGICAL_MESSAGE_BYTES) {
+      throw new RangeError(`Private QA RTC logical message exceeds ${MAX_LOGICAL_MESSAGE_BYTES} bytes`);
+    }
+    const partCount = Math.max(1, Math.ceil(bytes.byteLength / payloadLimit));
+    if (partCount > MAX_MESSAGE_PARTS) {
+      throw new RangeError("Private QA RTC logical message requires too many bounded fragments");
+    }
+    const bufferedSize = bytes.byteLength + partCount * FRAME_HEADER_BYTES;
+    if (this.channel.bufferedAmount + bufferedSize > MAX_BUFFERED_BYTES) {
       throw new RangeError("Private QA RTC buffered data would exceed the configured bound");
     }
-    this.channel.send(bytes);
+    const sequence = this.nextSendSequence;
+    this.nextSendSequence = (sequence + 1) >>> 0;
+    if (this.nextSendSequence === 0) this.nextSendSequence = 1;
+    try {
+      for (let part = 0; part < partCount; part += 1) {
+        const offset = part * payloadLimit;
+        const payload = bytes.subarray(offset, Math.min(offset + payloadLimit, bytes.byteLength));
+        const frame = new Uint8Array(FRAME_HEADER_BYTES + payload.byteLength);
+        const header = new DataView(frame.buffer);
+        header.setUint32(0, FRAME_MAGIC);
+        header.setUint32(4, sequence);
+        header.setUint32(8, bytes.byteLength);
+        header.setUint16(12, part);
+        header.setUint16(14, partCount);
+        frame.set(payload, FRAME_HEADER_BYTES);
+        this.channel.send(frame);
+      }
+    } catch {
+      this.fail(new Error("Private QA RTC data-channel send failed"));
+      throw new Error("Private QA RTC data-channel send failed");
+    }
     this.framesSent = safeCount(this.framesSent + 1);
     this.bytesSent = safeCount(this.bytesSent + bytes.byteLength);
   }
@@ -550,6 +647,12 @@ class PrivateQaConnection implements TransportConnection {
   close(): void {
     if (this.closedState) return;
     this.closedState = true;
+    clearTimeout(this.setupTimer);
+    this.clearInboundAssembly();
+    this.pendingCandidates.length = 0;
+    this.localCandidates = [];
+    this.remoteCandidateKeys.clear();
+    this.localCandidateKeys.clear();
     this.peerConnection.removeEventListener("icecandidate", this.onIceCandidate);
     this.peerConnection.removeEventListener("datachannel", this.onDataChannel);
     this.peerConnection.removeEventListener("connectionstatechange", this.onConnectionState);
@@ -579,6 +682,7 @@ class PrivateQaConnection implements TransportConnection {
       channelState: this.channel?.readyState ?? null,
       ordered: this.channel?.ordered ?? null,
       negotiatedMaxMessageSize: this.negotiatedMaxMessageSize(),
+      maxLogicalMessageBytes: MAX_LOGICAL_MESSAGE_BYTES,
       framesSent: this.framesSent,
       bytesSent: this.bytesSent,
       framesReceived: this.framesReceived,
@@ -657,6 +761,13 @@ class PrivateQaConnection implements TransportConnection {
 
   private queueLocalCandidate(candidate: RTCIceCandidateInit | null): void {
     if (this.closedState) return;
+    const key = candidateKey(candidate);
+    if (this.localCandidateKeys.has(key)) return;
+    if (this.localCandidateKeys.size >= MAX_CANDIDATES_PER_CONNECTION) {
+      this.fail(new RangeError("Private QA RTC local ICE candidate count exceeded its bound"));
+      return;
+    }
+    this.localCandidateKeys.add(key);
     if (!this.localSignalSent) {
       if (this.localCandidates.length >= MAX_CANDIDATE_QUEUE) {
         this.fail(new RangeError("Private QA RTC local ICE candidate queue exceeded its bound"));
@@ -708,7 +819,10 @@ class PrivateQaConnection implements TransportConnection {
   }
 
   private readonly onChannelOpen = (): void => {
-    if (!this.closedState && this.channel?.readyState === "open") this.emit("open");
+    if (this.closedState || this.openEventEmitted || this.channel?.readyState !== "open") return;
+    this.openEventEmitted = true;
+    clearTimeout(this.setupTimer);
+    this.emit("open");
   };
   private readonly onChannelClose = (): void => { this.close(); };
   private readonly onChannelError = (): void => { this.fail(new Error("Private QA RTC data channel failed")); };
@@ -716,14 +830,85 @@ class PrivateQaConnection implements TransportConnection {
     if (this.closedState) return;
     const bytes = bytesFrom(event.data);
     if (!bytes) { this.fail(new TypeError("Private QA RTC received a non-binary game frame")); return; }
-    const negotiatedMax = this.negotiatedMaxMessageSize();
-    if (negotiatedMax === null) { this.fail(new Error("Private QA RTC negotiated SCTP max-message-size is unavailable")); return; }
-    const frameLimit = Math.min(MAX_FRAME_BYTES, negotiatedMax);
-    if (bytes.byteLength > frameLimit) { this.fail(new RangeError("Private QA RTC received an oversized game frame")); return; }
+    if (bytes.byteLength > MAX_FRAME_BYTES) { this.fail(new RangeError("Private QA RTC received an oversized transport fragment")); return; }
+    const message = this.acceptFragment(bytes);
+    if (message === null) return;
     this.framesReceived = safeCount(this.framesReceived + 1);
-    this.bytesReceived = safeCount(this.bytesReceived + bytes.byteLength);
-    this.emit("data", bytes);
+    this.bytesReceived = safeCount(this.bytesReceived + message.byteLength);
+    this.emit("data", message);
   };
+
+  private acceptFragment(fragment: Uint8Array): Uint8Array | null {
+    if (fragment.byteLength < FRAME_HEADER_BYTES) {
+      this.fail(new TypeError("Private QA RTC fragment header is invalid"));
+      return null;
+    }
+    const header = new DataView(fragment.buffer, fragment.byteOffset, fragment.byteLength);
+    const magic = header.getUint32(0);
+    const sequence = header.getUint32(4);
+    const totalBytes = header.getUint32(8);
+    const partIndex = header.getUint16(12);
+    const partCount = header.getUint16(14);
+    const payload = fragment.subarray(FRAME_HEADER_BYTES);
+    if (magic !== FRAME_MAGIC || sequence === 0 || totalBytes > MAX_LOGICAL_MESSAGE_BYTES
+      || partCount === 0 || partCount > MAX_MESSAGE_PARTS
+      || (totalBytes === 0 ? partCount !== 1 : partCount > totalBytes)) {
+      this.fail(new TypeError("Private QA RTC fragment metadata is invalid"));
+      return null;
+    }
+
+    let assembly = this.inboundAssembly;
+    if (assembly === null) {
+      if (sequence !== this.nextReceiveSequence || partIndex !== 0) {
+        this.fail(new TypeError("Private QA RTC fragment sequence is invalid"));
+        return null;
+      }
+      assembly = {
+        sequence,
+        totalBytes,
+        partCount,
+        nextPart: 0,
+        receivedBytes: 0,
+        parts: [],
+        timer: setTimeout(() => this.fail(new Error("Private QA RTC message reassembly timed out")), MESSAGE_REASSEMBLY_TIMEOUT_MS),
+      };
+      this.inboundAssembly = assembly;
+    }
+    if (assembly.sequence !== sequence || assembly.totalBytes !== totalBytes || assembly.partCount !== partCount
+      || assembly.nextPart !== partIndex || (partIndex < partCount - 1 && payload.byteLength === 0)
+      || payload.byteLength > MAX_FRAME_BYTES - FRAME_HEADER_BYTES
+      || assembly.receivedBytes + payload.byteLength > assembly.totalBytes) {
+      this.fail(new TypeError("Private QA RTC fragment order or size is invalid"));
+      return null;
+    }
+    assembly.parts.push(payload);
+    assembly.receivedBytes += payload.byteLength;
+    assembly.nextPart += 1;
+    if (assembly.nextPart !== assembly.partCount) return null;
+    if (assembly.receivedBytes !== assembly.totalBytes) {
+      this.fail(new TypeError("Private QA RTC reassembled message size is invalid"));
+      return null;
+    }
+
+    clearTimeout(assembly.timer);
+    this.inboundAssembly = null;
+    this.nextReceiveSequence = (sequence + 1) >>> 0;
+    if (this.nextReceiveSequence === 0) this.nextReceiveSequence = 1;
+    const message = new Uint8Array(assembly.totalBytes);
+    let offset = 0;
+    for (const part of assembly.parts) {
+      message.set(part, offset);
+      offset += part.byteLength;
+    }
+    return message;
+  }
+
+  private clearInboundAssembly(): void {
+    if (!this.inboundAssembly) return;
+    clearTimeout(this.inboundAssembly.timer);
+    this.inboundAssembly.parts.length = 0;
+    this.inboundAssembly = null;
+  }
 
   private detachChannel(): void {
     if (!this.channel) return;
@@ -735,6 +920,6 @@ class PrivateQaConnection implements TransportConnection {
 
   private negotiatedMaxMessageSize(): number | null {
     const value = this.peerConnection.sctp?.maxMessageSize;
-    return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+    return typeof value === "number" && value > 0 && !Number.isNaN(value) ? Math.floor(value) : null;
   }
 }

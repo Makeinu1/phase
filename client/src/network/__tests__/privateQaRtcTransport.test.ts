@@ -28,6 +28,7 @@ function fire(target: EventTarget, type: string, details: Record<string, unknown
 class FakeBroadcastChannel extends EventTarget {
   static readonly all: FakeBroadcastChannel[] = [];
   static readonly sent: { channel: string; data: unknown }[] = [];
+  static readonly dataChannelFrameSizes: number[] = [];
   readonly name: string;
   closed = false;
 
@@ -78,6 +79,7 @@ class FakeDataChannel extends EventTarget {
       : ArrayBuffer.isView(data)
         ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
         : new TextEncoder().encode(String(data));
+    FakeBroadcastChannel.dataChannelFrameSizes.push(bytes.byteLength);
     const copy = new Uint8Array(bytes);
     queueMicrotask(() => fire(this.partner!, "message", { data: copy.buffer }));
   }
@@ -96,8 +98,9 @@ class FakeDataChannel extends EventTarget {
 
 class FakeRTCPeerConnection extends EventTarget {
   static readonly all = new Map<string, FakeRTCPeerConnection>();
+  static maxMessageSize = 65_536;
   readonly id = uuid();
-  readonly sctp = { maxMessageSize: 65_536 } as RTCSctpTransport;
+  readonly sctp = { maxMessageSize: FakeRTCPeerConnection.maxMessageSize } as RTCSctpTransport;
   connectionState: RTCPeerConnectionState = "new";
   iceConnectionState: RTCIceConnectionState = "new";
   signalingState: RTCSignalingState = "stable";
@@ -163,7 +166,9 @@ class FakeRTCPeerConnection extends EventTarget {
     remote.localChannel.pair(channel);
     channel.pair(remote.localChannel);
     this.remoteChannel = channel;
+    channel.readyState = "open";
     fire(this, "datachannel", { channel });
+    queueMicrotask(() => { if (channel.readyState !== "closed") fire(channel, "open"); });
   }
 
   private tryConnect(): void {
@@ -185,13 +190,15 @@ beforeEach(() => {
   uuidCount = 0;
   FakeBroadcastChannel.all.length = 0;
   FakeBroadcastChannel.sent.length = 0;
+  FakeBroadcastChannel.dataChannelFrameSizes.length = 0;
   FakeRTCPeerConnection.all.clear();
+  FakeRTCPeerConnection.maxMessageSize = 65_536;
   vi.stubGlobal("crypto", { randomUUID: uuid });
   vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel as unknown as typeof BroadcastChannel);
   vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection as unknown as typeof RTCPeerConnection);
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 const namespace = "f82fbc0355df4bcda80dd2c6847a4aa1";
 const roomId = "phase2-ABCDE";
@@ -213,8 +220,10 @@ describe("private QA RTC transport", () => {
     hostPeer.off("open", cancelledPeerOpen);
     const hostOpened = onceOpen(hostPeer);
     const guestOpened = onceOpen(guestPeer);
+    let hostOpenEvents = 0;
     const incoming = new Promise<TransportConnection>((resolve) => {
       hostPeer.on("connection", (connection) => {
+        connection.on("open", () => { hostOpenEvents += 1; });
         connection.on("data", (data) => connection.send(data));
         resolve(connection);
       });
@@ -227,6 +236,8 @@ describe("private QA RTC transport", () => {
       expect(guestConnection.open).toBe(true);
       expect(hostConnection.open).toBe(true);
     });
+    await tick();
+    expect(hostOpenEvents).toBe(1);
 
     expect(guestConnection.peer).toBe(roomId);
     expect(hostConnection.peer).toBe(guestPeer.id);
@@ -246,7 +257,6 @@ describe("private QA RTC transport", () => {
     expect(cancelledPeerOpen).not.toHaveBeenCalled();
     expect(cancelledData).not.toHaveBeenCalled();
     expect(() => guestConnection.send("not a binary frame")).toThrow("only sends ArrayBuffer or typed-array");
-    expect(() => guestConnection.send(new Uint8Array(16_301))).toThrow("maximum is 16300");
 
     const guestSnapshot = guestFactory.snapshot();
     const hostSnapshot = hostFactory.snapshot();
@@ -282,6 +292,15 @@ describe("private QA RTC transport", () => {
       && typeof signal.from === "string" && typeof signal.to === "string" && typeof signal.connectionId === "string")).toBe(true);
     expect(new Set(signals.map((signal) => signal.from)).size).toBe(2);
     expect(signals.every((signal) => signal.to === roomId || signal.to === guestSnapshot.peers[0]?.tabPeerId)).toBe(true);
+
+    const fragmentedPayload = new Uint8Array(16_301);
+    fragmentedPayload.fill(0xa5);
+    const signalingCountBeforeFragmentedPayload = FakeBroadcastChannel.sent.length;
+    const fragmentedEcho = new Promise<unknown>((resolve) => guestConnection.once("data", resolve));
+    expect(() => guestConnection.send(fragmentedPayload)).not.toThrow();
+    expect(await fragmentedEcho).toEqual(fragmentedPayload);
+    expect(FakeBroadcastChannel.dataChannelFrameSizes.slice(-2)).toEqual([16_300, 33]);
+    expect(FakeBroadcastChannel.sent).toHaveLength(signalingCountBeforeFragmentedPayload);
 
     let guestCloseEvents = 0;
     guestConnection.on("close", () => { guestCloseEvents += 1; });
@@ -324,6 +343,186 @@ describe("private QA RTC transport", () => {
     hostFactory.dispose();
     guestFactory.dispose();
     expect(FakeBroadcastChannel.all.every((channel) => channel.closed)).toBe(true);
+  });
+
+  it("reassembles bounded fragments, accepts Infinity, and emits incoming open once", async () => {
+    const hostFactory = createPrivateQaRtcTransportFactory(namespace);
+    const guestFactory = createPrivateQaRtcTransportFactory(namespace);
+    const hostPeer = hostFactory.create(roomId);
+    const guestPeer = guestFactory.create();
+    const hostOpened = onceOpen(hostPeer);
+    const guestOpened = onceOpen(guestPeer);
+    let hostOpenEvents = 0;
+    const incoming = new Promise<TransportConnection>((resolve) => {
+      hostPeer.on("connection", (connection) => {
+        connection.on("open", () => { hostOpenEvents += 1; });
+        connection.on("data", (data) => connection.send(data));
+        resolve(connection);
+      });
+    });
+    await Promise.all([hostOpened, guestOpened]);
+    const guestConnection = guestPeer.connect(roomId, { serialization: "binary", reliable: true });
+    const hostConnection = await incoming;
+    await vi.waitFor(() => {
+      expect(guestConnection.open).toBe(true);
+      expect(hostConnection.open).toBe(true);
+    });
+    await tick();
+    expect(hostOpenEvents).toBe(1);
+
+    for (const pc of FakeRTCPeerConnection.all.values()) {
+      (pc.sctp as unknown as { maxMessageSize: number }).maxMessageSize = Number.POSITIVE_INFINITY;
+    }
+    const payload = new Uint8Array(64 * 1024);
+    for (let index = 0; index < payload.length; index += 1) payload[index] = (index * 131 + 17) & 0xff;
+    const signalingCountBeforePayload = FakeBroadcastChannel.sent.length;
+    const echo = new Promise<unknown>((resolve) => guestConnection.once("data", resolve));
+    guestConnection.send(payload);
+    expect(await echo).toEqual(payload);
+    expect(FakeBroadcastChannel.sent).toHaveLength(signalingCountBeforePayload);
+    expect(FakeBroadcastChannel.dataChannelFrameSizes.length).toBeGreaterThan(8);
+    expect(Math.max(...FakeBroadcastChannel.dataChannelFrameSizes)).toBeLessThanOrEqual(16_300);
+    expect(guestFactory.snapshot().peers[0]?.connections[0]).toMatchObject({
+      negotiatedMaxMessageSize: Number.POSITIVE_INFINITY,
+      framesSent: 1,
+      bytesSent: 64 * 1024,
+      framesReceived: 1,
+      bytesReceived: 64 * 1024,
+      maxLogicalMessageBytes: 256 * 1024,
+    });
+    const sentBeforeOversized = FakeBroadcastChannel.dataChannelFrameSizes.length;
+    expect(() => guestConnection.send(new Uint8Array(256 * 1024 + 1))).toThrow("logical message exceeds 262144 bytes");
+    expect(FakeBroadcastChannel.dataChannelFrameSizes).toHaveLength(sentBeforeOversized);
+
+    guestPeer.destroy();
+    hostPeer.destroy();
+    guestFactory.dispose();
+    hostFactory.dispose();
+  });
+
+  it("deduplicates ICE candidates and refuses a replayed offer after close", async () => {
+    const hostFactory = createPrivateQaRtcTransportFactory(namespace);
+    const guestFactory = createPrivateQaRtcTransportFactory(namespace);
+    const hostPeer = hostFactory.create(roomId);
+    const guestPeer = guestFactory.create();
+    const hostOpened = onceOpen(hostPeer);
+    const guestOpened = onceOpen(guestPeer);
+    const incoming = new Promise<TransportConnection>((resolve) => {
+      hostPeer.on("connection", resolve);
+    });
+    await Promise.all([hostOpened, guestOpened]);
+    const guestConnection = guestPeer.connect(roomId, { serialization: "binary", reliable: true });
+    const hostConnection = await incoming;
+    await vi.waitFor(() => { expect(guestConnection.open).toBe(true); expect(hostConnection.open).toBe(true); });
+    const offerText = FakeBroadcastChannel.sent
+      .map(({ data }) => typeof data === "string" ? JSON.parse(data) as Record<string, unknown> : null)
+      .find((signal) => signal?.type === "offer");
+    expect(offerText).not.toBeNull();
+
+    const hostPc = hostConnection.peerConnection as unknown as FakeRTCPeerConnection;
+    const candidateChannel = new FakeBroadcastChannel(`${signalPrefix}${namespace}`);
+    const duplicateCandidate = {
+      protocol: "phase-private-qa-rtc-v1",
+      namespace,
+      room: roomId,
+      from: guestFactory.snapshot().peers[0]?.tabPeerId,
+      to: roomId,
+      connectionId: offerText?.connectionId,
+      type: "candidate",
+      candidate: { candidate: "candidate:duplicate", sdpMid: "0", sdpMLineIndex: 0 },
+    };
+    const baseline = hostPc.appliedCandidates.filter((candidate) => candidate?.candidate === "candidate:duplicate").length;
+    candidateChannel.postMessage(JSON.stringify(duplicateCandidate));
+    candidateChannel.postMessage(JSON.stringify(duplicateCandidate));
+    await vi.waitFor(() => {
+      expect(hostPc.appliedCandidates.filter((candidate) => candidate?.candidate === "candidate:duplicate")).toHaveLength(baseline + 1);
+    });
+
+    guestConnection.close();
+    await vi.waitFor(() => expect(hostFactory.snapshot().peers[0]?.connectionCount).toBe(0));
+    hostPeer.destroy();
+    const renewedHost = hostFactory.create(roomId);
+    await onceOpen(renewedHost);
+    const rtcConnectionsBeforeReplay = FakeRTCPeerConnection.all.size;
+    candidateChannel.postMessage(JSON.stringify(offerText));
+    await tick();
+    expect(hostFactory.snapshot().peers[0]?.connectionCount).toBe(0);
+    expect(FakeRTCPeerConnection.all.size).toBe(rtcConnectionsBeforeReplay);
+
+    renewedHost.destroy();
+    guestPeer.destroy();
+    candidateChannel.close();
+    hostFactory.dispose();
+    guestFactory.dispose();
+  });
+
+  it("closes and forgets an uncompleted offer after the setup deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const factory = createPrivateQaRtcTransportFactory(namespace);
+    const host = factory.create(roomId);
+    await onceOpen(host);
+    const from = "10000000-0000-4000-8000-000000000001";
+    const connectionId = "20000000-0000-4000-8000-000000000001";
+    const incoming = new Promise<TransportConnection>((resolve) => host.on("connection", resolve));
+    const channel = new FakeBroadcastChannel(`${signalPrefix}${namespace}`);
+    channel.postMessage(JSON.stringify({
+      protocol: "phase-private-qa-rtc-v1",
+      namespace,
+      room: roomId,
+      from,
+      to: roomId,
+      connectionId,
+      type: "offer",
+      description: { type: "offer", sdp: "offer:missing-peer" },
+    }));
+    const connection = await incoming;
+    await Promise.resolve();
+    expect(factory.snapshot().peers[0]?.connectionCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(connection.peerConnection?.connectionState).toBe("closed");
+    expect(factory.snapshot().peers[0]?.connectionCount).toBe(0);
+    host.destroy();
+    factory.dispose();
+    channel.close();
+  });
+
+  it("closes the channel and releases a partial message after its reassembly deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const hostFactory = createPrivateQaRtcTransportFactory(namespace);
+    const guestFactory = createPrivateQaRtcTransportFactory(namespace);
+    const host = hostFactory.create(roomId);
+    const guest = guestFactory.create();
+    await Promise.all([onceOpen(host), onceOpen(guest)]);
+
+    let resolveHostOpen: (() => void) | null = null;
+    const hostOpened = new Promise<void>((resolve) => { resolveHostOpen = resolve; });
+    const incoming = new Promise<TransportConnection>((resolve) => host.on("connection", (connection) => {
+      connection.once("open", () => resolveHostOpen?.());
+      resolve(connection);
+    }));
+    const guestConnection = guest.connect(roomId, { serialization: "binary", reliable: true });
+    const guestOpened = new Promise<void>((resolve) => guestConnection.once("open", resolve));
+    const hostConnection = await incoming;
+    await Promise.all([hostOpened, guestOpened]);
+
+    const partial = new Uint8Array(16 + 50);
+    const header = new DataView(partial.buffer);
+    header.setUint32(0, 0x50515231);
+    header.setUint32(4, 1);
+    header.setUint32(8, 100);
+    header.setUint16(12, 0);
+    header.setUint16(14, 2);
+    guestConnection.dataChannel?.send(partial.buffer);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(hostConnection.open).toBe(false);
+    expect(hostConnection.dataChannel?.readyState).toBe("closed");
+    expect(hostFactory.snapshot().peers[0]?.connectionCount).toBe(0);
+    host.destroy();
+    guest.destroy();
+    hostFactory.dispose();
+    guestFactory.dispose();
   });
 
   it("ignores offers and ICE addressed to another room or peer, plus stale connection IDs", async () => {

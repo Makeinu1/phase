@@ -1,0 +1,102 @@
+#phase-private-qa-rtc-panel {
+  position: fixed;
+  z-index: 2147483000;
+  right: 12px;
+  bottom: 12px;
+  width: min(390px, calc(100vw - 24px));
+  max-height: min(70vh, 620px);
+  overflow-y: auto;
+}
+
+.private-rtc-panel {
+  padding: 14px;
+  border: 1px solid #64748b;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #f8fafc;
+  box-shadow: 0 12px 36px #0009;
+  font: 13px/1.45 system-ui, sans-serif;
+}
+
+.private-rtc-panel__header,
+.private-rtc-panel__button-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.private-rtc-panel__header {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.private-rtc-panel__button {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #64748b;
+  border-radius: 6px;
+  background: #1e293b;
+  color: inherit;
+  cursor: pointer;
+}
+
+.private-rtc-panel__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.private-rtc-panel__muted {
+  margin: 8px 0;
+  color: #cbd5e1;
+}
+
+.private-rtc-panel__line {
+  margin: 3px 0;
+}
+
+.private-rtc-panel__label {
+  display: grid;
+  gap: 4px;
+}
+
+.private-rtc-panel__input {
+  min-width: 0;
+  padding: 7px;
+  color: #0f172a;
+}
+
+.private-rtc-panel__connect-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.private-rtc-panel__connect-row > button {
+  align-self: end;
+}
+
+.private-rtc-panel__section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #475569;
+}
+
+.private-rtc-panel__heading {
+  margin: 0 0 4px;
+}
+
+.private-rtc-panel__connection {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid #475569;
+}
+
+.private-rtc-panel__error {
+  color: #fca5a5;
+}
+
+.private-rtc-panel__footer {
+  margin-bottom: 0;
+  color: #cbd5e1;
+}

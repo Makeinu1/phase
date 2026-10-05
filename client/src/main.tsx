@@ -35,7 +35,9 @@ async function installPrivateQaRtcBeforeRender(): Promise<void> {
 
   try {
     const { installPrivateQaRtcTransport } = await import("./qa/privateRtcBootstrap");
-    installPrivateQaRtcTransport(namespace);
+    const api = installPrivateQaRtcTransport(namespace);
+    const { mountPrivateQaRtcPanel } = await import("./qa/privateRtcPanelMount");
+    mountPrivateQaRtcPanel(api);
   } catch (error) {
     // An explicit QA opt-in must fail closed. Do not continue into the app,
     // where the default PeerJS selector could otherwise create public traffic.
