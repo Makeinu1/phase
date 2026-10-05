@@ -119,4 +119,13 @@ finally:
             record[suffix + "_sha256"] = hashlib.sha256(p.read_bytes()).hexdigest()
     (evidence / (label + ".json")).write_text(json.dumps(record, indent=2) + "\n")
 print(json.dumps({"label": label, "exit_code": code, "stop_reason": reason}))
+if code != 0 or reason:
+    log_path = evidence / (label + ".log")
+    if log_path.exists():
+        with log_path.open("rb") as stream:
+            stream.seek(max(0, log_path.stat().st_size - 6000))
+            tail = stream.read().decode(errors="replace")
+        for line in tail.splitlines()[-30:]:
+            line = line.replace(str(Path.cwd()), "<source>").replace(os.environ["RUNNER_TEMP"], "<runner-temp>")
+            print("[failed command] " + line)
 sys.exit(code if 0 <= code <= 255 and not reason else 1)
