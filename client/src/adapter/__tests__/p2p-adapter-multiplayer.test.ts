@@ -16,7 +16,7 @@ import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supports
 import { PROTOCOL_VERSION, type WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
-import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
+import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage, type P2PUndoSyncMetadata } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
 
@@ -914,8 +914,8 @@ const NATIVE_GUEST_ATTACHMENT = {
 async function joinGuest(
   emitConnection: (c: DataConnection) => void,
   msg:
-    | { type: "guest_deck"; deckData: unknown; wireProtocolVersion?: number }
-    | { type: "reconnect"; playerToken: string; wireProtocolVersion?: number },
+    | { type: "guest_deck"; deckData: unknown; wireProtocolVersion?: number; undoSyncCapability?: { version: 1 } }
+    | { type: "reconnect"; playerToken: string; wireProtocolVersion?: number; undoSyncCapability?: { version: 1 } },
 ): Promise<FakeOpenableConnection> {
   const conn = new FakeOpenableConnection();
   emitConnection(conn as unknown as DataConnection);
@@ -5390,19 +5390,10 @@ describe("P2P wire-protocol version gate", () => {
   // check back into the transport would surface here as the refusing half
   // never emitting.
   //
-  // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
-  // cannot tell a bumped client from an unbumped one, which is why every
-  // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Reverting WIRE_PROTOCOL_VERSION itself (88 → 87) breaks both
-  // halves' premise: the v87 frame now equals the reverted constant and is
-  // admitted instead of refused — this test would fail at that first
-  // assertion ("promise resolved … instead of rejecting") — and the v88
-  // frame no longer equals it and would be refused instead of admitted,
-  // though this single synchronous test body never reaches that second
-  // assertion once the first has thrown. The admitting half is still the
-  // reach-guard — without it "refuses v87" is also satisfied by a client
-  // that refuses everything.
-  it("refuses the previous wire protocol (v87) and admits its own (v88)", async () => {
+  // Both sides keep the published v88 handshake gate. The explicit v87
+  // refusal and v88 admission checks make sure the experiment does not change
+  // compatibility through its optional initial-handshake capability fields.
+  it("refuses v87 and keeps the experimental capability on wire v88", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
     await refusing.conn.simulateData(setupFrameAt(87));
@@ -5542,6 +5533,753 @@ describe("P2P wire-protocol version gate", () => {
     expect(reconnect).toBeDefined();
     expect(reconnect!.wireProtocolVersion).toBe(WIRE_PROTOCOL_VERSION);
     adapter.dispose();
+  });
+});
+
+describe("Undo synchronization adapter integration", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  function makeUndoPeerPair(
+    adopter?: (snapshot: EngineSnapshot, metadata: P2PUndoSyncMetadata) => Promise<void>,
+  ) {
+    const { adapter: host, emitConnection } = makeHost(2);
+    host.enableUndoSyncExperiment();
+    const hostConnection = new FakeOpenableConnection();
+    const guestConnection = new FakeDataConnection();
+    const guestPeer = createFakePeer().peer;
+    const guestPeerConnect = vi.spyOn(guestPeer, "connect");
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      guestPeer as unknown as Peer,
+      "host-peer",
+      guestConnection as unknown as DataConnection,
+    );
+    const cleanup = adopter ? guest.configureUndoSyncAdoption(adopter) : undefined;
+    const hostEvents = vi.fn();
+    const guestEvents = vi.fn();
+    host.onEvent(hostEvents);
+    guest.onEvent(guestEvents);
+    const hostCursor = { value: 0 };
+    const guestCursor = { value: 0 };
+    const forward = async (from: FakeDataConnection, to: FakeDataConnection, cursor: { value: number }) => {
+      await vi.advanceTimersByTimeAsync(0);
+      const messages = await from.getSentMessages();
+      const pending = messages.slice(cursor.value) as P2PMessage[];
+      cursor.value = messages.length;
+      for (const message of pending) await to.simulateData(message);
+      return pending;
+    };
+    const forwardHost = () => forward(hostConnection, guestConnection, hostCursor);
+    const forwardGuest = () => forward(guestConnection, hostConnection, guestCursor);
+    const initialize = async () => {
+      await host.initialize();
+      emitConnection(hostConnection as unknown as DataConnection);
+      hostConnection.fireOpen();
+      await guest.initialize();
+      const hello = await forwardGuest();
+      await host.initializeGame();
+      const setup = await forwardHost();
+      await guest.initializeGame();
+      const acks = await forwardGuest();
+      return { hello, setup, acks };
+    };
+    return {
+      host, guest, hostConnection, guestConnection, guestPeerConnect,
+      hostEvents, guestEvents, cleanup, forwardHost, initialize,
+    };
+  }
+
+  it("does not restore when the host opts in but the guest has no adopter", async () => {
+    const pair = makeUndoPeerPair();
+    try {
+      const { hello, setup, acks } = await pair.initialize();
+      expect(hello.find((message) => message.type === "guest_deck")).not.toHaveProperty("undoSyncCapability");
+      expect(setup.find((message) => message.type === "game_setup")).not.toHaveProperty("undoSyncCapability");
+      expect(acks.find((message) => message.type === "state_ack")).not.toHaveProperty("undoSyncCapability");
+      const restore = vi.fn(async () => undefined);
+      await expect(pair.host.beginUndoSynchronization("guest-unready", restore)).rejects.toMatchObject({
+        code: "P2P_ERROR",
+      });
+      expect(restore).not.toHaveBeenCalled();
+      expect((await pair.hostConnection.getSentMessages()).some((message) =>
+        typeof message === "object" && message !== null && "undoSync" in message,
+      )).toBe(false);
+    } finally {
+      pair.host.dispose();
+      pair.guest.dispose();
+    }
+  });
+
+  it("fails closed when the host pauses after trusted restore starts", async () => {
+    const pair = makeUndoPeerPair(async () => undefined);
+    let restoreStarted!: () => void;
+    const started = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    let finishRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => { finishRestore = resolve; });
+    const restore = vi.fn(async () => {
+      restoreStarted();
+      await restoreGate;
+    });
+    try {
+      await pair.initialize();
+      const transaction = pair.host.beginUndoSynchronization("pause-during-restore", restore);
+      const settled = transaction.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await started;
+      const appliedActionsBeforePause = mocks.submitAction.mock.calls.length;
+      pair.host.requestPause();
+      finishRestore();
+      const result = await settled;
+      expect(result.ok).toBe(false);
+      expect(pair.hostEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      pair.host.requestResume();
+      await expect(pair.host.submitAction({ type: "PassPriority" }, 0)).rejects.toBeInstanceOf(AdapterError);
+      expect(mocks.submitAction).toHaveBeenCalledTimes(appliedActionsBeforePause);
+      expect(restore).toHaveBeenCalledOnce();
+      expect((await pair.hostConnection.getSentMessages()).some((message) =>
+        typeof message === "object" && message !== null && "undoSync" in message,
+      )).toBe(false);
+      await pair.forwardHost();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(pair.guestPeerConnect).not.toHaveBeenCalled();
+      await expect(Promise.resolve().then(() => pair.host.beginUndoSynchronization("pause-followup", restore))).rejects.toBeInstanceOf(AdapterError);
+      expect(restore).toHaveBeenCalledOnce();
+    } finally {
+      finishRestore();
+      pair.host.dispose();
+      pair.guest.dispose();
+    }
+  });
+
+  it("closes the negotiated session when an idle guest adopter is removed", async () => {
+    const pair = makeUndoPeerPair(async () => undefined);
+    const restore = vi.fn(async () => undefined);
+    try {
+      const { setup, acks } = await pair.initialize();
+      expect(setup.find((message) => message.type === "game_setup")).toHaveProperty("undoSyncCapability", { version: 1 });
+      expect(acks.find((message) => message.type === "state_ack")).toHaveProperty("undoSyncCapability", { version: 1 });
+      pair.cleanup!();
+      expect(pair.guestEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pair.guestConnection.open).toBe(false);
+      await expect(pair.guest.submitAction({ type: "PassPriority" }, 1)).rejects.toMatchObject({ code: "P2P_ERROR" });
+      // The remote learns about channel closure asynchronously. Deliver that
+      // observation explicitly before checking its restored-session fence.
+      pair.hostConnection.simulateClose();
+      await expect(pair.host.beginUndoSynchronization("removed-adopter", restore)).rejects.toMatchObject({ code: "P2P_ERROR" });
+      expect(restore).not.toHaveBeenCalled();
+      expect((await pair.hostConnection.getSentMessages()).some((message) =>
+        typeof message === "object" && message !== null && "undoSync" in message,
+      )).toBe(false);
+      pair.host.requestResume();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(pair.guestPeerConnect).not.toHaveBeenCalled();
+      await expect(Promise.resolve().then(() => pair.host.beginUndoSynchronization("removed-adopter-followup", restore))).rejects.toMatchObject({ code: "P2P_ERROR" });
+      expect(restore).not.toHaveBeenCalled();
+    } finally {
+      pair.host.dispose();
+      pair.guest.dispose();
+    }
+  });
+
+  it("fails closed when a guest adopter is removed during adoption", async () => {
+    let adoptionStarted!: () => void;
+    const started = new Promise<void>((resolve) => { adoptionStarted = resolve; });
+    let finishAdoption!: () => void;
+    const adoptionGate = new Promise<void>((resolve) => { finishAdoption = resolve; });
+    const pair = makeUndoPeerPair(async () => {
+      adoptionStarted();
+      await adoptionGate;
+    });
+    const restore = vi.fn(async () => undefined);
+    try {
+      await pair.initialize();
+      const transaction = pair.host.beginUndoSynchronization("cleanup-during-adoption", restore);
+      const settled = transaction.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      const deliveringAdoption = pair.forwardHost();
+      await started;
+      const appliedActionsBeforeCleanup = mocks.submitAction.mock.calls.length;
+      pair.cleanup!();
+      expect(pair.guestEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      // Deliver the remote close independently of the still-pending adopter.
+      pair.hostConnection.simulateClose();
+      expect(pair.hostEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      finishAdoption();
+      await deliveringAdoption;
+      expect((await settled).ok).toBe(false);
+      const submission = pair.guest.submitAction({ type: "PassPriority" }, 1);
+      await expect(submission).rejects.toBeInstanceOf(AdapterError);
+      await expect(submission).rejects.toHaveProperty("code", "P2P_PAUSED");
+      expect(mocks.submitAction).toHaveBeenCalledTimes(appliedActionsBeforeCleanup);
+      expect(restore).toHaveBeenCalledOnce();
+      expect((await pair.guestConnection.getSentMessages()).filter((message) =>
+        typeof message === "object" && message !== null && "undoSync" in message,
+      )).toEqual([]);
+      pair.host.requestResume();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(pair.guestPeerConnect).not.toHaveBeenCalled();
+      await expect(Promise.resolve().then(() => pair.host.beginUndoSynchronization("cleanup-followup", restore))).rejects.toBeInstanceOf(AdapterError);
+      expect(restore).toHaveBeenCalledOnce();
+    } finally {
+      finishAdoption();
+      pair.host.dispose();
+      pair.guest.dispose();
+    }
+  });
+
+  it("keeps the experiment off by default even when guest UI adoption is ready", async () => {
+    const { peer: hostPeer, onGuestConnected, emitConnection } = createFakePeer();
+    const host = new P2PHostAdapter(
+      {
+        player: { main_deck: ["Mountain"], sideboard: [] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+      },
+      hostPeer as unknown as Peer,
+      onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      5_000,
+      undefined,
+      true,
+    );
+    const hostConnection = new FakeOpenableConnection();
+    const guestConnection = new FakeDataConnection();
+    const guestPeer = createFakePeer().peer;
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      guestPeer as unknown as Peer,
+      "host-peer",
+      guestConnection as unknown as DataConnection,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const restore = vi.fn(async () => undefined);
+    const hostCursor = { value: 0 };
+    const guestCursor = { value: 0 };
+    const forward = async (from: FakeDataConnection, to: FakeDataConnection, cursor: { value: number }) => {
+      await vi.advanceTimersByTimeAsync(0);
+      const messages = await from.getSentMessages();
+      const pending = messages.slice(cursor.value) as P2PMessage[];
+      cursor.value = messages.length;
+      for (const message of pending) await to.simulateData(message);
+      return pending;
+    };
+
+    try {
+      guest.configureUndoSyncAdoption(async () => undefined);
+      await host.initialize();
+      emitConnection(hostConnection as unknown as DataConnection);
+      hostConnection.fireOpen();
+      await guest.initialize();
+      await forward(guestConnection, hostConnection, guestCursor);
+      await host.initializeGame();
+      const setupFrames = await forward(hostConnection, guestConnection, hostCursor);
+      const setup = setupFrames.find((message) => message.type === "game_setup");
+      expect(setup).not.toHaveProperty("undoSyncCapability");
+      await guest.initializeGame();
+      await forward(guestConnection, hostConnection, guestCursor);
+
+      const pendingUndo = host.beginUndoSynchronization("default-off", restore);
+      void pendingUndo.catch(() => undefined);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+      expect(restore).not.toHaveBeenCalled();
+      expect((await hostConnection.getSentMessages()).some((message) =>
+        typeof message === "object"
+        && message !== null
+        && "undoSync" in message,
+      )).toBe(false);
+    } finally {
+      host.dispose();
+      guest.dispose();
+    }
+  });
+
+  it("routes exact adopted/released phases between the host and guest adapters and holds input", async () => {
+    const { peer: hostPeer, onGuestConnected, emitConnection } = createFakePeer();
+    const onMatchConcede = vi.fn();
+    const host = new P2PHostAdapter(
+      {
+        player: { main_deck: ["Mountain"], sideboard: [] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+      },
+      hostPeer as unknown as Peer,
+      onGuestConnected,
+      2,
+      undefined,
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      { onConcede: onMatchConcede },
+    );
+    const hostEvents = vi.fn();
+    host.onEvent(hostEvents);
+    const hostConnection = new FakeOpenableConnection();
+
+    const guestConnection = new FakeDataConnection();
+    const guestPeerHarness = createFakePeer();
+    const guestPeerConnect = vi.spyOn(guestPeerHarness.peer, "connect");
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      guestPeerHarness.peer as unknown as Peer,
+      "host-peer",
+      guestConnection as unknown as DataConnection,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const guestEvents = vi.fn();
+    guest.onEvent(guestEvents);
+    const enableUndoSync = (host as unknown as { enableUndoSyncExperiment?: () => void }).enableUndoSyncExperiment;
+    enableUndoSync?.call(host);
+    const restoreEngine = vi.fn(async () => undefined);
+    const adoptHostUi = vi.fn(async () => undefined);
+    const adoptGuestUi = vi.fn(async (_snapshot: EngineSnapshot, _metadata: P2PUndoSyncMetadata) => {
+      guestAdoptionStarted();
+      await guestAdoptionGate;
+    });
+    let guestAdoptionStarted!: () => void;
+    const guestAdoptionStartedPromise = new Promise<void>((resolve) => { guestAdoptionStarted = resolve; });
+    let finishGuestAdoption!: () => void;
+    const guestAdoptionGate = new Promise<void>((resolve) => { finishGuestAdoption = resolve; });
+    let guestDisconnectAdoptionStarted!: () => void;
+    const guestDisconnectAdoptionStartedPromise = new Promise<void>((resolve) => { guestDisconnectAdoptionStarted = resolve; });
+    let finishDisconnectAdoption!: () => void;
+    const disconnectAdoptionGate = new Promise<void>((resolve) => { finishDisconnectAdoption = resolve; });
+    const adoptGuestUiAfterReconfigure = vi.fn(async (_snapshot: EngineSnapshot, _metadata: P2PUndoSyncMetadata) => undefined);
+    const hostCursor = { value: 0 };
+    const guestCursor = { value: 0 };
+
+    const forwardNewMessages = async (
+      from: FakeDataConnection,
+      to: FakeDataConnection,
+      cursor: { value: number },
+    ) => {
+      await vi.advanceTimersByTimeAsync(0);
+      const messages = await from.getSentMessages();
+      const pending = messages.slice(cursor.value) as P2PMessage[];
+      cursor.value = messages.length;
+      for (const message of pending) await to.simulateData(message);
+      return pending;
+    };
+
+    try {
+      guest.configureUndoSyncAdoption(adoptGuestUi);
+      await host.initialize();
+      emitConnection(hostConnection as unknown as DataConnection);
+      hostConnection.fireOpen();
+      await guest.initialize();
+      const guestHello = await forwardNewMessages(guestConnection, hostConnection, guestCursor);
+      expect(guestHello.find((message) => message.type === "guest_deck")).toHaveProperty(
+        "undoSyncCapability",
+        { version: 1 },
+      );
+      await host.initializeGame();
+      const hostSetup = await forwardNewMessages(hostConnection, guestConnection, hostCursor);
+      expect(hostSetup.find((message) => message.type === "game_setup")).toHaveProperty(
+        "undoSyncCapability",
+        { version: 1 },
+      );
+      await guest.initializeGame();
+      const initialAcks = await forwardNewMessages(guestConnection, hostConnection, guestCursor);
+      expect(initialAcks.find((message) => message.type === "state_ack")).toHaveProperty(
+        "undoSyncCapability",
+        { version: 1 },
+      );
+      const hostAdoptionFinished = vi.fn();
+      const transaction = host.beginUndoSynchronization("adapter-undo-1", async () => {
+        await restoreEngine();
+        await adoptHostUi();
+        hostAdoptionFinished();
+      });
+      await vi.waitFor(() => expect(hostAdoptionFinished).toHaveBeenCalledOnce());
+
+      const deliveringAdoption = forwardNewMessages(hostConnection, guestConnection, hostCursor);
+      await guestAdoptionStartedPromise;
+      await expect(host.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow("Undo synchronization is in progress");
+      await expect(guest.submitAction({ type: "PassPriority" }, 1)).rejects.toThrow("Undo synchronization is in progress");
+      await expect(host.submitAiActionProposal({
+        token: "blocked-ai-proposal",
+        semanticOwner: 0,
+        actor: 0,
+        action: { type: "PassPriority" },
+      })).rejects.toThrow("Undo synchronization is in progress");
+      expect(adoptGuestUi).toHaveBeenCalledOnce();
+
+      const appliedActionsBeforeHold = mocks.submitAction.mock.calls.length;
+      await host.sendConcede();
+      host.sendMatchConcede();
+      guest.sendConcede();
+      guest.sendMatchConcede();
+      const adoptedFrame = (await hostConnection.getSentMessages()).find(
+        (message): message is Extract<P2PMessage, { type: "state_update" }> =>
+          typeof message === "object"
+          && message !== null
+          && "type" in message
+          && message.type === "state_update"
+          && "undoSync" in message
+          && typeof message.undoSync === "object"
+          && message.undoSync !== null
+          && "phase" in message.undoSync
+          && message.undoSync.phase === "adopted",
+      );
+      expect(adoptedFrame?.authority).toBeDefined();
+      if (adoptedFrame?.authority) {
+        await hostConnection.simulateData({ type: "concede", authority: adoptedFrame.authority });
+        await hostConnection.simulateData({ type: "match_concede", authority: adoptedFrame.authority });
+      }
+      expect(mocks.submitAction).toHaveBeenCalledTimes(appliedActionsBeforeHold);
+      expect(onMatchConcede).not.toHaveBeenCalled();
+      expect((await guestConnection.getSentMessages()).filter(
+        (message) => typeof message === "object"
+          && message !== null
+          && "type" in message
+          && (message.type === "concede" || message.type === "match_concede"),
+      )).toEqual([]);
+
+      finishGuestAdoption();
+      await deliveringAdoption;
+      const adoptionAcks = await forwardNewMessages(guestConnection, hostConnection, guestCursor);
+      const adoptedAck = adoptionAcks.find((message) =>
+        message.type === "state_ack" && message.undoSync?.phase === "adopted",
+      );
+      expect(adoptedAck).not.toHaveProperty("undoSyncCapability");
+      await forwardNewMessages(hostConnection, guestConnection, hostCursor);
+      await expect(host.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow("Undo synchronization is in progress");
+
+      await forwardNewMessages(guestConnection, hostConnection, guestCursor);
+      await transaction;
+
+      guest.configureUndoSyncAdoption(adoptGuestUiAfterReconfigure);
+
+      let normalDeliveryStarted!: () => void;
+      const normalDeliveryStartedPromise = new Promise<void>((resolve) => { normalDeliveryStarted = resolve; });
+      let finishNormalDelivery!: () => void;
+      const normalDeliveryGate = new Promise<void>((resolve) => { finishNormalDelivery = resolve; });
+      let normalMutationStarted!: () => void;
+      const normalMutationStartedPromise = new Promise<void>((resolve) => { normalMutationStarted = resolve; });
+      let finishNormalMutation!: () => void;
+      const normalMutationGate = new Promise<void>((resolve) => { finishNormalMutation = resolve; });
+      mocks.submitAction.mockImplementationOnce(async () => {
+        normalMutationStarted();
+        await normalMutationGate;
+        return { events: [] };
+      });
+      mocks.getViewerTransitionSnapshot.mockImplementationOnce(async (pid: number, events: unknown[]) => {
+        normalDeliveryStarted();
+        await normalDeliveryGate;
+        return { ...(await mocks.getViewerSnapshot(pid)), events };
+      });
+      const normalAction = host.submitAction({ type: "PassPriority" }, 0);
+      await normalMutationStartedPromise;
+      const secondHostAdoptionFinished = vi.fn();
+      const secondTransaction = host.beginUndoSynchronization("adapter-undo-2", async () => {
+        await restoreEngine();
+        await adoptHostUi();
+        secondHostAdoptionFinished();
+      });
+      await Promise.resolve();
+      expect(secondHostAdoptionFinished).not.toHaveBeenCalled();
+      finishNormalMutation();
+      await normalDeliveryStartedPromise;
+      expect(secondHostAdoptionFinished).not.toHaveBeenCalled();
+      finishNormalDelivery();
+      await normalAction;
+      await vi.waitFor(() => expect(secondHostAdoptionFinished).toHaveBeenCalledOnce());
+      await forwardNewMessages(hostConnection, guestConnection, hostCursor);
+      await forwardNewMessages(guestConnection, hostConnection, guestCursor);
+      await forwardNewMessages(hostConnection, guestConnection, hostCursor);
+      await forwardNewMessages(guestConnection, hostConnection, guestCursor);
+      await secondTransaction;
+
+      const hostUndoFrames = (await hostConnection.getSentMessages()).filter(
+        (message): message is Extract<P2PMessage, { type: "state_update" }> =>
+          typeof message === "object"
+          && message !== null
+          && "type" in message
+          && message.type === "state_update"
+          && "undoSync" in message
+          && message.undoSync !== undefined,
+      );
+      const guestUndoAcks = (await guestConnection.getSentMessages()).filter(
+        (message): message is Extract<P2PMessage, { type: "state_ack" }> =>
+          typeof message === "object"
+          && message !== null
+          && "type" in message
+          && message.type === "state_ack"
+          && "undoSync" in message
+          && message.undoSync !== undefined,
+      );
+      expect(hostUndoFrames.map((frame) => frame.undoSync)).toEqual([
+        { undoId: "adapter-undo-1", revision: 1, phase: "adopted" },
+        { undoId: "adapter-undo-1", revision: 1, phase: "released" },
+        { undoId: "adapter-undo-2", revision: 2, phase: "adopted" },
+        { undoId: "adapter-undo-2", revision: 2, phase: "released" },
+      ]);
+      expect(hostUndoFrames[2].revision).toBeGreaterThan(hostUndoFrames[0].revision!);
+      expect(hostUndoFrames[2].revision).toBe(hostUndoFrames[3].revision);
+      expect(guestUndoAcks.map((frame) => frame.undoSync)).toEqual([
+        { undoId: "adapter-undo-1", revision: 1, phase: "adopted" },
+        { undoId: "adapter-undo-1", revision: 1, phase: "released" },
+        { undoId: "adapter-undo-2", revision: 2, phase: "adopted" },
+        { undoId: "adapter-undo-2", revision: 2, phase: "released" },
+      ]);
+      expect(guestUndoAcks[2].revision).toBe(hostUndoFrames[2].revision);
+      expect(guestUndoAcks[3].revision).toBe(hostUndoFrames[3].revision);
+      expect(restoreEngine).toHaveBeenCalledTimes(2);
+      expect(adoptHostUi).toHaveBeenCalledTimes(2);
+      expect(adoptGuestUi).toHaveBeenCalledOnce();
+      expect(adoptGuestUiAfterReconfigure).toHaveBeenCalledOnce();
+      expect(onMatchConcede).not.toHaveBeenCalled();
+
+      const adoptBeforeDisconnect = vi.fn(async (_snapshot: EngineSnapshot, _metadata: P2PUndoSyncMetadata) => {
+        guestDisconnectAdoptionStarted();
+        await disconnectAdoptionGate;
+      });
+      guest.configureUndoSyncAdoption(adoptBeforeDisconnect);
+      const thirdHostAdoptionFinished = vi.fn();
+      const disconnectedTransaction = host.beginUndoSynchronization("adapter-undo-disconnect", async () => {
+        await restoreEngine();
+        await adoptHostUi();
+        thirdHostAdoptionFinished();
+      });
+      await vi.waitFor(() => expect(thirdHostAdoptionFinished).toHaveBeenCalledOnce());
+      const deliveringBeforeDisconnect = forwardNewMessages(hostConnection, guestConnection, hostCursor);
+      await guestDisconnectAdoptionStartedPromise;
+      const appliedActionsBeforeDisconnect = mocks.submitAction.mock.calls.length;
+      const countGuestActionFrames = async () => (await guestConnection.getSentMessages()).filter(
+        (message) => typeof message === "object"
+          && message !== null
+          && "type" in message
+          && message.type === "action",
+      ).length;
+      const guestActionFramesBeforeDisconnect = await countGuestActionFrames();
+      const canceledTransaction = expect(disconnectedTransaction).rejects.toThrow(/Undo .*disposed/);
+      hostConnection.simulateClose();
+      guestConnection.simulateClose();
+      expect(hostEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      expect(guestEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      const submissionAfterDisconnect = guest.submitAction({ type: "PassPriority" }, 1);
+      await expect(submissionAfterDisconnect).rejects.toBeInstanceOf(AdapterError);
+      await expect(submissionAfterDisconnect).rejects.toHaveProperty("code", "P2P_PAUSED");
+      expect(mocks.submitAction).toHaveBeenCalledTimes(appliedActionsBeforeDisconnect);
+      expect(await countGuestActionFrames()).toBe(guestActionFramesBeforeDisconnect);
+      finishDisconnectAdoption();
+      await deliveringBeforeDisconnect;
+      await canceledTransaction;
+      const submissionAfterAdoption = guest.submitAction({ type: "PassPriority" }, 1);
+      await expect(submissionAfterAdoption).rejects.toBeInstanceOf(AdapterError);
+      await expect(submissionAfterAdoption).rejects.toHaveProperty("code", "P2P_PAUSED");
+      expect(mocks.submitAction).toHaveBeenCalledTimes(appliedActionsBeforeDisconnect);
+      expect(await countGuestActionFrames()).toBe(guestActionFramesBeforeDisconnect);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(guestPeerConnect).not.toHaveBeenCalled();
+      const submissionAfterRecoveryDelay = guest.submitAction({ type: "PassPriority" }, 1);
+      await expect(submissionAfterRecoveryDelay).rejects.toBeInstanceOf(AdapterError);
+      await expect(submissionAfterRecoveryDelay).rejects.toHaveProperty("code", "P2P_PAUSED");
+      expect(mocks.submitAction).toHaveBeenCalledTimes(appliedActionsBeforeDisconnect);
+      expect(await countGuestActionFrames()).toBe(guestActionFramesBeforeDisconnect);
+      await expect(host.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow(
+        "P2P host adapter has been disposed",
+      );
+    } finally {
+      host.dispose();
+      guest.dispose();
+    }
+  });
+
+  it("does not restore when a terminal action closes during the Undo drain", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    try {
+      adapter.enableUndoSyncExperiment();
+      await adapter.initialize();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: [], sideboard: [] } },
+        undoSyncCapability: { version: 1 },
+      });
+      await adapter.initializeGame();
+      const setup = (await guest.getSentMessages()).find(
+        (message): message is Extract<P2PMessage, { type: "game_setup" }> =>
+          typeof message === "object" && message !== null && "type" in message && message.type === "game_setup",
+      );
+      expect(setup?.undoSyncCapability).toEqual({ version: 1 });
+      await guest.simulateData({
+        type: "state_ack",
+        revision: setup!.revision!,
+        undoSyncCapability: { version: 1 },
+        authority: setup!.authority,
+      });
+
+      const terminalState = {
+        players: [],
+        objects: {},
+        waiting_for: { type: "GameOver", data: { winner: 0 } },
+      } as unknown as GameState;
+      mockGetSnapshot.mockResolvedValueOnce({
+        state: terminalState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 100,
+      });
+
+      let publicationStarted!: () => void;
+      const publicationStartedPromise = new Promise<void>((resolve) => { publicationStarted = resolve; });
+      let finishPublication!: () => void;
+      const publicationGate = new Promise<void>((resolve) => { finishPublication = resolve; });
+      mocks.getViewerTransitionSnapshot.mockImplementationOnce(async (pid: number, events: unknown[]) => {
+        publicationStarted();
+        await publicationGate;
+        return { ...(await mocks.getViewerSnapshot(pid)), events };
+      });
+
+      const acceptedTerminalAction = adapter.submitAction({ type: "PassPriority" }, 0);
+      await publicationStartedPromise;
+      const restore = vi.fn(async () => undefined);
+      const pendingUndo = adapter.beginUndoSynchronization("terminal-during-drain", restore);
+      const rejectedUndo = expect(pendingUndo).rejects.toMatchObject({ code: "P2P_ERROR" });
+      finishPublication();
+      await acceptedTerminalAction;
+      await rejectedUndo;
+
+      await expect(pendingUndo).rejects.toBeInstanceOf(AdapterError);
+      expect(restore).not.toHaveBeenCalled();
+      await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toMatchObject({ code: "P2P_PAUSED" });
+      await expect(adapter.beginUndoSynchronization("terminal-followup", restore)).rejects.toMatchObject({ code: "P2P_ERROR" });
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("checks the authoritative engine snapshot for GameOver before restore", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    try {
+      adapter.enableUndoSyncExperiment();
+      await adapter.initialize();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: [], sideboard: [] } },
+        undoSyncCapability: { version: 1 },
+      });
+      await adapter.initializeGame();
+      const setup = (await guest.getSentMessages()).find(
+        (message): message is Extract<P2PMessage, { type: "game_setup" }> =>
+          typeof message === "object" && message !== null && "type" in message && message.type === "game_setup",
+      );
+      expect(setup?.undoSyncCapability).toEqual({ version: 1 });
+      await guest.simulateData({
+        type: "state_ack",
+        revision: setup!.revision!,
+        undoSyncCapability: { version: 1 },
+        authority: setup!.authority,
+      });
+
+      mockGetSnapshot.mockClear();
+      mockGetSnapshot.mockResolvedValueOnce({
+        state: {
+          players: [],
+          objects: {},
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 101,
+      });
+
+      const restore = vi.fn(async () => undefined);
+      const transaction = adapter.beginUndoSynchronization("snapshot-already-terminal", restore);
+      const settled = transaction.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      // The old path never reads the engine snapshot and runs restore; this
+      // assertion is the RED guard for terminal state whose local flags lag.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockGetSnapshot).toHaveBeenCalledOnce();
+      expect(restore).not.toHaveBeenCalled();
+      const result = await settled;
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toBeInstanceOf(Error);
+        expect(result.error).toHaveProperty("message", expect.stringMatching(/GameOver|terminal/i));
+      }
+    } finally {
+      adapter.dispose();
+    }
+  });
+
+  it("does not restore after disposal during the pre-restore mutation drain", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    try {
+      adapter.enableUndoSyncExperiment();
+      await adapter.initialize();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: [], sideboard: [] } },
+        undoSyncCapability: { version: 1 },
+      });
+      await adapter.initializeGame();
+      const setup = (await guest.getSentMessages()).find(
+        (message): message is Extract<P2PMessage, { type: "game_setup" }> =>
+          typeof message === "object" && message !== null && "type" in message && message.type === "game_setup",
+      );
+      await guest.simulateData({
+        type: "state_ack",
+        revision: setup!.revision!,
+        undoSyncCapability: { version: 1 },
+        authority: setup!.authority,
+      });
+
+      let deliveryStarted!: () => void;
+      const deliveryStartedPromise = new Promise<void>((resolve) => { deliveryStarted = resolve; });
+      let finishDelivery!: () => void;
+      const deliveryGate = new Promise<void>((resolve) => { finishDelivery = resolve; });
+      mocks.getViewerTransitionSnapshot.mockImplementationOnce(async (pid: number, events: unknown[]) => {
+        deliveryStarted();
+        await deliveryGate;
+        return { ...(await mocks.getViewerSnapshot(pid)), events };
+      });
+      const action = adapter.submitAction({ type: "PassPriority" }, 0);
+      await deliveryStartedPromise;
+
+      const restore = vi.fn(async () => undefined);
+      const transaction = adapter.beginUndoSynchronization("dispose-during-drain", restore);
+      const settled = transaction.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      adapter.dispose();
+      finishDelivery();
+      await action;
+      const result = await settled;
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toBeInstanceOf(Error);
+        expect(result.error).toHaveProperty("message", expect.stringContaining("Undo host adapter disposed"));
+      }
+      expect(restore).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
   });
 });
 

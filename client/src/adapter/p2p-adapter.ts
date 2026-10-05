@@ -48,7 +48,17 @@ import { dialPeer, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
-import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
+import {
+  WIRE_PROTOCOL_VERSION,
+  legalActionsFromWire,
+  legalActionsToWire,
+} from "../network/protocol";
+import type { P2PUndoSyncCapability, P2PUndoSyncMetadata } from "../network/protocol";
+import {
+  UndoSyncGuestBarrier,
+  UndoSyncHostBarrier,
+  isValidUndoSyncMetadata,
+} from "./undo-sync-barrier";
 import type {
   PlayerSlot,
   SeatKind,
@@ -718,6 +728,14 @@ function actionFailureFrame(error: unknown): Extract<P2PMessage, { type: "action
   };
 }
 
+function isUndoSyncCapability(value: unknown): value is P2PUndoSyncCapability {
+  return typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && Object.keys(value).length === 1
+    && (value as { version?: unknown }).version === 1;
+}
+
 function manaPaymentPreviewFailureFrame(
   requestId: number,
   error: unknown,
@@ -937,6 +955,8 @@ export class P2PHostAdapter implements EngineAdapter {
    * reconnect cannot acknowledge an older view while a state fan-out is in
    * flight and would otherwise miss that update after becoming active. */
   private deliveryQueue: Promise<void> = Promise.resolve();
+  private browserMutationsInFlight = 0;
+  private browserMutationWaiters: Array<() => void> = [];
   private guestDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private aiDecks = new Map<PlayerId, DeckListPayload["player"]>();
   private playerTokens = new Map<PlayerId, string>();
@@ -1042,6 +1062,18 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Stable identity is retained on resume; the incarnation fences old hosts. */
   private readonly sessionKey: P2PSessionKey;
   private readonly authority: P2PAuthorityStamp;
+  /** Client Undo synchronization is available only after explicit opt-in. */
+  private undoSyncExperimentEnabled = false;
+  private readonly undoSyncGuestOffers = new WeakMap<PeerSession, P2PUndoSyncCapability>();
+  private readonly undoSyncAcceptedCapabilities = new WeakMap<PeerSession, P2PUndoSyncCapability>();
+  private readonly undoSyncNegotiatedSessions = new WeakSet<PeerSession>();
+  /** Opt-in Undo barrier. It remains null on the ordinary P2P path. */
+  private undoSyncBarrier: UndoSyncHostBarrier | null = null;
+  private undoSyncSession: PeerSession | null = null;
+  /** Non-null after trusted restore starts, until exact release ACK completes. */
+  private undoSyncRestoreSession: PeerSession | null = null;
+  private undoSyncFatalFailure = false;
+  private undoSyncInputBlocked = false;
   /** True when the adapter was constructed from a persisted session (resume flow). */
   private readonly isResume: boolean;
   /**
@@ -1485,7 +1517,44 @@ export class P2PHostAdapter implements EngineAdapter {
     operation: () => Promise<SubmitResult>,
   ): Promise<BrowserTransition> {
     const browserMutation = this.nativeBridge === null;
-    return this.stampBrowserMutation(await operation(), browserMutation);
+    const finishMutation = this.beginBrowserMutationTracking();
+    try {
+      return this.stampBrowserMutation(await operation(), browserMutation);
+    } finally {
+      finishMutation();
+    }
+  }
+
+  /** Tracks an accepted gameplay mutation through its state fan-out. Callers
+   * start tracking synchronously after the input gate and finish after the
+   * delivery enqueue/await, so Undo cannot overtake a mutation between the
+   * engine result and its publication. */
+  private beginBrowserMutationTracking(): () => void {
+    this.browserMutationsInFlight += 1;
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      this.browserMutationsInFlight -= 1;
+      if (this.browserMutationsInFlight === 0) {
+        const waiters = this.browserMutationWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+      }
+    };
+  }
+
+  /** Drain mutations already accepted before Undo closed the input gate, plus
+   * their queued state fan-out, before restoring an older checkpoint. */
+  private async waitForBrowserMutationAndDeliveryDrain(): Promise<void> {
+    while (true) {
+      if (this.browserMutationsInFlight > 0) {
+        await new Promise<void>((resolve) => this.browserMutationWaiters.push(resolve));
+      }
+      const queuedDeliveries = this.deliveryQueue;
+      await queuedDeliveries;
+      await Promise.resolve();
+      if (this.browserMutationsInFlight === 0 && this.deliveryQueue === queuedDeliveries) return;
+    }
   }
 
   /** Stamp a successful browser-WASM gameplay mutation after the engine accepts it. */
@@ -2012,6 +2081,14 @@ export class P2PHostAdapter implements EngineAdapter {
         return;
       }
 
+      if (
+        this.undoSyncExperimentEnabled
+        && this.nativeBridge === null
+        && isUndoSyncCapability(msg.undoSyncCapability)
+      ) {
+        this.undoSyncGuestOffers.set(session, msg.undoSyncCapability);
+      }
+
       if (msg.type === "reconnect") {
         traceAdapter("Host", "first-message", { type: msg.type });
         if (msg.authority !== undefined && !isP2PAuthorityStamp(msg.authority)) {
@@ -2396,6 +2473,7 @@ export class P2PHostAdapter implements EngineAdapter {
               transition.result.events,
               transition.generation,
             );
+            const undoSyncCapability = this.undoSyncCapabilityFor(session);
             const accepted = await this.send(session, {
               type: "game_setup",
               wireProtocolVersion: WIRE_PROTOCOL_VERSION,
@@ -2405,9 +2483,13 @@ export class P2PHostAdapter implements EngineAdapter {
               state: projected.snapshot.state,
               events: projected.events,
               playerNames: allNames,
+              ...(undoSyncCapability ? { undoSyncCapability } : {}),
               ...legalActionsToWire(projected.snapshot),
             });
-            if (accepted) this.seedGuestEntry(pid, revision);
+            if (accepted) {
+              if (undoSyncCapability) this.undoSyncAcceptedCapabilities.set(session, undoSyncCapability);
+              this.seedGuestEntry(pid, revision);
+            }
           } catch (err) {
             console.error(`[P2PHost] game_setup for seat ${pid} failed:`, err);
             setupFailure ??= err;
@@ -2434,6 +2516,9 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority()) {
       throw new AdapterError("P2P_ERROR", "Host session superseded", true);
     }
+    if (this.undoSyncInputBlocked) {
+      throw new AdapterError("P2P_PAUSED", "Undo synchronization is in progress", true);
+    }
     if (this.concedingSeats.has(actor)) {
       throw new AdapterError("P2P_PAUSED", "Player departure is in progress", true);
     }
@@ -2444,14 +2529,19 @@ export class P2PHostAdapter implements EngineAdapter {
         true,
       );
     }
-    const transition = await this.applyBrowserMutation(() => this.nativeBridge
-      ? this.nativeBridge.submitAction(action, actor)
-      : this.wasm.submitAction(action, actor));
-    if (isZeroCountDebugCreate(action)) return transition.result;
-    await this.broadcastStateUpdate(transition);
-    await this.runAiLoop();
-    void this.persistAuthoritativeState();
-    return transition.result;
+    const finishMutation = this.beginBrowserMutationTracking();
+    try {
+      const transition = await this.applyBrowserMutation(() => this.nativeBridge
+        ? this.nativeBridge.submitAction(action, actor)
+        : this.wasm.submitAction(action, actor));
+      if (isZeroCountDebugCreate(action)) return transition.result;
+      await this.broadcastStateUpdate(transition);
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
+      return transition.result;
+    } finally {
+      finishMutation();
+    }
   }
 
   async submitInteraction(
@@ -2461,6 +2551,9 @@ export class P2PHostAdapter implements EngineAdapter {
     this.assertNotDisposed();
     if (!this.ownsAuthority()) {
       throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+    }
+    if (this.undoSyncInputBlocked) {
+      throw new AdapterError("P2P_PAUSED", "Undo synchronization is in progress", true);
     }
     if (this.concedingSeats.has(actor)) {
       throw new AdapterError("P2P_PAUSED", "Player departure is in progress", true);
@@ -2472,13 +2565,200 @@ export class P2PHostAdapter implements EngineAdapter {
         true,
       );
     }
-    const transition = await this.applyBrowserMutation(() => this.nativeBridge
-      ? this.nativeBridge.submitInteraction(submission, actor)
-      : this.wasm.submitInteraction(submission, actor));
-    await this.broadcastStateUpdate(transition);
-    await this.runAiLoop();
-    void this.persistAuthoritativeState();
-    return transition.result;
+    const finishMutation = this.beginBrowserMutationTracking();
+    try {
+      const transition = await this.applyBrowserMutation(() => this.nativeBridge
+        ? this.nativeBridge.submitInteraction(submission, actor)
+        : this.wasm.submitInteraction(submission, actor));
+      await this.broadcastStateUpdate(transition);
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
+      return transition.result;
+    } finally {
+      finishMutation();
+    }
+  }
+
+  /**
+   * Start the disabled-by-default client Undo synchronization experiment.
+   * The trusted checkpoint restore and local UI adoption stay in the caller;
+   * the adapter sends only the resulting normal, viewer-filtered state frame.
+   */
+  enableUndoSyncExperiment(): void {
+    if (this.disposed || this.initialized || this.gameStarted) {
+      throw new AdapterError(
+        "P2P_ERROR",
+        "Undo synchronization must be enabled before host initialization",
+        false,
+      );
+    }
+    this.undoSyncExperimentEnabled = true;
+  }
+
+  private undoSyncCapabilityFor(session: PeerSession): P2PUndoSyncCapability | undefined {
+    if (
+      !this.undoSyncExperimentEnabled
+      || this.nativeBridge !== null
+      || !isUndoSyncCapability(this.undoSyncGuestOffers.get(session))
+    ) return undefined;
+    return { version: 1 };
+  }
+
+  beginUndoSynchronization(
+    undoId: string,
+    restoreAndAdopt: () => Promise<void>,
+  ): Promise<void> {
+    this.assertNotDisposed();
+    if (!this.ownsAuthority()) {
+      return Promise.reject(new AdapterError("P2P_ERROR", "Host session superseded", true));
+    }
+    const connectedGuests = [...this.guestSessions.entries()]
+      .filter(([pid]) => !this.disconnectedSeats.has(pid));
+    if (
+      !this.gameStarted
+      || this.gameRunState !== "running"
+      || this.terminalResult !== null
+      || this.playerCount !== 2
+      || connectedGuests.length !== 1
+      || this.nativeBridge !== null
+      || this.undoSyncFatalFailure
+    ) {
+      return Promise.reject(new AdapterError(
+        "P2P_ERROR",
+        "Undo synchronization requires one connected guest in a running browser-hosted two-player game",
+        false,
+      ));
+    }
+
+    const [guestPlayerId, session] = connectedGuests[0];
+    if (!this.undoSyncNegotiatedSessions.has(session)) {
+      return Promise.reject(new AdapterError(
+        "P2P_ERROR",
+        "Undo synchronization was not negotiated for this guest session",
+        false,
+      ));
+    }
+    const isCurrent = () => !this.disposed
+      && !this.undoSyncFatalFailure
+      && this.gameStarted
+      && this.gameRunState === "running"
+      && this.terminalResult === null
+      && this.playerCount === 2
+      && this.guestSessions.size === 1
+      && this.guestSessions.get(guestPlayerId) === session
+      && !this.disconnectedSeats.has(guestPlayerId)
+      && this.undoSyncNegotiatedSessions.has(session)
+      && this.ownsAuthority();
+    if (!this.undoSyncBarrier || this.undoSyncSession !== session) {
+      this.undoSyncBarrier?.cancel(new Error("Undo peer session was replaced"));
+      let transactionKey: { undoId: string; revision: number } | null = null;
+      let stateRevision: number | null = null;
+      this.undoSyncSession = session;
+      this.undoSyncBarrier = new UndoSyncHostBarrier({
+        session,
+        authority: this.authority,
+        isCurrent,
+        setInputBlocked: (blocked) => { this.undoSyncInputBlocked = blocked; },
+        onFatalFailure: (error) => this.failUndoSyncClosed(error),
+        sendPhase: (metadata) => this.enqueueDelivery(async () => {
+          if (!isCurrent()) return false;
+          if (
+            metadata.phase === "adopted"
+            && (!transactionKey || transactionKey.undoId !== metadata.undoId || transactionKey.revision !== metadata.revision)
+          ) {
+            transactionKey = { undoId: metadata.undoId, revision: metadata.revision };
+            stateRevision = ++this.authoritativeRevision;
+          }
+          if (
+            !transactionKey
+            || transactionKey.undoId !== metadata.undoId
+            || transactionKey.revision !== metadata.revision
+            || stateRevision === null
+          ) return false;
+          try {
+            const projected = await this.wasm.getViewerSnapshot(guestPlayerId);
+            if (!isCurrent()) return false;
+            return this.send(session, {
+              type: "state_update",
+              revision: stateRevision,
+              state: projected.state,
+              events: [],
+              ...legalActionsToWire(projected),
+              undoSync: metadata,
+            });
+          } catch (error) {
+            console.error("[P2PHost] Undo synchronization state projection failed:", error);
+            return false;
+          }
+        }),
+      });
+    }
+    const barrier = this.undoSyncBarrier;
+    const transaction = barrier.begin(undoId, async () => {
+      await this.waitForBrowserMutationAndDeliveryDrain();
+      if (
+        this.undoSyncBarrier !== barrier
+        || this.undoSyncSession !== session
+        || !isCurrent()
+      ) {
+        const error = new AdapterError("P2P_ERROR", "Undo host session or game state is no longer current", false);
+        if (this.undoSyncBarrier === barrier) {
+          this.undoSyncBarrier = null;
+          this.undoSyncSession = null;
+          barrier.cancel(error);
+        }
+        throw error;
+      }
+      let snapshot: EngineSnapshot;
+      try {
+        snapshot = await this.wasm.getSnapshot();
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        if (this.undoSyncBarrier === barrier) {
+          this.undoSyncBarrier = null;
+          this.undoSyncSession = null;
+          barrier.cancel(failure);
+        }
+        throw failure;
+      }
+      if (
+        this.undoSyncBarrier !== barrier
+        || this.undoSyncSession !== session
+        || !isCurrent()
+      ) {
+        const error = new AdapterError("P2P_ERROR", "Undo host session or game state is no longer current", false);
+        if (this.undoSyncBarrier === barrier) {
+          this.undoSyncBarrier = null;
+          this.undoSyncSession = null;
+          barrier.cancel(error);
+        }
+        throw error;
+      }
+      if (snapshot.state.waiting_for.type === "GameOver") {
+        const error = new Error("Undo synchronization cannot restore a terminal GameOver state");
+        this.gameRunState = "terminal";
+        this.undoSyncBarrier = null;
+        this.undoSyncSession = null;
+        barrier.cancel(error);
+        throw error;
+      }
+      this.undoSyncRestoreSession = session;
+      await restoreAndAdopt();
+    });
+    return transaction.then(() => {
+      if (this.undoSyncRestoreSession === session) this.undoSyncRestoreSession = null;
+    });
+  }
+
+  private failUndoSyncClosed(error: Error): void {
+    if (this.undoSyncFatalFailure || this.disposed) return;
+    this.undoSyncFatalFailure = true;
+    const message = `Undo synchronization failed and the match was closed: ${error.message}`;
+    this.emit({ type: "error", message });
+    void this.terminateGame().catch((teardownError) => {
+      console.error("[P2PHost] Undo failure teardown failed:", teardownError);
+      this.dispose();
+    });
   }
 
   async previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]> {
@@ -3039,6 +3319,9 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority()) {
       return { status: "stale", reason: "P2P host authority changed" };
     }
+    if (this.undoSyncInputBlocked) {
+      throw new AdapterError("P2P_PAUSED", "Undo synchronization is in progress", true);
+    }
     if (this.gameRunState !== "running") {
       throw new AdapterError(
         "P2P_PAUSED",
@@ -3049,14 +3332,19 @@ export class P2PHostAdapter implements EngineAdapter {
     if (this.nativeBridge) {
       return { status: "stale", reason: "native P2P authority owns AI decisions" };
     }
-    const outcome = await this.wasm.submitAiActionProposal(proposal);
-    if (outcome.status === "applied") {
-      const transition = this.stampBrowserMutation(outcome.result);
-      await this.broadcastStateUpdate(transition);
-      await this.runAiLoop();
-      void this.persistAuthoritativeState();
+    const finishMutation = this.beginBrowserMutationTracking();
+    try {
+      const outcome = await this.wasm.submitAiActionProposal(proposal);
+      if (outcome.status === "applied") {
+        const transition = this.stampBrowserMutation(outcome.result);
+        await this.broadcastStateUpdate(transition);
+        await this.runAiLoop();
+        void this.persistAuthoritativeState();
+      }
+      return outcome;
+    } finally {
+      finishMutation();
     }
-    return outcome;
   }
 
   restoreState(_state: PersistedGameState): void {
@@ -3072,7 +3360,7 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   async sendConcede(): Promise<void> {
-    if (!this.ownsAuthority()) return;
+    if (!this.ownsAuthority() || this.undoSyncInputBlocked) return;
     const outcome = await this.concedePlayer(0, "Host conceded", "conceded");
     if (outcome !== "committed" && outcome !== "unknown") return;
     for (const [, s] of this.guestSessions) {
@@ -3093,7 +3381,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * protected wire request pass through this authority-bound route.
    */
   private requestBoundMatchConcede(concedingPlayer: PlayerId): void {
-    if (!this.boundMatchConcede || this.matchConcedeSent || !this.ownsAuthority()) return;
+    if (this.undoSyncInputBlocked || !this.boundMatchConcede || this.matchConcedeSent || !this.ownsAuthority()) return;
     if (!this.gameStarted || this.gameRunState !== "running") return;
     this.matchConcedeSent = true;
     void Promise.resolve(this.boundMatchConcede.onConcede(concedingPlayer)).catch(() => {
@@ -3113,6 +3401,9 @@ export class P2PHostAdapter implements EngineAdapter {
     // Set first and synchronously: every in-flight init/start re-checks this
     // after each await, and callers that kept a reference must fail loud.
     this.disposed = true;
+    this.undoSyncBarrier?.cancel(new Error("Undo host adapter disposed"));
+    this.undoSyncBarrier = null;
+    this.undoSyncSession = null;
     this.unsubscribeHostConnections();
     for (const { timer } of this.disconnectedSeats.values()) {
       if (timer !== null) clearTimeout(timer);
@@ -3252,6 +3543,13 @@ export class P2PHostAdapter implements EngineAdapter {
     }
     switch (msg.type) {
       case "action": {
+        if (this.undoSyncInputBlocked) {
+          void this.send(sourceSession, {
+            type: "action_failed",
+            message: "Undo synchronization is in progress",
+          });
+          return;
+        }
         // Verify sender identity to prevent guest 2 spoofing as guest 3.
         if (msg.senderPlayerId !== pid) {
           const session = this.guestSessions.get(pid);
@@ -3289,48 +3587,60 @@ export class P2PHostAdapter implements EngineAdapter {
           }
           return;
         }
-        let transition: BrowserTransition;
+        const finishMutation = this.beginBrowserMutationTracking();
         try {
-          // CRITICAL: pass `pid` (the session-bound PlayerId), NEVER
-          // `msg.senderPlayerId`. The envelope check above already guarantees
-          // they match, but if we ever regressed that check we must still
-          // tag with the authenticated session identity — the wire payload
-          // is untrusted. This is the defense-in-depth that makes the engine
-          // guard meaningful for P2P.
-          transition = await this.applyBrowserMutation(() => this.nativeBridge
-            ? this.nativeBridge.submitAction(msg.action, pid)
-            : this.wasm.submitAction(msg.action, pid));
-        } catch (err) {
-          // The engine refused the action: nothing applied, so this — and only
-          // this — is an action failure the guest must hear about.
-          const session = this.guestSessions.get(pid);
-          if (session) void this.send(session, actionFailureFrame(err));
-          break;
-        }
-        // Past here the action HAS applied. Everything left is delivery and
-        // bookkeeping, so a throw must not reach the guest as an action
-        // failure — that reports an applied action as failed and the guest's
-        // screen then disagrees with the authoritative engine (#7924).
-        try {
-          if (isZeroCountDebugCreate(msg.action)) {
+          let transition: BrowserTransition;
+          try {
+            // CRITICAL: pass `pid` (the session-bound PlayerId), NEVER
+            // `msg.senderPlayerId`. The envelope check above already guarantees
+            // they match, but if we ever regressed that check we must still
+            // tag with the authenticated session identity — the wire payload
+            // is untrusted. This is the defense-in-depth that makes the engine
+            // guard meaningful for P2P.
+            transition = await this.applyBrowserMutation(() => this.nativeBridge
+              ? this.nativeBridge.submitAction(msg.action, pid)
+              : this.wasm.submitAction(msg.action, pid));
+          } catch (err) {
+            // The engine refused the action: nothing applied, so this — and only
+            // this — is an action failure the guest must hear about.
             const session = this.guestSessions.get(pid);
-            if (session) await this.send(session, { type: "action_noop" });
+            if (session) void this.send(session, actionFailureFrame(err));
             break;
           }
-          // Host screen first, then the guests (see `publishHostSnapshot`).
-          await this.publishHostSnapshot(transition.result);
-          await this.broadcastStateUpdate(transition);
-          // Wake the AI loop. After a guest's action lands, priority may have
-          // shifted to an AI seat — without this, the AI never gets a turn
-          // and the game stalls (same pattern as concedePlayer/host submit).
-          await this.runAiLoop();
-          void this.persistAuthoritativeState();
-        } catch (err) {
-          console.error("[P2PHost] delivery after an applied guest action failed:", err);
+          // Past here the action HAS applied. Everything left is delivery and
+          // bookkeeping, so a throw must not reach the guest as an action
+          // failure — that reports an applied action as failed and the guest's
+          // screen then disagrees with the authoritative engine (#7924).
+          try {
+            if (isZeroCountDebugCreate(msg.action)) {
+              const session = this.guestSessions.get(pid);
+              if (session) await this.send(session, { type: "action_noop" });
+              break;
+            }
+            // Host screen first, then the guests (see `publishHostSnapshot`).
+            await this.publishHostSnapshot(transition.result);
+            await this.broadcastStateUpdate(transition);
+            // Wake the AI loop. After a guest's action lands, priority may have
+            // shifted to an AI seat — without this, the AI never gets a turn
+            // and the game stalls (same pattern as concedePlayer/host submit).
+            await this.runAiLoop();
+            void this.persistAuthoritativeState();
+          } catch (err) {
+            console.error("[P2PHost] delivery after an applied guest action failed:", err);
+          }
+        } finally {
+          finishMutation();
         }
         break;
       }
       case "interaction": {
+        if (this.undoSyncInputBlocked) {
+          void this.send(sourceSession, {
+            type: "action_failed",
+            message: "Undo synchronization is in progress",
+          });
+          return;
+        }
         const session = this.guestSessions.get(pid);
         if (!session || msg.senderPlayerId !== pid) {
           if (session) void this.send(session, { type: "action_failed", message: "senderPlayerId mismatch" });
@@ -3345,23 +3655,28 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           return;
         }
-        let transition: BrowserTransition;
+        const finishMutation = this.beginBrowserMutationTracking();
         try {
-          transition = await this.applyBrowserMutation(() => this.nativeBridge
-            ? this.nativeBridge.submitInteraction(msg.submission, pid)
-            : this.wasm.submitInteraction(msg.submission, pid));
-        } catch (err) {
-          void this.send(session, actionFailureFrame(err));
-          break;
-        }
-        // Applied — same delivery contract as the "action" case above (#7924).
-        try {
-          await this.publishHostSnapshot(transition.result);
-          await this.broadcastStateUpdate(transition);
-          await this.runAiLoop();
-          void this.persistAuthoritativeState();
-        } catch (err) {
-          console.error("[P2PHost] delivery after an applied guest interaction failed:", err);
+          let transition: BrowserTransition;
+          try {
+            transition = await this.applyBrowserMutation(() => this.nativeBridge
+              ? this.nativeBridge.submitInteraction(msg.submission, pid)
+              : this.wasm.submitInteraction(msg.submission, pid));
+          } catch (err) {
+            void this.send(session, actionFailureFrame(err));
+            break;
+          }
+          // Applied — same delivery contract as the "action" arm above (#7924).
+          try {
+            await this.publishHostSnapshot(transition.result);
+            await this.broadcastStateUpdate(transition);
+            await this.runAiLoop();
+            void this.persistAuthoritativeState();
+          } catch (err) {
+            console.error("[P2PHost] delivery after an applied guest interaction failed:", err);
+          }
+        } finally {
+          finishMutation();
         }
         break;
       }
@@ -3440,6 +3755,7 @@ export class P2PHostAdapter implements EngineAdapter {
         break;
       }
       case "concede": {
+        if (this.undoSyncInputBlocked) return;
         // CR 104.3a: Any player may concede at any time. Route through the
         // engine action so the seat is properly eliminated (CR 800.4a).
         const outcome = await this.concedePlayer(pid, "Player conceded", "conceded");
@@ -3457,6 +3773,7 @@ export class P2PHostAdapter implements EngineAdapter {
         break;
       }
       case "match_concede": {
+        if (this.undoSyncInputBlocked) return;
         if (!this.boundMatchConcede) {
           if (session) {
             void this.send(session, {
@@ -3471,6 +3788,21 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       case "state_ack":
         this.recordGuestAck(pid, msg.revision);
+        {
+          const accepted = this.undoSyncAcceptedCapabilities.get(sourceSession);
+          if (
+            this.guestSessions.get(pid) === sourceSession
+            && accepted !== undefined
+            && isUndoSyncCapability(msg.undoSyncCapability)
+            && msg.undoSyncCapability.version === accepted.version
+            && hasExactP2PAuthority(msg.authority, this.authority)
+          ) {
+            this.undoSyncNegotiatedSessions.add(sourceSession);
+          }
+        }
+        if (this.undoSyncBarrier) {
+          await this.undoSyncBarrier.receiveAck(sourceSession, msg.authority, msg.undoSync);
+        }
         break;
       default:
         break;
@@ -3482,6 +3814,18 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.guestSessions.has(pid)) return;
     if (this.disconnectedSeats.has(pid)) return;
 
+    const disconnectedSession = this.guestSessions.get(pid);
+    if (disconnectedSession && this.undoSyncSession === disconnectedSession) {
+      if (this.undoSyncRestoreSession === disconnectedSession) {
+        this.failUndoSyncClosed(new Error(
+          "Undo guest disconnected after host restore began; state adoption is uncertain",
+        ));
+      } else {
+        this.undoSyncBarrier?.cancel(new Error("Undo guest disconnected before host restore"));
+        this.undoSyncBarrier = null;
+        this.undoSyncSession = null;
+      }
+    }
     this.guestSessions.delete(pid);
     this.publishPlayerLatencies();
 
@@ -3632,6 +3976,7 @@ export class P2PHostAdapter implements EngineAdapter {
       const handoff = await this.reconnectHandoff(pid);
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
+      const undoSyncCapability = this.undoSyncCapabilityFor(session);
       const acknowledged = await this.send(session, {
         type: "reconnect_ack",
         wireProtocolVersion: WIRE_PROTOCOL_VERSION,
@@ -3639,6 +3984,7 @@ export class P2PHostAdapter implements EngineAdapter {
         revision: handoff.revision,
         state: handoff.snapshot.state,
         playerNames: this.playerNamesForSeats(),
+        ...(undoSyncCapability ? { undoSyncCapability } : {}),
         ...legalActionsToWire(handoff.snapshot.legalResult),
       });
       // A queued send can be dropped after the reconnect handoff was captured.
@@ -3649,6 +3995,7 @@ export class P2PHostAdapter implements EngineAdapter {
         return;
       }
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
+      if (undoSyncCapability) this.undoSyncAcceptedCapabilities.set(session, undoSyncCapability);
       this.seedGuestEntry(pid, handoff.revision);
 
       if (this.deliveredNativeAiDriverFault !== null) {
@@ -3774,6 +4121,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (this.disposed || !this.ownsAuthority()) return "inactive";
     if (this.concedingSeats.has(pid)) return "in_progress";
     this.concedingSeats.add(pid);
+    const finishMutation = this.beginBrowserMutationTracking();
     const retire = () => {
       // Cancel any active grace timer for this seat. `timer` may be null if the
       // host already called `holdForReconnect`.
@@ -3842,6 +4190,7 @@ export class P2PHostAdapter implements EngineAdapter {
       }
     } finally {
       this.concedingSeats.delete(pid);
+      finishMutation();
     }
     // A concession may clear the final outstanding reconnect reservation.
     this.resumeIfUnblocked();
@@ -3924,6 +4273,10 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Manually pause (host UI). */
   requestPause(): void {
     if (!this.ownsAuthority()) return;
+    if (this.undoSyncRestoreSession !== null) {
+      this.failUndoSyncClosed(new Error("Undo host paused after restore began; state adoption is uncertain"));
+      return;
+    }
     if (this.gameRunState === "running") {
       this.gameRunState = "paused-manual";
       for (const [, s] of this.guestSessions) {
@@ -3935,7 +4288,7 @@ export class P2PHostAdapter implements EngineAdapter {
 
   /** Manually resume only an explicit manual pause after every reconnect settles. */
   requestResume(): void {
-    if (!this.ownsAuthority()) return;
+    if (!this.ownsAuthority() || this.undoSyncFatalFailure) return;
     if (
       this.gameRunState === "paused-manual" &&
       this.disconnectedSeats.size === 0 &&
@@ -4006,6 +4359,16 @@ export class P2PGuestAdapter implements EngineAdapter {
   private assignedPlayerId: PlayerId | null = null;
   /** Current host lease accepted from game_setup/reconnect_ack. */
   private authority: P2PAuthorityStamp | null = null;
+  /** Optional UI adoption callback; unset on the ordinary P2P path. */
+  private undoSyncAdopter: ((snapshot: EngineSnapshot, metadata: P2PUndoSyncMetadata) => Promise<void>) | null = null;
+  /** Capability offer/accept are bound to one exact peer session. */
+  private undoSyncOfferedSession: PeerSession | null = null;
+  private undoSyncAcceptedSession: PeerSession | null = null;
+  private undoSyncCapabilityEchoSession: PeerSession | null = null;
+  private undoSyncBarrier: UndoSyncGuestBarrier | null = null;
+  private undoSyncSession: PeerSession | null = null;
+  private undoSyncInputBlocked = false;
+  private undoSyncFatalFailure = false;
   readonly supportsMatchConcede: true | undefined;
   private matchConcedeSent = false;
   /** Revision of the cached state frame. A terminal result is bound to this
@@ -4063,6 +4426,31 @@ export class P2PGuestAdapter implements EngineAdapter {
     };
   }
 
+  /** Installs the experimental async UI adoption hook. It is absent by default. */
+  configureUndoSyncAdoption(
+    adopter: (snapshot: EngineSnapshot, metadata: P2PUndoSyncMetadata) => Promise<void>,
+  ): () => void {
+    if (this.undoSyncInputBlocked) {
+      throw new AdapterError("P2P_PAUSED", "Cannot replace Undo adoption during an active barrier", true);
+    }
+    this.undoSyncAdopter = adopter;
+    return () => {
+      if (this.undoSyncAdopter !== adopter) return;
+      const session = this.session;
+      if (session && (
+        this.undoSyncOfferedSession === session
+        || this.undoSyncAcceptedSession === session
+        || this.undoSyncSession === session
+      )) {
+        this.failUndoSyncClosed(new Error("Undo adoption callback removed from its peer session"));
+      }
+      this.undoSyncAdopter = null;
+      this.undoSyncOfferedSession = null;
+      this.undoSyncAcceptedSession = null;
+      this.undoSyncCapabilityEchoSession = null;
+    };
+  }
+
   private emit(event: P2PAdapterEvent): void {
     for (const listener of this.listeners) {
       listener(event);
@@ -4079,6 +4467,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         playerToken: this.playerToken,
         wireProtocolVersion: WIRE_PROTOCOL_VERSION,
         ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
+        ...(this.undoSyncOfferedSession === this.session ? { undoSyncCapability: { version: 1 } } : {}),
       });
     } else {
       traceAdapter("Guest", "send-guest-deck", { hostPeerId: this.hostPeerId });
@@ -4088,6 +4477,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         displayName: this.displayName,
         reservationToken: this.reservationToken,
         wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+        ...(this.undoSyncOfferedSession === this.session ? { undoSyncCapability: { version: 1 } } : {}),
       });
     }
   }
@@ -4143,6 +4533,9 @@ export class P2PGuestAdapter implements EngineAdapter {
     );
     this.session = session;
     this.authenticatedSession = null;
+    this.undoSyncOfferedSession = this.undoSyncAdopter ? session : null;
+    this.undoSyncAcceptedSession = null;
+    this.undoSyncCapabilityEchoSession = null;
     this.matchConcedeSent = false;
     session.onMessage((msg) => this.handleHostMessage(session, msg));
   }
@@ -4159,6 +4552,9 @@ export class P2PGuestAdapter implements EngineAdapter {
     // as the engine `actor`. If this client were malicious and claimed
     // another identity, the host would detect the mismatch and drop the
     // action before touching the engine.
+    if (this.undoSyncInputBlocked) {
+      throw new AdapterError("P2P_PAUSED", "Undo synchronization is in progress", true);
+    }
     this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
       this.parkPendingSubmission(resolve, reject);
@@ -4174,6 +4570,9 @@ export class P2PGuestAdapter implements EngineAdapter {
     submission: InteractionSubmission,
     _actor: PlayerId,
   ): Promise<SubmitResult> {
+    if (this.undoSyncInputBlocked) {
+      throw new AdapterError("P2P_PAUSED", "Undo synchronization is in progress", true);
+    }
     this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
       this.parkPendingSubmission(resolve, reject);
@@ -4291,7 +4690,103 @@ export class P2PGuestAdapter implements EngineAdapter {
    */
   private sendStateAck(): void {
     if (this.cachedRevision === null) return;
-    this.send({ type: "state_ack", revision: this.cachedRevision });
+    const session = this.session;
+    const echoCapability = Boolean(
+      session
+      && this.undoSyncAcceptedSession === session
+      && this.undoSyncCapabilityEchoSession !== session,
+    );
+    if (echoCapability && session) this.undoSyncCapabilityEchoSession = session;
+    this.send({
+      type: "state_ack",
+      revision: this.cachedRevision,
+      ...(echoCapability ? { undoSyncCapability: { version: 1 } } : {}),
+    });
+  }
+
+  private acceptUndoSyncCapability(
+    session: PeerSession,
+    capability: P2PUndoSyncCapability | undefined,
+  ): void {
+    this.undoSyncAcceptedSession = this.undoSyncAdopter
+      && this.undoSyncOfferedSession === session
+      && isUndoSyncCapability(capability)
+      ? session
+      : null;
+    if (this.undoSyncAcceptedSession === session) this.undoSyncCapabilityEchoSession = null;
+  }
+
+  private guestUndoSyncBarrier(session: PeerSession): UndoSyncGuestBarrier | null {
+    if (
+      !this.undoSyncAdopter
+      || this.authority === null
+      || this.undoSyncAcceptedSession !== session
+    ) return null;
+    if (this.undoSyncBarrier && this.undoSyncSession === session) return this.undoSyncBarrier;
+    this.undoSyncBarrier?.cancel();
+    this.undoSyncBarrier = null;
+    this.undoSyncSession = null;
+
+    const authority = this.authority;
+    const isCurrent = () => !this.terminated
+      && this.session === session
+      && this.authenticatedSession === session
+      && this.authority !== null
+      && hasExactP2PAuthority(this.authority, authority);
+    this.undoSyncSession = session;
+    this.undoSyncBarrier = new UndoSyncGuestBarrier({
+      session,
+      authority,
+      isCurrent,
+      setInputBlocked: (blocked) => { this.undoSyncInputBlocked = blocked; },
+      onFatalFailure: (error) => this.failUndoSyncClosed(error),
+      sendAck: (metadata, stateRevision) => {
+        if (!isCurrent()) return Promise.resolve(false);
+        return session.send({
+          type: "state_ack",
+          revision: stateRevision,
+          undoSync: metadata,
+          authority,
+        });
+      },
+    });
+    return this.undoSyncBarrier;
+  }
+
+  private failUndoSyncClosed(error: Error): void {
+    if (this.undoSyncFatalFailure || this.terminated) return;
+    this.undoSyncFatalFailure = true;
+    const message = `Undo synchronization failed and this guest session was closed: ${error.message}`;
+    this.emit({ type: "error", message });
+    const wasBlocked = this.undoSyncInputBlocked;
+    this.terminate(new AdapterError("P2P_ERROR", message, true));
+    if (wasBlocked) this.undoSyncInputBlocked = true;
+  }
+
+  private async receiveUndoSyncStateUpdate(
+    session: PeerSession,
+    message: Extract<P2PMessage, { type: "state_update" }>,
+  ): Promise<void> {
+    if (!isValidUndoSyncMetadata(message.undoSync) || message.revision === undefined) return;
+    if (!Number.isSafeInteger(message.revision) || message.revision < 0) return;
+    if (this.cachedRevision !== null && message.revision < this.cachedRevision) return;
+    const barrier = this.guestUndoSyncBarrier(session);
+    const adopter = this.undoSyncAdopter;
+    if (!barrier || !adopter) return;
+
+    await barrier.receivePhase(
+      session,
+      message.authority,
+      message.undoSync,
+      message.revision,
+      async () => {
+        if (message.undoSync?.phase !== "adopted") return;
+        if (session !== this.session || this.authenticatedSession !== session) return;
+        this.cachedRevision = message.revision!;
+        const snapshot = this.cacheSnapshot(message.state, legalActionsFromWire(message));
+        await adopter(snapshot, message.undoSync);
+      },
+    );
   }
 
   private async acceptTerminalResult(
@@ -4351,12 +4846,14 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   sendConcede(): void {
+    if (this.undoSyncInputBlocked) return;
     if (!this.currentAuthenticatedSession()) return;
     this.send({ type: "concede" });
   }
 
   /** Requests settlement from the authenticated host-side match authority. */
   sendMatchConcede(): void {
+    if (this.undoSyncInputBlocked) return;
     if (!this.currentAuthenticatedSession()) return;
     if (!this.supportsMatchConcede || this.matchConcedeSent) return;
     this.matchConcedeSent = true;
@@ -4377,7 +4874,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.listeners = [];
   }
 
-  private handleHostMessage(session: PeerSession, msg: P2PMessage): void {
+  private async handleHostMessage(session: PeerSession, msg: P2PMessage): Promise<void> {
     if (session !== this.session) return;
     if (this.terminated) return;
     if (
@@ -4455,6 +4952,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "game_setup": {
         this.authenticatedSession = session;
+        this.acceptUndoSyncCapability(session, msg.undoSyncCapability);
         this.assignedPlayerId = msg.assignedPlayerId;
         this.playerToken = msg.playerToken;
         if (isP2PAuthorityStamp(msg.authority)) {
@@ -4474,6 +4972,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "reconnect_ack": {
         this.authenticatedSession = session;
+        this.acceptUndoSyncCapability(session, msg.undoSyncCapability);
         this.assignedPlayerId = msg.assignedPlayerId;
         if (this.playerToken && isP2PAuthorityStamp(msg.authority)) {
           this.authority = msg.authority;
@@ -4544,6 +5043,10 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "state_update": {
         if (this.authenticatedSession !== session) return;
+        if (msg.undoSync !== undefined) {
+          await this.receiveUndoSyncStateUpdate(session, msg);
+          break;
+        }
         // PeerJS normally preserves message order, but state resync after a
         // reconnect can race a previously queued delivery. Never let that old
         // view overwrite a newer authority revision: it can leave two peers
@@ -4890,6 +5393,17 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   private handleHostDisconnect(session: PeerSession): void {
     if (session !== this.session) return;
+    if (this.undoSyncInputBlocked && this.undoSyncSession === session) {
+      this.failUndoSyncClosed(new Error(
+        "Host disconnected during Undo adoption; peer state may differ",
+      ));
+      return;
+    }
+    if (this.undoSyncSession === session) {
+      this.undoSyncBarrier?.cancel();
+      this.undoSyncBarrier = null;
+      this.undoSyncSession = null;
+    }
     this.rejectPendingSubmission(
       new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
     );
@@ -4922,6 +5436,11 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   private terminate(error = new AdapterError("P2P_ERROR", "Host session terminated", true)): void {
     this.terminated = true;
+    const keepInputBlocked = this.undoSyncInputBlocked;
+    this.undoSyncBarrier?.cancel();
+    this.undoSyncBarrier = null;
+    this.undoSyncSession = null;
+    this.undoSyncInputBlocked = keepInputBlocked;
     this.authenticatedSession = null;
     this.rejectPendingSubmission(error);
     this.rejectPendingManaPaymentPreviews(error);
@@ -4978,6 +5497,7 @@ export class P2PGuestAdapter implements EngineAdapter {
           playerToken: this.playerToken,
           wireProtocolVersion: WIRE_PROTOCOL_VERSION,
           ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
+          ...(this.undoSyncOfferedSession === this.session ? { undoSyncCapability: { version: 1 } } : {}),
         });
       }
     } catch (err) {

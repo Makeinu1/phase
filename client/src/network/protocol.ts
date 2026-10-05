@@ -543,6 +543,19 @@ export type P2PInteractionPreviewAnswer =
 
 export const WIRE_PROTOCOL_VERSION = 88 as const;
 
+/** Versioned opt-in for the experimental client Undo synchronization path. */
+export interface P2PUndoSyncCapability {
+  version: 1;
+}
+
+/** Correlates one opt-in client-side Undo synchronization barrier. */
+export interface P2PUndoSyncMetadata {
+  undoId: string;
+  /** Monotonic barrier revision, independent of the engine state revision. */
+  revision: number;
+  phase: "adopted" | "released";
+}
+
 export type P2PMessage = P2PAuthorityWire & (
   | {
       type: "guest_deck";
@@ -550,6 +563,8 @@ export type P2PMessage = P2PAuthorityWire & (
       displayName?: string;
       reservationToken?: string;
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
+      /** Guest offer; only sent when its UI adoption callback is ready. */
+      undoSyncCapability?: P2PUndoSyncCapability;
     }
   | ({
       type: "game_setup";
@@ -560,6 +575,8 @@ export type P2PMessage = P2PAuthorityWire & (
       state: GameState;
       events: GameEvent[];
       playerNames?: Record<number, string>;
+      /** Host acceptance for this exact authenticated peer session. */
+      undoSyncCapability?: P2PUndoSyncCapability;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
   | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
@@ -575,13 +592,21 @@ export type P2PMessage = P2PAuthorityWire & (
       state: GameState;
       events: GameEvent[];
       logEntries?: GameLogEntry[];
+      /** Present only for the disabled-by-default Undo synchronization experiment. */
+      undoSync?: P2PUndoSyncMetadata;
     } & LegalActionsWire)
   /** Guest → host: the highest state revision the guest has APPLIED, which a
    * host ledger recording transmission cannot otherwise observe. Sent from
    * every arm that accepts a state-bearing frame, and from the stale-drop
    * branch of `state_update` — where it reports the newer revision the guest
    * already holds, not the stale one it discarded. */
-  | { type: "state_ack"; revision: number }
+  | {
+      type: "state_ack";
+      revision: number;
+      /** Echoes only the capability accepted in this session's setup frame. */
+      undoSyncCapability?: P2PUndoSyncCapability;
+      undoSync?: P2PUndoSyncMetadata;
+    }
   | { type: "action_rejected"; rejection: ActionRejection }
   | { type: "action_failed"; message: string }
   | { type: "action_noop" }
@@ -604,6 +629,8 @@ export type P2PMessage = P2PAuthorityWire & (
       playerToken: string;
       sessionKey?: P2PSessionKey;
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
+      /** Guest offer; only sent when its UI adoption callback is ready. */
+      undoSyncCapability?: P2PUndoSyncCapability;
     }
   | ({
       type: "reconnect_ack";
@@ -612,6 +639,8 @@ export type P2PMessage = P2PAuthorityWire & (
       revision?: number;
       state: GameState;
       playerNames?: Record<number, string>;
+      /** Host acceptance for this exact authenticated peer session. */
+      undoSyncCapability?: P2PUndoSyncCapability;
     } & LegalActionsWire)
   | {
       type: "reconnect_rejected";

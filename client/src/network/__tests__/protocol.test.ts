@@ -154,8 +154,24 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "game_resumed" },
     { type: "lobby_progress", joined: 1, total: 3 },
     { type: "emote", emote: "🔥" },
-    { type: "reconnect", playerToken: "token-123", wireProtocolVersion: WIRE_PROTOCOL_VERSION },
-    { type: "state_ack", revision: 17 },
+    {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      undoSyncCapability: { version: 1 },
+    },
+    {
+      type: "reconnect",
+      playerToken: "token-123",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      undoSyncCapability: { version: 1 },
+    },
+    {
+      type: "state_ack",
+      revision: 17,
+      undoSyncCapability: { version: 1 },
+      undoSync: { undoId: "undo-1", revision: 1, phase: "adopted" },
+    },
     { type: "reconnect_rejected", reason: "Unknown token" },
     {
       type: "action_rejected",
@@ -246,22 +262,26 @@ describe("encodeWireMessage / decodeWireMessage", () => {
         },
       }),
       events: [],
+      undoSyncCapability: { version: 1 },
       legalActions: [{ type: "RollPlanarDie" }],
       manaPaymentShortcutActions: [],
       viewerInteraction: viewerInteractionWithProducedMana,
     },
     {
       type: "state_update",
+      revision: 17,
       state: buildGameState(),
       events: [],
       legalActions: [],
       manaPaymentShortcutActions: [],
       viewerInteraction: viewerInteractionWithProducedMana,
+      undoSync: { undoId: "undo-1", revision: 1, phase: "released" },
     },
     {
       type: "reconnect_ack",
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       assignedPlayerId: 1,
+      undoSyncCapability: { version: 1 },
       state: buildGameState({
         derived: {
           planechase: {
