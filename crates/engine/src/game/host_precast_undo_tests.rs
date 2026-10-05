@@ -25,6 +25,10 @@ impl Fixture {
     }
 
     fn with_payment_land(oracle: Option<&str>) -> Self {
+        Self::with_payment_setup(oracle, P0)
+    }
+
+    fn with_payment_setup(oracle: Option<&str>, payment_land_owner: PlayerId) -> Self {
         let mut scenario = GameScenario::new_n_player(2, 0xF_32_00_01);
         scenario.at_phase(Phase::PreCombatMain);
         let forest_a = scenario.add_basic_land(P0, ManaColor::Green);
@@ -32,7 +36,7 @@ impl Fixture {
             Some(oracle) => scenario
                 .add_land_from_oracle(P0, "Payment witness land", oracle)
                 .id(),
-            None => scenario.add_basic_land(P0, ManaColor::Green),
+            None => scenario.add_basic_land(payment_land_owner, ManaColor::Green),
         };
         let bears = scenario
             .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
@@ -350,6 +354,32 @@ fn different_cast_activation_cancel_and_rejection_invalidate() {
     assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
     assert!(f.undo.receipt().is_none());
 
+    let mut f = Fixture::with_payment_setup(None, P1);
+    let card_id = f.state.objects[&f.bears].card_id;
+    assert!(eligible_pre(&f.state, P0, f.bears, card_id));
+    assert!(
+        f.undo
+            .submit_action(
+                &mut f.state,
+                BINDING,
+                P0,
+                GameAction::CastSpell {
+                    object_id: f.bears,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            )
+            .is_err(),
+        "ordinary cast really refused for insufficient payment"
+    );
+    assert_eq!(
+        f.undo.next_receipt, 1,
+        "PRE was captured before reducer refusal"
+    );
+    assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+    assert!(f.undo.receipt().is_none());
+
     let mut f = Fixture::new();
     f.cast(CastPaymentMode::Manual);
     let receipt = f.undo.receipt().unwrap();
@@ -418,6 +448,46 @@ fn unsupported_payment_source_executes_normally_without_arming() {
         ));
         assert_eq!(f.state.objects[&f.bears].zone, Zone::Stack);
         assert_eq!(f.state.players[0].life, 19, "production life cost was paid");
+        assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+        assert!(f.undo.receipt().is_none());
+    }
+}
+
+#[test]
+fn next_spell_effects_execute_normally_without_arming() {
+    use crate::types::ability::{PlayerScope, ResolvedAbility};
+    use crate::types::game_state::NextSpellModifier;
+    for effect in [
+        Effect::ReduceNextSpellCost {
+            amount: 1,
+            spell_filter: None,
+        },
+        Effect::GrantNextSpellAbility {
+            modifier: NextSpellModifier::CantBeCountered,
+            player: PlayerScope::Controller,
+            spell_filter: None,
+        },
+    ] {
+        let reduction = matches!(effect, Effect::ReduceNextSpellCost { .. });
+        let mut f = Fixture::new();
+        // Fixture preparation uses the production effect dispatch to create
+        // the next-spell carrier; the tested Bears never resolves.
+        let ability = ResolvedAbility::new(effect, vec![], f.forest_a, P0);
+        let mut events = vec![];
+        super::super::effects::resolve_effect(&mut f.state, &ability, &mut events).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+        assert!(
+            !f.state.pending_spell_cost_reductions.is_empty()
+                || !f.state.pending_next_spell_modifiers.is_empty()
+        );
+        f.cast(CastPaymentMode::Auto);
+        assert_eq!(f.state.objects[&f.bears].zone, Zone::Stack);
+        assert!(f.state.pending_spell_cost_reductions.is_empty());
+        assert!(f.state.pending_next_spell_modifiers.is_empty());
+        let paid = f.state.stack_paid_facts.get(&f.bears).unwrap();
+        assert_eq!(paid.actual_mana_spent, if reduction { 1 } else { 2 });
         assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
         assert!(f.undo.receipt().is_none());
     }

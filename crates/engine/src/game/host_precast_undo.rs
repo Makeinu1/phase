@@ -289,6 +289,8 @@ fn settled(state: &GameState, caster: PlayerId) -> bool {
 fn eligible_pre(state: &GameState, caster: PlayerId, object: ObjectId, card: CardId) -> bool {
     settled(state, caster)
         && state.stack.is_empty()
+        && state.pending_spell_cost_reductions.is_empty()
+        && state.pending_next_spell_modifiers.is_empty()
         && ordinary_mana_board(state, caster)
         && state.objects.get(&object).is_some_and(|object| {
             object.card_id == card
