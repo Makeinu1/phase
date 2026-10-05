@@ -36,6 +36,7 @@ import type {
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
+import type { HostPrecastUndoStatus, HostPrecastUndoWorkerResult } from "./host-precast-undo";
 
 type EngineResponse =
   | { type: "result"; id: number; data: unknown }
@@ -295,6 +296,7 @@ export class EngineWorkerClient {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    ownerKey?: string,
   ): Promise<SubmitResult> {
     return this.request<SubmitResult>({
       type: "initializeMultiplayerHostGame",
@@ -304,6 +306,7 @@ export class EngineWorkerClient {
       matchConfig,
       playerCount,
       firstPlayer,
+      ...(ownerKey ? { ownerKey } : {}),
     });
   }
 
@@ -548,8 +551,24 @@ export class EngineWorkerClient {
    * flips the engine's multiplayer flag. Mirrors server-core's
    * `GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(stateJson: string): Promise<RestoredWorkerResult> {
-    return this.request<RestoredWorkerResult>({ type: "resumeMultiplayerHostState", stateJson });
+  async resumeMultiplayerHostState(stateJson: string, ownerKey?: string): Promise<RestoredWorkerResult> {
+    return this.request<RestoredWorkerResult>({ type: "resumeMultiplayerHostState", stateJson, ...(ownerKey ? { ownerKey } : {}) });
+  }
+
+  async hostPrecastUndoStatus(ownerKey: string): Promise<HostPrecastUndoStatus> {
+    return this.request<HostPrecastUndoStatus>({ type: "hostPrecastUndoStatus", ownerKey });
+  }
+
+  async enableHostPrecastUndo(ownerKey: string, binding: string): Promise<HostPrecastUndoStatus> {
+    return this.request<HostPrecastUndoStatus>({ type: "enableHostPrecastUndo", ownerKey, binding });
+  }
+
+  async restoreHostPrecastUndo(ownerKey: string, binding: string, receipt: string): Promise<HostPrecastUndoWorkerResult> {
+    return this.request<HostPrecastUndoWorkerResult>({ type: "restoreHostPrecastUndo", ownerKey, binding, receipt });
+  }
+
+  async releaseHostSession(ownerKey: string): Promise<void> {
+    await this.request<null>({ type: "releaseHostSession", ownerKey });
   }
 
   async resetGame(): Promise<void> {

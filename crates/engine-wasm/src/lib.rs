@@ -1,3 +1,5 @@
+mod host_precast_undo;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -748,6 +750,7 @@ fn rejected_action_outcome(rejection: ActionRejection) -> JsValue {
 /// local game on a shared worker may undo again.
 #[wasm_bindgen]
 pub fn set_multiplayer_mode(enabled: bool) {
+    host_precast_undo::boundary(host_precast_undo::Boundary::Claim);
     MULTIPLAYER_MODE.with(|cell| cell.set(enabled));
 }
 
@@ -913,6 +916,7 @@ pub fn take_last_panic_message() -> Option<String> {
 /// immediately rather than running a full search on stale state.
 #[wasm_bindgen]
 pub fn clear_game_state() {
+    host_precast_undo::boundary(host_precast_undo::Boundary::Game);
     GAME_STATE.with(|cell| cell.set(None));
     clear_ai_session_cache();
     REPLAY_LOG.with(|cell| cell.set(None));
@@ -936,8 +940,13 @@ pub fn create_initial_state() -> JsValue {
 /// Must be called before initialize_game to enable name-based deck resolution.
 #[wasm_bindgen]
 pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
+    load_card_database_inner(json_str).map_err(|error| JsValue::from_str(&error))
+}
+
+fn load_card_database_inner(json_str: &str) -> Result<u32, String> {
+    host_precast_undo::boundary(host_precast_undo::Boundary::Database);
     let db = CardDatabase::from_json_str(json_str)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse card database: {}", e)))?;
+        .map_err(|error| format!("Failed to parse card database: {error}"))?;
     let count = db.card_count() as u32;
     CARD_DB.with(|cell| {
         *cell.borrow_mut() = Some(std::sync::Arc::new(db));
@@ -1533,6 +1542,7 @@ fn game_state_present() -> bool {
 /// Pure over the two thread-locals and free of `JsValue`, so it runs in the
 /// native test suite.
 fn init_guard(kind: InitSessionKind) -> Result<(), &'static str> {
+    host_precast_undo::boundary(host_precast_undo::Boundary::Game);
     match kind {
         // On a memory-constrained device the P2P host shares the tab's single
         // engine worker with local play, so an unguarded local initialize would
@@ -1555,6 +1565,7 @@ fn init_guard(kind: InitSessionKind) -> Result<(), &'static str> {
 /// Claim the engine for `kind`. Called immediately after the state install so
 /// the flag and the game it describes are set in one uninterruptible step.
 fn claim_engine_for(kind: InitSessionKind) {
+    host_precast_undo::boundary(host_precast_undo::Boundary::Claim);
     if kind == InitSessionKind::MultiplayerHost {
         MULTIPLAYER_MODE.with(|cell| cell.set(true));
     }
@@ -1974,14 +1985,16 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(a) => a,
         Err(_) => {
+            host_precast_undo::invalidate();
             return rejected_action_outcome(ActionRejection::new(
                 ActionRejectionCode::InvalidAction,
-            ))
+            ));
         }
     };
     let actor = PlayerId(actor);
 
     if let GameAction::Debug(debug_action) = &action {
+        host_precast_undo::invalidate();
         if debug_action.is_zero_count_create() {
             return match with_state(|state| {
                 preflight_debug_action_with_rejection(state, actor, debug_action)?;
@@ -2025,14 +2038,16 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     // reaches here.
     let action_for_replay = action.clone();
     let is_debug_action = matches!(action, GameAction::Debug(_));
-    match with_state_mut(|state| match apply_with_rejection(state, actor, action) {
-        Ok(result) => {
-            record_replay_action(is_debug_action, actor, action_for_replay);
-            invalidate_ai_proposals();
-            action_outcome(Ok(result))
-        }
-        Err(rejection) => rejected_action_outcome(rejection),
-    }) {
+    match with_state_mut(
+        |state| match host_precast_undo::submit_action(state, actor, action) {
+            Ok(result) => {
+                record_replay_action(is_debug_action, actor, action_for_replay);
+                invalidate_ai_proposals();
+                action_outcome(Ok(result))
+            }
+            Err(rejection) => rejected_action_outcome(rejection),
+        },
+    ) {
         Ok(val) => val,
         Err(e) => e,
     }
@@ -2046,13 +2061,14 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
     let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
         Ok(submission) => submission,
         Err(_) => {
+            host_precast_undo::invalidate();
             return rejected_action_outcome(ActionRejection::new(
                 ActionRejectionCode::InvalidInteractionResponse,
             ));
         }
     };
     let actor = PlayerId(actor);
-    match with_state_mut(|state| submit_interaction_with_rejection(state, actor, submission)) {
+    match with_state_mut(|state| host_precast_undo::submit_interaction(state, actor, submission)) {
         Ok(Ok(applied)) => {
             record_replay_action(false, actor, applied.action);
             invalidate_ai_proposals();
@@ -2907,6 +2923,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
 /// therefore only safe while restore succeeds; the moment it errors, the failure
 /// is unreadable. Tests call this function.
 fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
+    host_precast_undo::boundary(host_precast_undo::Boundary::Game);
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
         return Err("restore_game_state refused: undo is disabled in multiplayer sessions".into());
     }
@@ -2953,6 +2970,7 @@ pub fn resume_restored_game_state() -> Result<JsValue, JsValue> {
 fn resume_loaded_stack_automation(
     reset_on_noop: bool,
 ) -> Result<RestoredStackAutomationPresentation, String> {
+    host_precast_undo::invalidate();
     let resumed = GAME_STATE.with(|cell| {
         let mut state = cell.take().ok_or_else(|| NOT_INITIALIZED_ERR.to_string())?;
         let resumed = resume_restored_stack_automation(&mut state);
@@ -3016,6 +3034,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue>
 fn resume_multiplayer_host_state_inner(
     json_str: &str,
 ) -> Result<RestoredStackAutomationPresentation, String> {
+    host_precast_undo::boundary(host_precast_undo::Boundary::Game);
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
         return Err("resume_multiplayer_host_state refused: multiplayer mode already set".into());
     }
@@ -3682,6 +3701,7 @@ fn scored_candidates_inner(
     ai_player: PlayerId,
     rng_seed: u64,
 ) -> Vec<(GameAction, f64)> {
+    host_precast_undo::invalidate();
     engine::game::layers::flush_layers(state);
 
     // A pool worker scores on its OWN entropy stream so root-parallel samples
@@ -4024,6 +4044,7 @@ fn llm_failure(error: &phase_llm::LlmError) -> JsValue {
 /// retry; only a successful apply invalidates the authority generation.
 #[wasm_bindgen]
 pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsValue {
+    host_precast_undo::invalidate();
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(action) => action,
         Err(_) => {
@@ -7468,4 +7489,32 @@ mod settlement_election_host_resume_tests {
             "the resumed host locks and places the same activation"
         );
     }
+}
+
+/// Local host experiment controls. Checkpoints remain exclusively in Rust RAM.
+#[wasm_bindgen]
+pub fn host_precast_undo_status() -> Result<JsValue, JsValue> {
+    host_precast_undo::status()
+        .map(|status| to_js(&status))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+#[wasm_bindgen]
+pub fn enable_host_precast_undo(binding: &str) -> Result<JsValue, JsValue> {
+    host_precast_undo::enable(binding)
+        .map(|status| to_js(&status))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+#[wasm_bindgen]
+pub fn restore_host_precast_undo(binding: &str, receipt: &str) -> Result<JsValue, JsValue> {
+    host_precast_undo::restore(binding, receipt)
+        .map(|status| to_js(&status))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Revoke experiment eligibility before asynchronous adapter lifecycle work.
+#[wasm_bindgen]
+pub fn disable_host_precast_undo() {
+    host_precast_undo::disable();
 }

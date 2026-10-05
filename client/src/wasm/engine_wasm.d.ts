@@ -1,3 +1,8 @@
+export function host_precast_undo_status(): any;
+export function enable_host_precast_undo(binding: string): any;
+export function restore_host_precast_undo(binding: string, receipt: string): any;
+export function disable_host_precast_undo(): void;
+
 /* tslint:disable */
 /* eslint-disable */
 

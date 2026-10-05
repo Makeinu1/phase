@@ -279,3 +279,19 @@ describe("EngineWorkerClient structured action rejections", () => {
     });
   });
 });
+
+describe("restricted host checkpoint RPC", () => {
+  it("posts owner and lossless string identities without a UI-state restore payload", async () => {
+    const client = new EngineWorkerClient();
+    const binding = "18446744073709551615.2.9";
+    const receipt = "18446744073709551615";
+    const pending = client.restoreHostPrecastUndo("local-owner-key", binding, receipt);
+    const worker = currentWorker();
+    const posted = worker.posted[worker.posted.length - 1];
+    expect(posted).toEqual({ type: "restoreHostPrecastUndo", id: expect.any(Number), ownerKey: "local-owner-key", binding, receipt });
+    const result = { status: { binding, enabled: true, phase: "Consumed", receipt }, snapshot: { state: {}, legalResult: {} } };
+    worker.replyResult(posted.id as number, result);
+    await expect(pending).resolves.toEqual(result);
+    client.dispose();
+  });
+});

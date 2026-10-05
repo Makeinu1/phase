@@ -24,6 +24,13 @@ import type {
 import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState, gameStateFactory } from "../../test/factories/gameStateFactory";
 
+const hostUndoWasm = vi.hoisted(() => ({
+  host_precast_undo_status: vi.fn(),
+  enable_host_precast_undo: vi.fn(),
+  restore_host_precast_undo: vi.fn(),
+  disable_host_precast_undo: vi.fn(),
+}));
+
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
 const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
@@ -44,6 +51,7 @@ vi.mock("../../services/cardData", () => ({
 }));
 
 vi.mock("@wasm/engine", () => ({
+  ...hostUndoWasm,
   resume_restored_game_state: resumeRestoredGameState,
   resume_multiplayer_host_state: resumeMultiplayerHostState,
   preview_interaction_js: previewInteractionJs,
@@ -58,6 +66,11 @@ vi.mock("@wasm/engine", () => ({
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
 const mockWorkerClient = {
+  initializeMultiplayerHostGame: vi.fn().mockResolvedValue({ events: [], log_entries: [] }),
+  hostPrecastUndoStatus: vi.fn(),
+  enableHostPrecastUndo: vi.fn(),
+  restoreHostPrecastUndo: vi.fn(),
+  releaseHostSession: vi.fn().mockResolvedValue(undefined),
   initialize: vi.fn().mockResolvedValue(undefined),
   loadCardDb: vi.fn().mockResolvedValue(100),
   loadCardDbFromUrl: vi.fn().mockResolvedValue(100),
@@ -1598,5 +1611,272 @@ describe("worker preview envelope", () => {
 
     await expect(pending).resolves.toEqual(answer);
     client.dispose();
+  });
+});
+
+// Local lease/RPC fixtures; actual reducers run in the native boundary tests.
+describe("WasmAdapter restricted host PRE connection", () => {
+  const armed = { binding: "7.3.2", enabled: true, phase: "Armed" as const, receipt: "18446744073709551615" };
+  const consumed = { ...armed, phase: "Consumed" as const };
+  const legalResult = { actions: [], autoPassRecommended: false };
+  const state = buildGameState({ turn_number: 8 });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWorkerClient.initializeMultiplayerHostGame.mockResolvedValue({ events: [], log_entries: [] });
+    mockWorkerClient.hostPrecastUndoStatus.mockResolvedValue(armed);
+    mockWorkerClient.enableHostPrecastUndo.mockResolvedValue(armed);
+    mockWorkerClient.restoreHostPrecastUndo.mockResolvedValue({ status: consumed, snapshot: { state, legalResult } });
+    initializeMultiplayerHostGameJs.mockReturnValue({ events: [], log_entries: [] });
+    hostUndoWasm.host_precast_undo_status.mockReturnValue(armed);
+    hostUndoWasm.enable_host_precast_undo.mockReturnValue(armed);
+    hostUndoWasm.restore_host_precast_undo.mockReturnValue(consumed);
+    getGameStateJs.mockReturnValue(state);
+    getLegalActionsJs.mockReturnValue(legalResult);
+  });
+  afterEach(() => getSharedAdapter().dispose());
+  async function install(adapter: WasmAdapter, owner: ReturnType<typeof createHostSessionOwner>) {
+    await adapter.initialize();
+    await adapter.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+  }
+
+  it("preserves opaque decimal receipts and returns the committed snapshot without exporting PRE", async () => {
+    const adapter = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    await install(adapter, owner);
+    const key = mockWorkerClient.initializeMultiplayerHostGame.mock.calls[0][6];
+    expect(typeof key).toBe("string");
+    expect(await adapter.hostPrecastUndoStatus(owner)).toEqual(armed);
+    await adapter.enableHostPrecastUndo(owner, armed.binding);
+    const result = await adapter.restoreHostPrecastUndo(owner, armed.binding, armed.receipt);
+    expect(mockWorkerClient.restoreHostPrecastUndo).toHaveBeenCalledExactlyOnceWith(key, armed.binding, armed.receipt);
+    expect(result.status).toEqual(consumed);
+    expect(result.snapshot.state.turn_number).toBe(8);
+    expect(result.snapshot.legalResult).toBe(legalResult);
+    expect(result.snapshot.seq).toBeGreaterThan(0);
+    expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+    expect(mockWorkerClient.exportState).not.toHaveBeenCalled();
+    await adapter.releaseHostSession(true, owner);
+  });
+
+  it("retains A's lease after rejected B initialization and fences B before restricted RPC", async () => {
+    const adapter = getSharedAdapter();
+    const a = createHostSessionOwner();
+    const b = createHostSessionOwner();
+    await install(adapter, a);
+    const key = mockWorkerClient.initializeMultiplayerHostGame.mock.calls[0][6];
+    mockWorkerClient.initializeMultiplayerHostGame.mockRejectedValueOnce(new Error("occupied"));
+    await expect(adapter.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, b)).rejects.toThrow("occupied");
+    await expect(adapter.hostPrecastUndoStatus(b)).rejects.toThrow("owner changed");
+    await adapter.releaseHostSession(false, b);
+    expect(mockWorkerClient.dispose).not.toHaveBeenCalled();
+    await adapter.releaseHostSession(true, b);
+    expect(mockWorkerClient.releaseHostSession).not.toHaveBeenCalled();
+    await adapter.releaseHostSession(true, a);
+    expect(mockWorkerClient.releaseHostSession).toHaveBeenCalledExactlyOnceWith(key);
+  });
+
+  it("rejects late status after an independent submission", async () => {
+    const adapter = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    await install(adapter, owner);
+    let respond!: (value: typeof armed) => void;
+    mockWorkerClient.hostPrecastUndoStatus.mockReturnValueOnce(new Promise((resolve) => { respond = resolve; }));
+    const observation = adapter.hostPrecastUndoStatus(owner);
+    const refused = expect(observation).rejects.toThrow("became stale");
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+    respond(armed);
+    await refused;
+    await adapter.releaseHostSession(true, owner);
+  });
+
+  it("disposes an unclaimed private executor after its first host install fails", async () => {
+    const adapter = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    await adapter.initialize();
+    mockWorkerClient.initializeMultiplayerHostGame.mockRejectedValueOnce(new Error("fixture first install failure"));
+    await expect(adapter.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner)).rejects.toThrow("first install failure");
+    await adapter.releaseHostSession(false, owner);
+    expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+    expect(mockWorkerClient.releaseHostSession).not.toHaveBeenCalled();
+    await expect(adapter.getState()).rejects.toThrow(AdapterError);
+  });
+
+  it("rejects late status after disposal", async () => {
+    const adapter = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    await install(adapter, owner);
+    let respond!: (value: typeof armed) => void;
+    mockWorkerClient.hostPrecastUndoStatus.mockReturnValueOnce(new Promise((resolve) => { respond = resolve; }));
+    const observation = adapter.hostPrecastUndoStatus(owner);
+    const refused = expect(observation).rejects.toThrow("became stale");
+    adapter.dispose();
+    respond(armed);
+    await refused;
+  });
+
+  it("a late A release response cannot erase B's newer adapter lease", async () => {
+    const adapter = getSharedAdapter();
+    const a = createHostSessionOwner();
+    const b = createHostSessionOwner();
+    await install(adapter, a);
+    let respond!: () => void;
+    mockWorkerClient.releaseHostSession.mockReturnValueOnce(new Promise<void>((resolve) => { respond = resolve; }));
+    const release = adapter.releaseHostSession(true, a);
+    await adapter.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, b);
+    respond();
+    await release;
+    await expect(adapter.hostPrecastUndoStatus(b)).resolves.toEqual(armed);
+    await adapter.releaseHostSession(true, b);
+  });
+
+  it("fallback captures restore and snapshot before a queued reset", async () => {
+    const adapter = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("fixture fallback"));
+    await install(adapter, owner);
+    const restored = adapter.restoreHostPrecastUndo(owner, armed.binding, armed.receipt);
+    const refused = expect(restored).rejects.toThrow("became stale");
+    const reset = adapter.resetGameState();
+    await Promise.all([refused, reset]);
+    expect(hostUndoWasm.restore_host_precast_undo).toHaveBeenCalledExactlyOnceWith(armed.binding, armed.receipt);
+    expect(hostUndoWasm.restore_host_precast_undo.mock.invocationCallOrder[0]).toBeLessThan(getGameStateJs.mock.invocationCallOrder[0]);
+    expect(getGameStateJs.mock.invocationCallOrder[0]).toBeLessThan(getLegalActionsJs.mock.invocationCallOrder[0]);
+    expect(getLegalActionsJs.mock.invocationCallOrder[0]).toBeLessThan(hostUndoWasm.disable_host_precast_undo.mock.invocationCallOrder[0]);
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+    await adapter.releaseHostSession(true, owner);
+  });
+
+  it("fallback preserves A after B's refused install and refuses B before WASM restore", async () => {
+    const adapter = getSharedAdapter();
+    const a = createHostSessionOwner();
+    const b = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("fixture fallback"));
+    await install(adapter, a);
+    initializeMultiplayerHostGameJs.mockReturnValueOnce({ error: true, engine_occupied: true, reasons: [] });
+    await expect(adapter.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, b)).rejects.toThrow("current game");
+    await expect(adapter.restoreHostPrecastUndo(b, armed.binding, armed.receipt)).rejects.toThrow("owner changed");
+    expect(hostUndoWasm.restore_host_precast_undo).not.toHaveBeenCalled();
+    await adapter.releaseHostSession(true, b);
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+    await adapter.releaseHostSession(true, a);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+  });
+});
+
+describe("fallback same-owner reincarnation fences", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    initializeMultiplayerHostGameJs.mockReturnValue({ events: [], log_entries: [] });
+    hostUndoWasm.host_precast_undo_status.mockReturnValue({ binding: "replacement", enabled: false, phase: "Empty", receipt: null });
+  });
+  afterEach(() => getSharedAdapter().dispose());
+  async function fallback(adapter: WasmAdapter) {
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("fixture fallback"));
+    await adapter.initialize();
+  }
+  it("released shared A has no lease after B installs the same symbol", async () => {
+    const a = getSharedAdapter();
+    const b = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    await fallback(a);
+    await a.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+    await a.releaseHostSession(true, owner);
+    await fallback(b);
+    await b.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+    clearGameStateJs.mockClear();
+    await expect(a.hostPrecastUndoStatus(owner)).rejects.toThrow("owner changed");
+    await a.releaseHostSession(true, owner);
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+    await expect(b.hostPrecastUndoStatus(owner)).resolves.toMatchObject({ binding: "replacement" });
+    await b.releaseHostSession(true, owner);
+  });
+  it("held A generation refuses queued operations and release after synthetic B reincarnation", async () => {
+    const a = new WasmAdapter();
+    const b = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    await fallback(a);
+    await fallback(b);
+    await a.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+    // The WASM mock admits a replacement to isolate the TS generation guard.
+    // Actual occupied-engine refusal is covered by the native fixture.
+    const replacement = b.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+    const stale = expect(a.hostPrecastUndoStatus(owner)).rejects.toThrow("owner changed");
+    await Promise.all([replacement, stale]);
+    expect(hostUndoWasm.host_precast_undo_status).not.toHaveBeenCalled();
+    await expect(a.enableHostPrecastUndo(owner, "replacement")).rejects.toThrow("owner changed");
+    await expect(a.restoreHostPrecastUndo(owner, "replacement", "1")).rejects.toThrow("owner changed");
+    expect(hostUndoWasm.enable_host_precast_undo).not.toHaveBeenCalled();
+    expect(hostUndoWasm.restore_host_precast_undo).not.toHaveBeenCalled();
+    await a.releaseHostSession(true, owner);
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+    await expect(b.hostPrecastUndoStatus(owner)).resolves.toMatchObject({ binding: "replacement" });
+    await b.releaseHostSession(true, owner);
+  });
+});
+
+describe("fallback host install lifecycle cleanup", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    initializeMultiplayerHostGameJs.mockReturnValue({ events: [], log_entries: [] });
+    getGameStateJs.mockReturnValue(buildGameState());
+    getLegalActionsJs.mockReturnValue({ actions: [], autoPassRecommended: false });
+    hostUndoWasm.host_precast_undo_status.mockReturnValue({ binding: "live", enabled: false, phase: "Empty", receipt: null });
+  });
+  async function fallback() {
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("fixture fallback"));
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    return adapter;
+  }
+  it("cleans its captured generation when disposed between enqueue and successful install", async () => {
+    const a = await fallback();
+    const owner = createHostSessionOwner();
+    const pending = a.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+    const refused = expect(pending).rejects.toThrow("executor changed during initialization");
+    a.dispose();
+    await refused;
+    expect(initializeMultiplayerHostGameJs).toHaveBeenCalledOnce();
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+    const b = await fallback();
+    const nextOwner = createHostSessionOwner();
+    await b.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, nextOwner);
+    await expect(b.hostPrecastUndoStatus(nextOwner)).resolves.toMatchObject({ binding: "live" });
+    await b.releaseHostSession(true, nextOwner);
+  });
+  it("cleans a successful resume after its database await when disposal occurs during dispatch", async () => {
+    const a = await fallback();
+    const owner = createHostSessionOwner();
+    await a.warmCardDatabase();
+    resumeMultiplayerHostState.mockImplementationOnce(() => {
+      a.dispose();
+      return { outcome: "noop", automatedResolutionCount: 0, omittedEventCount: 0, logEntries: [] };
+    });
+    await expect(a.resumeMultiplayerHostState(buildGameState(), owner)).rejects.toThrow("executor changed during resume");
+    expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+  });
+  it("stale cleanup cannot erase a synthetic replacement generation", async () => {
+    const a = await fallback();
+    const b = await fallback();
+    const owner = createHostSessionOwner();
+    const pending = a.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+    const refused = expect(pending).rejects.toThrow("executor changed during initialization");
+    a.dispose();
+    // Mock-admitted reincarnation isolates the cleanup generation comparison.
+    const replacement = b.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+    await Promise.all([replacement, refused]);
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+    await expect(b.hostPrecastUndoStatus(owner)).resolves.toMatchObject({ binding: "live" });
+    await b.releaseHostSession(true, owner);
+  });
+  it("does not dispatch an install after disposal during the pre-dispatch database await", async () => {
+    const a = await fallback();
+    const owner = createHostSessionOwner();
+    const pending = a.initializeMultiplayerHostGame({}, undefined, undefined, undefined, undefined, owner);
+    const refused = expect(pending).rejects.toThrow("executor changed before initialization");
+    a.dispose();
+    await refused;
+    expect(initializeMultiplayerHostGameJs).not.toHaveBeenCalled();
+    expect(clearGameStateJs).not.toHaveBeenCalled();
   });
 });

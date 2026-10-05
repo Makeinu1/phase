@@ -41,6 +41,7 @@ import {
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
+import type { HostPrecastUndoStatus, HostPrecastUndoWorkerResult, HostPrecastUndoResult } from "./host-precast-undo";
 import { classifyInitFailure } from "./init-envelope";
 import { AiWorkerPool } from "./ai-worker-pool";
 import type { AiCardDataMode, AiPoolCardDbPlan } from "./card-db-subset";
@@ -164,6 +165,7 @@ let sharedAdapter: WasmAdapter | null = null;
 
 /** Opaque caller-held identity for a main-thread multiplayer host lease. */
 export type HostSessionOwner = symbol;
+type InstalledHostLease = { owner: HostSessionOwner; key: string; generation: number | null };
 
 export function createHostSessionOwner(): HostSessionOwner {
   return Symbol("wasm-host-session-owner");
@@ -296,6 +298,8 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   // worker's ~90 MB instance. Concurrent callers share one promise.
   private initPromise: Promise<void> | null = null;
   private lifecycleGeneration = 0;
+  private hostUndoObservationGeneration = Symbol();
+  private installedHostLease: InstalledHostLease | null = null;
   private aiDecisionDiagnosticsEnabled = false;
   private aiDecisionDiagnosticsEpoch = 0;
   private readonly receiptByToken = new Map<string, AiDecisionDiagnosticReceipt>();
@@ -433,6 +437,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   private ensureCardDb(): Promise<void> {
     if (this.cardDbLoaded) return Promise.resolve();
     if (this.cardDbPromise) return this.cardDbPromise;
+    this.hostUndoObservationGeneration = Symbol();
     const pending = (async () => {
       try {
         if (this.engine) {
@@ -480,6 +485,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized("submitAction");
+    this.hostUndoObservationGeneration = Symbol();
     try {
       const submit = () => this.engine
         ? this.engine.submitAction(actor, action)
@@ -504,6 +510,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     actor: PlayerId,
   ): Promise<SubmitResult> {
     this.assertInitialized("submitInteraction");
+    this.hostUndoObservationGeneration = Symbol();
     try {
       const result = this.engine ? await this.engine.submitInteraction(actor, submission) : await this.fallback!.submitInteraction(submission, actor);
       this.invalidateAiDecisionDiagnostics();
@@ -809,6 +816,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     proposal: AiActionProposal,
   ): Promise<AiProposalSubmission> {
     this.assertInitialized("submitAiActionProposal");
+    this.hostUndoObservationGeneration = Symbol();
     try {
       const outcome = this.engine
         ? await this.engine.submitAiActionProposal(proposal)
@@ -971,6 +979,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized("restoreState");
+    this.hostUndoObservationGeneration = Symbol();
     await this.requireCardDb();
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
@@ -980,6 +989,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async resumeRestoredGameState(): Promise<RestoredGameStateResult> {
     this.assertInitialized("resumeRestoredGameState");
+    this.hostUndoObservationGeneration = Symbol();
     try {
       const resumed = this.engine
         ? await this.engine.resumeRestoredGameState()
@@ -1023,6 +1033,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    */
   async setMultiplayerMode(enabled: boolean): Promise<void> {
     this.assertInitialized("setMultiplayerMode");
+    this.hostUndoObservationGeneration = Symbol();
     if (this.engine) {
       await this.engine.setMultiplayerMode(enabled);
     } else {
@@ -1075,13 +1086,31 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     owner?: HostSessionOwner,
   ): Promise<RestoredGameStateResult> {
     this.assertInitialized("resumeMultiplayerHostState");
+    this.hostUndoObservationGeneration = Symbol();
+    const executor = this.engine ?? this.fallback!;
+    const capturedFallback = this.fallback;
+    const lifecycle = this.lifecycleGeneration;
+    const lease: InstalledHostLease | null = owner ? { owner, key: crypto.randomUUID(), generation: null } : null;
     // Same CARD_DB requirement as restoreState — resume rehydrates abilities
     // only when the DB is loaded (engine-wasm resume_multiplayer_host_state).
     await this.requireCardDb();
+    if (executor !== (this.engine ?? this.fallback) || lifecycle !== this.lifecycleGeneration) {
+      throw new Error("Host session executor changed before resume");
+    }
     const json = JSON.stringify(state);
     const resumed = this.engine
-      ? await this.engine.resumeMultiplayerHostState(json)
+      ? await (lease
+        ? this.engine.resumeMultiplayerHostState(json, lease.key)
+        : this.engine.resumeMultiplayerHostState(json))
       : await this.fallback!.resumeMultiplayerHostState(json, owner);
+    if (executor !== (this.engine ?? this.fallback) || lifecycle !== this.lifecycleGeneration) {
+      if (lease && capturedFallback) {
+        await capturedFallback.releaseHostSession(owner!, (resumed as RestoredFallbackResult).hostGeneration);
+      }
+      throw new Error("Host session executor changed during resume");
+    }
+    if (lease && !this.engine) lease.generation = (resumed as RestoredFallbackResult).hostGeneration;
+    this.installedHostLease = lease;
     this.invalidateAiDecisionDiagnostics();
     return {
       presentation: resumed.presentation,
@@ -1095,6 +1124,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   /** Clear the WASM game state without terminating the worker. */
   async resetGameState(): Promise<void> {
+    this.hostUndoObservationGeneration = Symbol();
     this.aiPoolGeneration += 1;
     this.aiPoolPromise = null;
     this.aiPoolFailed = false;
@@ -1247,11 +1277,26 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    * running on it.
    */
   async releaseHostSession(claimed: boolean, owner?: HostSessionOwner): Promise<void> {
+    this.hostUndoObservationGeneration = Symbol();
+    // Failed first installs still need to dispose their private executor.
+    // An installed lease always protects the incumbent, even if a caller's
+    // claim bookkeeping says its attempted replacement never installed.
+    if (!claimed && this.installedHostLease !== null) return;
+    if (claimed && owner && this.installedHostLease?.owner !== owner) return;
+    if (claimed && owner && this.engine) {
+      const lease = this.installedHostLease!;
+      await this.engine.releaseHostSession(lease.key);
+      if (this.installedHostLease === lease) {
+        this.installedHostLease = null;
+        if (sharedAdapter !== this) this.dispose();
+      }
+      return;
+    }
     if (sharedAdapter !== this) {
       if (claimed && this.fallback) {
         if (!owner) throw new Error("Main-thread host release requires its owner handle");
         try {
-          await this.fallback.releaseHostSession(owner);
+          await this.fallback.releaseHostSession(owner, this.installedHostLease!.generation);
         } finally {
           this.dispose();
         }
@@ -1263,7 +1308,9 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     if (!claimed) return;
     if (this.fallback) {
       if (!owner) throw new Error("Main-thread host release requires its owner handle");
-      await this.fallback.releaseHostSession(owner);
+      const lease = this.installedHostLease!;
+      await this.fallback.releaseHostSession(owner, lease.generation);
+      if (this.installedHostLease === lease) this.installedHostLease = null;
       return;
     }
     // No await between the two posts. `EngineWorkerClient.request` posts
@@ -1276,6 +1323,8 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   dispose(): void {
+    this.hostUndoObservationGeneration = Symbol();
+    this.installedHostLease = null;
     this.disposed = true;
     this.unregisterDiagnostics?.();
     this.unregisterDiagnostics = null;
@@ -1316,6 +1365,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     firstPlayer?: number,
   ): Promise<SubmitResult> {
     this.assertInitialized("initializeGame");
+    this.hostUndoObservationGeneration = Symbol();
     if (deckData) {
       await this.requireCardDb();
     }
@@ -1361,8 +1411,16 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     owner?: HostSessionOwner,
   ): Promise<SubmitResult> {
     this.assertInitialized("initializeMultiplayerHostGame");
+    this.hostUndoObservationGeneration = Symbol();
+    const executor = this.engine ?? this.fallback!;
+    const capturedFallback = this.fallback;
+    const lifecycle = this.lifecycleGeneration;
+    const lease: InstalledHostLease | null = owner ? { owner, key: crypto.randomUUID(), generation: null } : null;
     if (deckData) {
       await this.requireCardDb();
+    }
+    if (executor !== (this.engine ?? this.fallback) || lifecycle !== this.lifecycleGeneration) {
+      throw new Error("Host session executor changed before initialization");
     }
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     if (this.engine) {
@@ -1373,7 +1431,12 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         matchConfig ?? null,
         playerCount,
         firstPlayer,
+        lease?.key,
       );
+      if (executor !== this.engine || lifecycle !== this.lifecycleGeneration) {
+        throw new Error("Host session executor changed during initialization");
+      }
+      this.installedHostLease = lease;
       this.invalidateAiDecisionDiagnostics();
       return result;
     }
@@ -1386,6 +1449,14 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       firstPlayer,
       owner,
     );
+    if (executor !== this.fallback || lifecycle !== this.lifecycleGeneration) {
+      if (lease && capturedFallback) {
+        await capturedFallback.releaseHostSession(owner!, result.hostGeneration);
+      }
+      throw new Error("Host session executor changed during initialization");
+    }
+    if (lease) lease.generation = result.hostGeneration;
+    this.installedHostLease = lease;
     this.invalidateAiDecisionDiagnostics();
     return { events: result.events, log_entries: result.log_entries };
   }
@@ -1393,6 +1464,51 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   /** Expose the worker client for AI pool state export (Phase 4). */
   getEngineClient(): EngineWorkerClient | null {
     return this.engine;
+  }
+
+  private async observeHostUndo<T>(owner: HostSessionOwner, run: (
+    engine: EngineWorkerClient | null,
+    fallback: MainThreadFallback | null,
+    key: string,
+    generation: number | null,
+  ) => Promise<T>): Promise<T> {
+    const lease = this.installedHostLease;
+    if (!lease || lease.owner !== owner) throw new Error("Host session owner changed");
+    const engine = this.engine;
+    const fallback = this.fallback;
+    const lifecycle = this.lifecycleGeneration;
+    const observation = this.hostUndoObservationGeneration;
+    const result = await run(engine, fallback, lease.key, lease.generation);
+    if (this.installedHostLease !== lease || this.engine !== engine || this.fallback !== fallback
+      || this.lifecycleGeneration !== lifecycle || this.hostUndoObservationGeneration !== observation) {
+      throw new Error("Host checkpoint observation became stale");
+    }
+    return result;
+  }
+
+  async hostPrecastUndoStatus(owner: HostSessionOwner): Promise<HostPrecastUndoStatus> {
+    this.assertInitialized("hostPrecastUndoStatus");
+    return this.observeHostUndo(owner, (engine, fallback, key, generation) => engine
+      ? engine.hostPrecastUndoStatus(key) : fallback!.hostPrecastUndoStatus(owner, generation));
+  }
+
+  async enableHostPrecastUndo(owner: HostSessionOwner, binding: string): Promise<HostPrecastUndoStatus> {
+    this.assertInitialized("enableHostPrecastUndo");
+    return this.observeHostUndo(owner, (engine, fallback, key, generation) => engine
+      ? engine.enableHostPrecastUndo(key, binding) : fallback!.enableHostPrecastUndo(owner, generation, binding));
+  }
+
+  async restoreHostPrecastUndo(owner: HostSessionOwner, binding: string, receipt: string): Promise<HostPrecastUndoResult> {
+    this.assertInitialized("restoreHostPrecastUndo");
+    const restored = await this.observeHostUndo(owner, (engine, fallback, key, generation) => engine
+      ? engine.restoreHostPrecastUndo(key, binding, receipt)
+      : fallback!.restoreHostPrecastUndo(owner, generation, binding, receipt));
+    this.invalidateAiDecisionDiagnostics();
+    return { status: restored.status, snapshot: {
+      state: unwrapClientGameState(restored.snapshot.state),
+      legalResult: restored.snapshot.legalResult,
+      seq: nextSnapshotSeq(),
+    } };
   }
 
   private assertInitialized(operation: keyof WasmAdapter): void {
@@ -1418,6 +1534,9 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 // Only used when Web Worker creation fails.
 
 interface MainThreadFallback {
+  hostPrecastUndoStatus(owner: HostSessionOwner, generation: number | null): Promise<HostPrecastUndoStatus>;
+  enableHostPrecastUndo(owner: HostSessionOwner, generation: number | null, binding: string): Promise<HostPrecastUndoStatus>;
+  restoreHostPrecastUndo(owner: HostSessionOwner, generation: number | null, binding: string, receipt: string): Promise<HostPrecastUndoWorkerResult>;
   ensureCardDatabase(): Promise<number>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
@@ -1466,7 +1585,7 @@ interface MainThreadFallback {
   ): Promise<RestoredFallbackResult>;
   setMultiplayerMode(enabled: boolean): Promise<void>;
   resetGameState(): Promise<void>;
-  releaseHostSession(owner: HostSessionOwner): Promise<void>;
+  releaseHostSession(owner: HostSessionOwner, generation: number | null): Promise<void>;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
   projectSeatView(stateJson: string): Promise<unknown>;
   ping(): string;
@@ -1486,7 +1605,7 @@ interface MainThreadFallback {
     playerCount?: number,
     firstPlayer?: number,
     owner?: HostSessionOwner,
-  ): Promise<SubmitResult>;
+  ): Promise<SubmitResult & { hostGeneration: number | null }>;
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   evaluateDeckFormatGate(request: unknown): Promise<unknown>;
@@ -1499,6 +1618,7 @@ interface MainThreadFallback {
 }
 
 type RestoredFallbackResult = {
+  hostGeneration: number | null;
   presentation: RestoredStackAutomationPresentation;
   snapshot: { state: GameState; legalResult: LegalActionsResult };
 };
@@ -1540,8 +1660,52 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     return p;
   }
 
+  function requireOwner(owner: HostSessionOwner, generation: number | null): void {
+    if (runtime.hostOwner !== owner || runtime.hostGeneration === null
+      || runtime.hostGeneration !== generation
+      || !Number.isSafeInteger(generation)) throw new Error("Host session owner changed");
+  }
+
+  async function owned<T>(owner: HostSessionOwner, generation: number | null, operation: () => T): Promise<T> {
+    const value = await enqueue(() => {
+      requireOwner(owner, generation);
+      return operation();
+    });
+    requireOwner(owner, generation);
+    return value;
+  }
+
+  function checkNextHostGeneration(): void {
+    if (!Number.isSafeInteger(runtime.nextHostGeneration) || runtime.nextHostGeneration >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("Host session generation exhausted");
+    }
+  }
+
   return {
-    ensureCardDatabase: () => cardData.ensureCardDatabase(),
+    ensureCardDatabase: async () => {
+      await enqueue(() => wasm.disable_host_precast_undo());
+      try {
+        return await cardData.ensureCardDatabase();
+      } finally {
+        await enqueue(() => wasm.disable_host_precast_undo());
+      }
+    },
+
+    hostPrecastUndoStatus: (owner, generation) => owned(owner, generation, () => {
+      return wasm.host_precast_undo_status() as HostPrecastUndoStatus;
+    }),
+
+    enableHostPrecastUndo: (owner, generation, binding) => owned(owner, generation, () => {
+      return wasm.enable_host_precast_undo(binding) as HostPrecastUndoStatus;
+    }),
+
+    restoreHostPrecastUndo: (owner, generation, binding, receipt) => owned(owner, generation, () => {
+      const status = wasm.restore_host_precast_undo(binding, receipt) as HostPrecastUndoStatus;
+      const state = wasm.get_game_state();
+      const legalResult = wasm.get_legal_actions_js();
+      if (state === null || legalResult === null) throw new Error("NOT_INITIALIZED: restored host snapshot unavailable");
+      return { status, snapshot: { state: state as GameState, legalResult: legalResult as LegalActionsResult } };
+    }),
 
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => {
@@ -1693,6 +1857,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     resumeRestoredGameState: () =>
       enqueue(() => ({
+        hostGeneration: runtime.hostGeneration,
         presentation: wasm.resume_restored_game_state() as RestoredStackAutomationPresentation,
         snapshot: {
           state: wasm.get_game_state() as GameState,
@@ -1702,12 +1867,18 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     resumeMultiplayerHostState: (stateJson: string, owner?: HostSessionOwner) =>
       enqueue(() => {
+        if (owner) checkNextHostGeneration();
         const presentation = wasm.resume_multiplayer_host_state(stateJson) as RestoredStackAutomationPresentation;
         if (owner) {
           runtime.hostGeneration = ++runtime.nextHostGeneration;
           runtime.hostOwner = owner;
         }
+        else {
+          runtime.hostGeneration = null;
+          runtime.hostOwner = null;
+        }
         return {
+          hostGeneration: runtime.hostGeneration,
           presentation,
           snapshot: {
             state: wasm.get_game_state() as GameState,
@@ -1725,13 +1896,16 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       // A host release owns the only path that may clear a live multiplayer
       // game. An unowned local reset must not erase a host that reused the
       // shared main-thread runtime.
-      if (runtime.hostOwner !== null) return;
+      if (runtime.hostOwner !== null) {
+        wasm.disable_host_precast_undo();
+        return;
+      }
       wasm.clear_game_state();
     }),
 
-    releaseHostSession: (owner: HostSessionOwner) =>
+    releaseHostSession: (owner: HostSessionOwner, generation: number | null) =>
       enqueue(() => {
-        if (runtime.hostOwner !== owner) return;
+        if (runtime.hostOwner !== owner || runtime.hostGeneration !== generation) return;
         wasm.set_multiplayer_mode(false);
         wasm.clear_game_state();
         runtime.hostOwner = null;
@@ -1777,6 +1951,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       owner?: HostSessionOwner,
     ) =>
       enqueue(() => {
+        if (owner) checkNextHostGeneration();
         const r = wasm.initialize_multiplayer_host_game(
           deckData,
           seed,
@@ -1790,7 +1965,12 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           runtime.hostGeneration = ++runtime.nextHostGeneration;
           runtime.hostOwner = owner;
         }
+        else {
+          runtime.hostGeneration = null;
+          runtime.hostOwner = null;
+        }
         return {
+          hostGeneration: runtime.hostGeneration,
           events: r.events ?? [],
           log_entries: r.log_entries ?? [],
         };

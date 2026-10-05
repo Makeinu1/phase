@@ -56,6 +56,10 @@ import init, {
   get_card_parse_details,
   get_card_rulings,
   canonicalCardNames,
+  host_precast_undo_status,
+  enable_host_precast_undo,
+  restore_host_precast_undo,
+  disable_host_precast_undo,
 } from "@wasm/engine";
 
 import {
@@ -89,6 +93,7 @@ type EngineRequest =
     }
   | {
       type: "initializeMultiplayerHostGame";
+      ownerKey?: string;
       id: number;
       deckData: unknown | null;
       seed: number;
@@ -136,7 +141,11 @@ type EngineRequest =
   | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeRestoredGameState"; id: number }
-  | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
+  | { type: "resumeMultiplayerHostState"; id: number; stateJson: string; ownerKey?: string }
+  | { type: "hostPrecastUndoStatus"; id: number; ownerKey: string }
+  | { type: "enableHostPrecastUndo"; id: number; ownerKey: string; binding: string }
+  | { type: "restoreHostPrecastUndo"; id: number; ownerKey: string; binding: string; receipt: string }
+  | { type: "releaseHostSession"; id: number; ownerKey: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
@@ -177,6 +186,15 @@ type EngineResponse =
 // ── State ────────────────────────────────────────────────────────────────
 
 let cardDbLoaded = false;
+// Teardown ownership survives failed replacement attempts. Experiment
+// eligibility is independently invalidated by the WASM runtime.
+let installedHostOwner: string | null = null;
+
+function requireHostOwner(ownerKey: string): void {
+  if (!ownerKey || installedHostOwner !== ownerKey) {
+    throw new Error("Host session owner changed");
+  }
+}
 
 function respond(msg: EngineResponse): void {
   self.postMessage(msg);
@@ -247,12 +265,14 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "loadCardDbFromUrl": {
+        disable_host_precast_undo();
         const resp = await fetch(__CARD_DATA_URL__);
         if (!resp.ok)
           throw new Error(
             `Failed to load card-data.json (${resp.status})`,
           );
         const text = await resp.text();
+        disable_host_precast_undo();
         const count = load_card_database(text);
         cardDbLoaded = true;
         result(msg.id, count);
@@ -330,6 +350,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "initializeGame": {
+        disable_host_precast_undo();
         if (!cardDbLoaded && msg.deckData) {
           error(
             msg.id,
@@ -350,6 +371,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           initFailureError(msg.id, failure);
           break;
         }
+        installedHostOwner = null;
         result(msg.id, {
           events: gameResult.events ?? [],
           log_entries: gameResult.log_entries ?? [],
@@ -358,6 +380,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "initializeMultiplayerHostGame": {
+        disable_host_precast_undo();
         if (!cardDbLoaded && msg.deckData) {
           error(
             msg.id,
@@ -381,6 +404,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           initFailureError(msg.id, failure);
           break;
         }
+        installedHostOwner = msg.ownerKey ?? null;
         result(msg.id, {
           events: gameResult.events ?? [],
           log_entries: gameResult.log_entries ?? [],
@@ -665,6 +689,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "resumeMultiplayerHostState": {
         const presentation = resume_multiplayer_host_state(msg.stateJson);
+        installedHostOwner = msg.ownerKey ?? null;
         result(msg.id, {
           presentation,
           snapshot: {
@@ -682,7 +707,46 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "resetGame": {
-        clear_game_state();
+        disable_host_precast_undo();
+        if (installedHostOwner === null) clear_game_state();
+        result(msg.id, null);
+        break;
+      }
+
+      case "hostPrecastUndoStatus": {
+        requireHostOwner(msg.ownerKey);
+        result(msg.id, host_precast_undo_status());
+        break;
+      }
+
+      case "enableHostPrecastUndo": {
+        requireHostOwner(msg.ownerKey);
+        result(msg.id, enable_host_precast_undo(msg.binding));
+        break;
+      }
+
+      case "restoreHostPrecastUndo": {
+        // This handler contains no await. Owner check, trusted restore and
+        // post-restore snapshot share one synchronous worker turn. Other
+        // handlers may interleave at their own asynchronous fetch boundaries.
+        requireHostOwner(msg.ownerKey);
+        const status = restore_host_precast_undo(msg.binding, msg.receipt);
+        const state = get_game_state();
+        const legalResult = get_legal_actions_js();
+        if (state === null || legalResult === null) throw new Error("NOT_INITIALIZED: restored host snapshot unavailable");
+        result(msg.id, {
+          status,
+          snapshot: { state, legalResult },
+        });
+        break;
+      }
+
+      case "releaseHostSession": {
+        if (installedHostOwner === msg.ownerKey) {
+          set_multiplayer_mode(false);
+          clear_game_state();
+          installedHostOwner = null;
+        }
         result(msg.id, null);
         break;
       }
