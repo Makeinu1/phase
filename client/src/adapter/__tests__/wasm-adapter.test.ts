@@ -1181,6 +1181,53 @@ describe("releaseHostSession", () => {
     expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
   });
 
+  it.each(["normal", "rejected", "unanswered"] as const)(
+    "ends a claimed private worker even when release RPC is %s, including repeated close",
+    async (response) => {
+      const host = new WasmAdapter();
+      const owner = createHostSessionOwner();
+      await host.initialize();
+      await host.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+      mockWorkerClient.releaseHostSession.mockImplementation(() => {
+        if (response === "rejected") return Promise.reject(new Error("fixture release rejection"));
+        if (response === "unanswered") return new Promise<void>(() => {});
+        return Promise.resolve();
+      });
+      try {
+        let outcome = "pending";
+        const release = host.releaseHostSession(true, owner);
+        void release.then(() => { outcome = "fulfilled"; }, () => { outcome = "rejected"; });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+        expect(outcome).toBe("fulfilled");
+        await release;
+        await host.releaseHostSession(true, owner);
+        expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+        await expect(host.getState()).rejects.toThrow(AdapterError);
+      } finally {
+        host.dispose();
+        mockWorkerClient.releaseHostSession.mockResolvedValue(undefined);
+      }
+    },
+  );
+
+  it("keeps a private worker owned by A when refused B tries to close it", async () => {
+    const host = new WasmAdapter();
+    const a = createHostSessionOwner();
+    const b = createHostSessionOwner();
+    await host.initialize();
+    await host.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, a);
+    mockWorkerClient.initializeMultiplayerHostGame.mockRejectedValueOnce(new Error("occupied"));
+    await expect(host.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, b)).rejects.toThrow("occupied");
+    await host.releaseHostSession(false, b);
+    await host.releaseHostSession(true, b);
+    expect(mockWorkerClient.dispose).not.toHaveBeenCalled();
+    expect(mockWorkerClient.releaseHostSession).not.toHaveBeenCalled();
+    await host.releaseHostSession(true, a);
+    expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+  });
+
   it("clears a claimed private main-thread fallback before disposing it", async () => {
     const host = new WasmAdapter();
     const owner = createHostSessionOwner();

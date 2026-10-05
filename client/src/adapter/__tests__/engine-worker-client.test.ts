@@ -281,6 +281,22 @@ describe("EngineWorkerClient structured action rejections", () => {
 });
 
 describe("restricted host checkpoint RPC", () => {
+  it("termination rejects an unanswered release and removes its pending watchdog", async () => {
+    vi.useFakeTimers();
+    const client = new EngineWorkerClient();
+    const release = client.releaseHostSession("local-owner-key");
+    const rejected = expect(release).rejects.toThrow("Worker disposed");
+    const worker = currentWorker();
+    const terminate = vi.spyOn(worker, "terminate");
+    const requestId = worker.posted[0].id as number;
+    client.dispose();
+    await rejected;
+    expect(terminate).toHaveBeenCalledOnce();
+    worker.replyResult(requestId, null);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(notifyEngineSlow).not.toHaveBeenCalled();
+  });
+
   it("posts owner and lossless string identities without a UI-state restore payload", async () => {
     const client = new EngineWorkerClient();
     const binding = "18446744073709551615.2.9";
