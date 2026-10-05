@@ -4,8 +4,9 @@
 //! All actions still enter the existing authenticated reducer. No checkpoint,
 //! receipt, or lifecycle state is part of GameState or its persistence format.
 
+use crate::types::ability::{AbilityCost, Effect, ManaContribution, ManaProduction};
 use crate::types::actions::GameAction;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOccurrence, CastingVariant, GameState, PriorityPassingMode,
@@ -13,6 +14,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::interaction::InteractionSubmission;
+use crate::types::mana::ManaSourcePenalty;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::ActionRejection;
@@ -131,11 +133,16 @@ impl HostPrecastUndo {
                     && ordinary_payment(state, case)
                     && match action {
                         GameAction::PassPriority => true,
-                        GameAction::TapLandForMana { .. } => {
+                        GameAction::TapLandForMana { selection } => {
                             // Validate the semantic selection through the same
                             // engine authority the reducer uses; no card-name test.
                             super::mana_sources::preflight_tap_land_action(state, actor, action)
                                 .is_ok()
+                                && ordinary_mana_board(state, actor)
+                                && super::mana_sources::live_land_mana_option_for_selection(
+                                    state, owner, selection,
+                                )
+                                .is_ok_and(|option| ordinary_mana_option(&option))
                         }
                         _ => false,
                     }
@@ -282,6 +289,7 @@ fn settled(state: &GameState, caster: PlayerId) -> bool {
 fn eligible_pre(state: &GameState, caster: PlayerId, object: ObjectId, card: CardId) -> bool {
     settled(state, caster)
         && state.stack.is_empty()
+        && ordinary_mana_board(state, caster)
         && state.objects.get(&object).is_some_and(|object| {
             object.card_id == card
                 && object.owner == caster
@@ -295,6 +303,38 @@ fn eligible_pre(state: &GameState, caster: PlayerId, object: ObjectId, card: Car
                 && object.replacement_definitions.is_empty()
                 && !object.mana_cost.has_x()
                 && !object.face_down
+        })
+}
+
+fn ordinary_mana_option(option: &super::mana_sources::ManaSourceOption) -> bool {
+    option.penalty == ManaSourcePenalty::None
+        && option.atomic_combination.is_none()
+        && option.restrictions.is_empty()
+        && option.taps_for_mana_overrides.is_empty()
+}
+
+/// The first F contract admits an otherwise empty board of ordinary basic
+/// lands. Check both source shape and engine-owned live mana classification;
+/// legal mana alone does not prove that a payment has no extra effect.
+fn ordinary_mana_board(state: &GameState, caster: PlayerId) -> bool {
+    state.transient_continuous_effects.is_empty()
+        && state.battlefield.iter().all(|id| {
+            let Some(object) = state.objects.get(id) else { return false };
+            object.card_types.core_types == [CoreType::Land]
+                && object.card_types.supertypes == [Supertype::Basic]
+                && object.keywords.is_empty()
+                && object.trigger_definitions.is_empty()
+                && object.static_definitions.is_empty()
+                && object.replacement_definitions.is_empty()
+                && object.abilities.iter().all(|ability| {
+                    ability.cost == Some(AbilityCost::Tap)
+                        && matches!(ability.effect.as_ref(), Effect::Mana {
+                            produced: ManaProduction::Fixed { colors, contribution: ManaContribution::Base },
+                            restrictions, grants, expiry: None, target: None,
+                        } if colors.len() == 1 && restrictions.is_empty() && grants.is_empty())
+                })
+                && super::mana_sources::activatable_mana_options(state, *id, caster)
+                    .iter().all(ordinary_mana_option)
         })
 }
 

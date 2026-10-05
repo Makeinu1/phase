@@ -21,10 +21,19 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_payment_land(None)
+    }
+
+    fn with_payment_land(oracle: Option<&str>) -> Self {
         let mut scenario = GameScenario::new_n_player(2, 0xF_32_00_01);
         scenario.at_phase(Phase::PreCombatMain);
         let forest_a = scenario.add_basic_land(P0, ManaColor::Green);
-        let forest_b = scenario.add_basic_land(P0, ManaColor::Green);
+        let forest_b = match oracle {
+            Some(oracle) => scenario
+                .add_land_from_oracle(P0, "Payment witness land", oracle)
+                .id(),
+            None => scenario.add_basic_land(P0, ManaColor::Green),
+        };
         let bears = scenario
             .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
             .with_mana_cost(ManaCost::Cost {
@@ -32,6 +41,12 @@ impl Fixture {
                 shards: vec![ManaCostShard::Green],
             })
             .id();
+        scenario
+            .add_creature_to_hand(P0, "Other ordinary creature", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            });
         scenario.with_library_top(
             P1,
             &[
@@ -118,7 +133,8 @@ fn land_action(state: &GameState, id: ObjectId) -> GameAction {
 fn decode(json: &str) -> Result<GameState, String> {
     let mut state = serde_json::from_str::<PersistedGameState>(json)
         .map_err(|e| e.to_string())?
-        .into_game_state()?;
+        .into_game_state()
+        .map_err(|e| e.to_string())?;
     state.rehydrate_rng();
     Ok(state)
 }
@@ -289,6 +305,122 @@ fn different_cast_activation_cancel_and_rejection_invalidate() {
         .unwrap()
         .activation_ability_index = Some(0);
     assert!(!ordinary_payment(&f.state, f.undo.case.as_ref().unwrap()));
+
+    let mut f = Fixture::new();
+    f.cast(CastPaymentMode::Manual);
+    let receipt = f.undo.receipt().unwrap();
+    let other = *f.state.players[0].hand.front().unwrap();
+    assert_ne!(other, f.bears);
+    let card_id = f.state.objects[&other].card_id;
+    let before = witness(&f.state);
+    assert!(f
+        .undo
+        .submit_action(
+            &mut f.state,
+            BINDING,
+            P0,
+            GameAction::CastSpell {
+                object_id: other,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Manual,
+            }
+        )
+        .is_err());
+    assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+    assert!(f.restore(receipt).is_err());
+    assert_eq!(witness(&f.state), before);
+
+    let mut f = Fixture::new();
+    let wrong_card = CardId(u32::MAX);
+    assert!(f
+        .undo
+        .submit_action(
+            &mut f.state,
+            BINDING,
+            P0,
+            GameAction::CastSpell {
+                object_id: f.bears,
+                card_id: wrong_card,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            }
+        )
+        .is_err());
+    assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+    assert!(f.undo.receipt().is_none());
+
+    let mut f = Fixture::new();
+    f.cast(CastPaymentMode::Manual);
+    let receipt = f.undo.receipt().unwrap();
+    f.undo
+        .submit_action(
+            &mut f.state,
+            BINDING,
+            P0,
+            GameAction::ActivateAbility {
+                source_id: f.forest_b,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+    assert!(
+        f.state.objects[&f.forest_b].tapped,
+        "legacy mana activation really applied"
+    );
+    assert_eq!(f.state.players[0].mana_pool.total(), 2);
+    assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+    assert!(f.restore(receipt).is_err());
+
+    let mut f = Fixture::new();
+    let receipt = f.arm();
+    let result = f
+        .undo
+        .submit_action(
+            &mut f.state,
+            BINDING,
+            P1,
+            GameAction::SetPriorityPassingMode {
+                mode: PriorityPassingMode::FullControl,
+            },
+        )
+        .unwrap();
+    assert!(result.disposition.is_applied());
+    assert_eq!(f.state.waiting_for, WaitingFor::Priority { player: P0 });
+    assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+    let after = witness(&f.state);
+    assert!(f.restore(receipt).is_err());
+    assert_eq!(witness(&f.state), after);
+}
+
+#[test]
+fn unsupported_payment_source_executes_normally_without_arming() {
+    for payment_mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
+        let mut f = Fixture::with_payment_land(Some("{T}, Pay 1 life: Add {G}."));
+        let result = f.cast(payment_mode);
+        let result = if payment_mode == CastPaymentMode::Manual {
+            assert!(matches!(
+                f.state.waiting_for,
+                WaitingFor::ManaPayment { player: P0, .. }
+            ));
+            let action = land_action(&f.state, f.forest_b);
+            f.undo
+                .submit_action(&mut f.state, BINDING, P0, action)
+                .unwrap();
+            f.undo
+                .submit_action(&mut f.state, BINDING, P0, GameAction::PassPriority)
+                .unwrap()
+        } else {
+            result
+        };
+        assert!(result.events.iter().any(
+            |event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == f.bears)
+        ));
+        assert_eq!(f.state.objects[&f.bears].zone, Zone::Stack);
+        assert_eq!(f.state.players[0].life, 19, "production life cost was paid");
+        assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+        assert!(f.undo.receipt().is_none());
+    }
 }
 
 #[test]
