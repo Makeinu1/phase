@@ -310,6 +310,30 @@ describe("Space priority dispatch authorization", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it("uses the current multiplayer seat assignment when the local seat loses authority in the same act", () => {
+    const waitingFor = buildPriorityWaitingFor({ data: { player: 1 } });
+    const gameState = buildGameState({
+      waiting_for: waitingFor,
+      active_player: 1,
+      priority_player: 1,
+    });
+    seedGame("online", waitingFor, { activePlayerId: 1, gameState });
+    mountKeyboard();
+
+    let legacyDispatch!: LegacyDispatch;
+    let event!: KeyboardEvent;
+
+    act(() => {
+      legacyDispatch = setGameStores("online", waitingFor, { activePlayerId: 0, gameState });
+      event = dispatchSpaceKeydown();
+      expect(dispatchActionMock).not.toHaveBeenCalled();
+    });
+
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+    expect(legacyDispatch).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it.each([
     ["player to spectator", false, true, false],
     ["spectator to player", true, false, true],
