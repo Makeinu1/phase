@@ -57,16 +57,16 @@ jobs:
           cargo -V
           cargo-nextest --version
           python3 ../control/scripts/ci/undo-f-guard.py native-core-archive \
-            cargo nextest archive --locked --jobs 1 --profile ci \
+            cargo nextest archive --locked --build-jobs 1 --cargo-verbose --profile ci \
             --config profile.test.debug=0 --config profile.test.incremental=false \
             --config 'profile.test.codegen-backend="cranelift"' \
             --package phase-engine --test host_precast_undo_acceptance \
             --archive-file "$GITHUB_WORKSPACE/native-payload/core.tar.zst"
           python3 ../control/scripts/ci/undo-f-guard.py native-boundary-archive \
-            cargo nextest archive --locked --jobs 1 --profile ci \
+            cargo nextest archive --locked --build-jobs 1 --cargo-verbose --profile ci \
             --config profile.test.debug=0 --config profile.test.incremental=false \
             --config 'profile.test.codegen-backend="cranelift"' \
-            --package engine-wasm --lib -E 'test(host_precast_undo::tests::)' \
+            --package engine-wasm --lib \
             --archive-file "$GITHUB_WORKSPACE/native-payload/boundary.tar.zst"
       - name: Pin native artifact contents
         id: manifest
