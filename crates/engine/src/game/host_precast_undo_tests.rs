@@ -336,7 +336,7 @@ fn different_cast_activation_cancel_and_rejection_invalidate() {
     assert_eq!(witness(&f.state), before);
 
     let mut f = Fixture::new();
-    let wrong_card = CardId(u32::MAX);
+    let wrong_card = CardId(u64::MAX);
     assert!(f
         .undo
         .submit_action(
@@ -491,6 +491,105 @@ fn next_spell_effects_execute_normally_without_arming() {
         assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
         assert!(f.undo.receipt().is_none());
     }
+}
+
+#[test]
+fn delayed_mana_watcher_executes_normally_without_arming() {
+    use crate::types::ability::{
+        AbilityCondition, CommanderOwnership, DelayedTriggerCondition, DelayedTriggerLifetime,
+        ResolvedAbility, TargetFilter, TriggerDefinition,
+    };
+    use crate::types::events::{ActivationObservers, ActivationTriggerState};
+    use crate::types::game_state::DelayedTrigger;
+    use crate::types::triggers::TriggerMode;
+
+    let mut f = Fixture::new();
+    let mut definition = TriggerDefinition::new(TriggerMode::AbilityActivated);
+    definition.valid_target = Some(TargetFilter::Controller);
+    let mut ability = ResolvedAbility::new(
+        Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        },
+        vec![],
+        f.forest_a,
+        P0,
+    );
+    ability.condition = Some(AbilityCondition::ControlsCommander {
+        ownership: CommanderOwnership::Own,
+    });
+    ability.trigger_source = Some(super::super::triggers::trigger_source_context_for_latch(
+        &f.state,
+        &f.state.objects[&f.forest_a],
+    ));
+    // Fixture preparation installs a false-gated one-shot watcher through the
+    // production installation authority. Its consumption is tested by a real
+    // mana activation, not by injecting an AbilityActivated event.
+    let mut installation_events = vec![];
+    super::super::triggers::install_delayed_trigger(
+        &mut f.state,
+        DelayedTrigger::new(
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(definition),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            Box::new(ability),
+            P0,
+            f.forest_a,
+            true,
+        ),
+        &mut installation_events,
+    );
+    assert_eq!(f.state.delayed_triggers.len(), 1);
+    assert!(!eligible_pre(
+        &f.state,
+        P0,
+        f.bears,
+        f.state.objects[&f.bears].card_id,
+    ));
+    f.cast(CastPaymentMode::Manual);
+    assert!(matches!(
+        f.state.waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+    assert!(f.undo.receipt().is_none());
+
+    let tap = land_action(&f.state, f.forest_b);
+    let activation = f
+        .undo
+        .submit_action(&mut f.state, BINDING, P0, tap)
+        .unwrap();
+    assert!(activation.events.iter().any(|event| matches!(event,
+        GameEvent::AbilityActivated {
+            source_id,
+            trigger_state: ActivationTriggerState::CollectedAtActivation {
+                observers: ActivationObservers::Bound,
+            },
+            ..
+        } if *source_id == f.forest_b
+    )));
+    assert!(f.state.objects[&f.forest_b].tapped);
+    assert!(f.state.delayed_triggers.is_empty());
+    assert!(f.state.deferred_triggers.is_empty());
+    assert!(f.state.pending_trigger.is_none());
+    assert!(f.state.stack.is_empty());
+
+    let cast = f
+        .undo
+        .submit_action(&mut f.state, BINDING, P0, GameAction::PassPriority)
+        .unwrap();
+    assert!(cast.events.iter().any(|event| matches!(event,
+        GameEvent::SpellCast { object_id, .. } if *object_id == f.bears
+    )));
+    assert_eq!(f.state.stack.len(), 1);
+    assert_eq!(f.state.objects[&f.bears].zone, Zone::Stack);
+    assert_eq!(f.state.waiting_for, WaitingFor::Priority { player: P0 });
+    assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
+    assert!(f.undo.receipt().is_none());
+    let post = witness(&f.state);
+    assert!(f.restore(1).is_err());
+    assert_eq!(witness(&f.state), post);
 }
 
 #[test]
