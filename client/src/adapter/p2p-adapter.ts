@@ -25,6 +25,7 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { HostPrecastUndoStatus } from "./host-precast-undo";
 
 import {
   AdapterError,
@@ -1074,6 +1075,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private undoSyncRestoreSession: PeerSession | null = null;
   private undoSyncFatalFailure = false;
   private undoSyncInputBlocked = false;
+  private sandboxPrecastUndoFlight: Promise<void> | null = null;
   /** True when the adapter was constructed from a persisted session (resume flow). */
   private readonly isResume: boolean;
   /**
@@ -2593,6 +2595,73 @@ export class P2PHostAdapter implements EngineAdapter {
       );
     }
     this.undoSyncExperimentEnabled = true;
+  }
+
+  isSandboxPrecastUndoConfigured(): boolean {
+    return this.undoSyncExperimentEnabled && this.nativeBridge === null && !this.disposed;
+  }
+
+  private sandboxUndoSession(): PeerSession | null {
+    if (!this.isSandboxPrecastUndoConfigured() || !this.ownsAuthority()
+      || !this.wasmHostOwner || !this.gameStarted || this.gameRunState !== "running"
+      || this.terminalResult !== null || this.playerCount !== 2
+      || this.undoSyncFatalFailure || this.undoSyncInputBlocked || this.guestSessions.size !== 1) return null;
+    const [playerId, session] = [...this.guestSessions.entries()][0];
+    return !this.disconnectedSeats.has(playerId) && this.undoSyncNegotiatedSessions.has(session) ? session : null;
+  }
+
+  private async sandboxUndoStatus(session: PeerSession, owner: HostSessionOwner): Promise<HostPrecastUndoStatus> {
+    const assertCurrent = () => {
+      if (this.sandboxUndoSession() !== session || this.wasmHostOwner !== owner) {
+        throw new Error("Sandbox Undo host session was replaced");
+      }
+    };
+    assertCurrent();
+    let status = await this.wasm.hostPrecastUndoStatus(owner);
+    assertCurrent();
+    if (!status.enabled) {
+      status = await this.wasm.enableHostPrecastUndo(owner, status.binding);
+      assertCurrent();
+    }
+    return status;
+  }
+
+  /** Only availability leaves the adapter; binding/receipt/checkpoint stay private. */
+  async sandboxPrecastUndoAvailable(): Promise<boolean> {
+    const session = this.sandboxUndoSession();
+    const owner = this.wasmHostOwner;
+    if (!session || !owner) return false;
+    const status = await this.sandboxUndoStatus(session, owner);
+    return status.enabled && status.phase === "Armed" && status.receipt !== null;
+  }
+
+  restoreSandboxPrecastUndo(adopt: (snapshot: EngineSnapshot) => Promise<void>): Promise<void> {
+    if (this.sandboxPrecastUndoFlight) return this.sandboxPrecastUndoFlight;
+    const run = async () => {
+      const session = this.sandboxUndoSession();
+      const owner = this.wasmHostOwner;
+      if (!session || !owner) throw new Error("Sandbox Undo requires both seats' current consent");
+      const status = await this.sandboxUndoStatus(session, owner);
+      if (!status.enabled || status.phase !== "Armed" || status.receipt === null) {
+        throw new Error("No armed host checkpoint");
+      }
+      const receipt = status.receipt;
+      await this.beginUndoSynchronization(crypto.randomUUID(), async () => {
+        // The barrier already checked its peer/authority and drained mutations.
+        if (this.wasmHostOwner !== owner || this.undoSyncRestoreSession !== session) {
+          throw new Error("Sandbox Undo host owner was replaced");
+        }
+        const restored = await this.wasm.restoreHostPrecastUndo(owner, status.binding, receipt);
+        if (this.wasmHostOwner !== owner || this.undoSyncRestoreSession !== session
+          || this.disposed || !this.ownsAuthority()) throw new Error("Sandbox Undo result became stale");
+        await adopt(restored.snapshot);
+      });
+    };
+    const flight = run().finally(() => {
+      if (this.sandboxPrecastUndoFlight === flight) this.sandboxPrecastUndoFlight = null;
+    });
+    this.sandboxPrecastUndoFlight = flight;
+    return flight;
   }
 
   private undoSyncCapabilityFor(session: PeerSession): P2PUndoSyncCapability | undefined {

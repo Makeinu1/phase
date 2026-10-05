@@ -23,10 +23,8 @@ import { useUiStore } from "../stores/uiStore.ts";
  * `isCurrentDispatchGeneration`). Those can no longer re-populate the prompts this
  * function just cleared.
  *
- * `dispatchInteraction` and `restoreGameState` commit outside the generation gate
- * and still can. That race pre-dates this mechanism and is not fixed here; closing
- * it means threading the generation through those two paths, which is a change to
- * the single-writer invariant rather than to this boundary.
+ * `dispatchInteraction` also captures the dispatch and game-session generation.
+ * `restoreGameState` remains a separate local persistence path outside this gate.
  */
 export function clearPromptOverlayState(): void {
   abandonPendingDispatches();

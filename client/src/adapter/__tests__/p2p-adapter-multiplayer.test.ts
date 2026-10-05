@@ -19,6 +19,8 @@ import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage, type P2PUndoSyncMetadata } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
+import { bindSandboxUndoAdoption } from "../../game/sandboxPrecastUndo";
+import { useGameStore } from "../../stores/gameStore";
 
 /** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
 const HOST_DISCONNECTED_BEFORE_SETUP = "Host disconnected before game setup completed";
@@ -228,6 +230,9 @@ const mocks = vi.hoisted(() => {
      * real engine with nothing installed answers the same way.
      */
     initializeMultiplayerHostGame: vi.fn(async () => ({ events: [] })),
+    hostPrecastUndoStatus: vi.fn(),
+    enableHostPrecastUndo: vi.fn(),
+    restoreHostPrecastUndo: vi.fn(),
     setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
     /**
      * Replaces the bare `dispose()` the host used to call on its engine.
@@ -406,6 +411,9 @@ vi.mock("../wasm-adapter", () => {
   const createEngine = () => ({
     initialize: mocks.initialize,
     initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
+    hostPrecastUndoStatus: mocks.hostPrecastUndoStatus,
+    enableHostPrecastUndo: mocks.enableHostPrecastUndo,
+    restoreHostPrecastUndo: mocks.restoreHostPrecastUndo,
     submitAction: mocks.submitAction,
     submitInteraction: mocks.submitInteraction,
     previewInteraction: mocks.previewInteraction,
@@ -441,6 +449,9 @@ vi.mock("../wasm-adapter", () => {
 const mockInitialize = mocks.initialize;
 let uuidCounter = 0;
 beforeEach(() => {
+  mocks.hostPrecastUndoStatus.mockReset();
+  mocks.enableHostPrecastUndo.mockReset();
+  mocks.restoreHostPrecastUndo.mockReset();
   uuidCounter = 0;
   nativeWebSocketMocks.real = false;
   AuditSocket.sockets = [];
@@ -5586,9 +5597,109 @@ describe("Undo synchronization adapter integration", () => {
     };
     return {
       host, guest, hostConnection, guestConnection, guestPeerConnect,
-      hostEvents, guestEvents, cleanup, forwardHost, initialize,
+      hostEvents, guestEvents, cleanup, forwardHost, forwardGuest, initialize,
     };
   }
+
+  it("routes one private receipt restore through UI adoption and filtered barrier frames", async () => {
+    const guestAdopt = vi.fn(async () => undefined);
+    const pair = makeUndoPeerPair(guestAdopt);
+    try {
+      await pair.initialize();
+      const status = { binding: "12.2.3", enabled: true, phase: "Armed", receipt: "7" };
+      mocks.hostPrecastUndoStatus.mockResolvedValue(status);
+      const restoredSnapshot = await mocks.getSnapshot();
+      mocks.restoreHostPrecastUndo.mockResolvedValue({ status: { ...status, phase: "Consumed" }, snapshot: {
+        ...restoredSnapshot, state: { ...restoredSnapshot.state, privateHostMarker: "TRUSTED-PRE-RNG-SECRET" },
+      } });
+      expect(await pair.host.sandboxPrecastUndoAvailable()).toBe(true);
+      const adoptHost = vi.fn(async () => undefined);
+      const first = pair.host.restoreSandboxPrecastUndo(adoptHost);
+      const second = pair.host.restoreSandboxPrecastUndo(adoptHost);
+      expect(second).toBe(first);
+      await flushPromises(20);
+      const adopted = await pair.forwardHost();
+      await pair.forwardGuest();
+      await pair.forwardHost();
+      await pair.forwardGuest();
+      await first;
+      expect(mocks.restoreHostPrecastUndo).toHaveBeenCalledOnce();
+      expect(mocks.restoreHostPrecastUndo).toHaveBeenCalledWith(expect.any(Symbol), "12.2.3", "7");
+      expect(adoptHost).toHaveBeenCalledOnce();
+      expect(guestAdopt).toHaveBeenCalledOnce();
+      const frame = adopted.find((message) => message.type === "state_update" && message.undoSync);
+      expect(frame).toBeDefined();
+      expect(JSON.stringify(frame)).not.toContain("12.2.3");
+      expect(frame).not.toHaveProperty("receipt");
+      expect(frame).not.toHaveProperty("checkpoint");
+      expect(JSON.stringify(frame)).not.toContain("TRUSTED-PRE-RNG-SECRET");
+      expect(frame).toHaveProperty("state.filteredFor", 1);
+      expect(mocks.getViewerSnapshot).toHaveBeenCalledWith(1);
+    } finally { pair.guest.dispose(); pair.host.dispose(); }
+  });
+
+  it("requires guest consent before enabling the checkpoint observer or restoring", async () => {
+    const pair = makeUndoPeerPair();
+    try {
+      await pair.initialize();
+      expect(await pair.host.sandboxPrecastUndoAvailable()).toBe(false);
+      await expect(pair.host.restoreSandboxPrecastUndo(async () => undefined)).rejects.toThrow("consent");
+      expect(mocks.hostPrecastUndoStatus).not.toHaveBeenCalled();
+      expect(mocks.enableHostPrecastUndo).not.toHaveBeenCalled();
+      expect(mocks.restoreHostPrecastUndo).not.toHaveBeenCalled();
+    } finally { pair.guest.dispose(); pair.host.dispose(); }
+  });
+
+  it("sends no adoption ACK when the guest UI refuses the snapshot", async () => {
+    let adoptUi: (snapshot: EngineSnapshot) => Promise<void> = async () => { throw new Error("UI not bound"); };
+    const pair = makeUndoPeerPair((snapshot) => adoptUi(snapshot));
+    const previous = useGameStore.getState();
+    let refuseCommit: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await pair.initialize();
+      useGameStore.setState({ adapter: pair.guest, gameId: "guest-undo", gameState: (await pair.guest.getSnapshot()).state, lastCommittedSeq: 0 });
+      adoptUi = bindSandboxUndoAdoption(pair.guest, "guest-undo");
+      refuseCommit = vi.spyOn(useGameStore.getState(), "commitEngineSnapshot").mockReturnValue(false);
+      mocks.hostPrecastUndoStatus.mockResolvedValue({ binding: "1.2.3", enabled: true, phase: "Armed", receipt: "9" });
+      mocks.restoreHostPrecastUndo.mockResolvedValue({ status: {}, snapshot: await mocks.getSnapshot() });
+      const failed = pair.host.restoreSandboxPrecastUndo(async () => undefined).catch(() => undefined);
+      await flushPromises(20);
+      await pair.forwardHost();
+      const messages = await pair.guestConnection.getSentMessages();
+      expect(messages.some((message) => (message as P2PMessage).type === "state_ack" && "undoSync" in (message as object))).toBe(false);
+      expect(refuseCommit).toHaveBeenCalledOnce();
+      expect(pair.guestEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      pair.host.dispose();
+      await failed;
+    } finally { refuseCommit?.mockRestore(); useGameStore.setState(previous, true); pair.guest.dispose(); pair.host.dispose(); }
+  });
+
+  it("refuses a status continuation when its owner/session is disposed", async () => {
+    const pair = makeUndoPeerPair(async () => undefined);
+    try {
+      await pair.initialize();
+      const pending = deferred<{ binding: string; enabled: boolean; phase: string; receipt: string }>();
+      mocks.hostPrecastUndoStatus.mockReturnValueOnce(pending.promise);
+      const request = pair.host.restoreSandboxPrecastUndo(async () => undefined);
+      pair.host.dispose();
+      pending.resolve({ binding: "1.2.3", enabled: true, phase: "Armed", receipt: "9" });
+      await expect(request).rejects.toThrow("replaced");
+      expect(mocks.restoreHostPrecastUndo).not.toHaveBeenCalled();
+    } finally { pair.guest.dispose(); pair.host.dispose(); }
+  });
+
+  it("publishes no Undo frame when the host UI adoption refuses", async () => {
+    const pair = makeUndoPeerPair(async () => undefined);
+    try {
+      await pair.initialize();
+      mocks.hostPrecastUndoStatus.mockResolvedValue({ binding: "1.2.3", enabled: true, phase: "Armed", receipt: "9" });
+      mocks.restoreHostPrecastUndo.mockResolvedValue({ status: {}, snapshot: await mocks.getSnapshot() });
+      await expect(pair.host.restoreSandboxPrecastUndo(async () => { throw new Error("adoption false"); })).rejects.toThrow("adoption false");
+      const messages = await pair.hostConnection.getSentMessages();
+      expect(messages.some((message) => (message as P2PMessage).type === "state_update" && "undoSync" in (message as object))).toBe(false);
+      expect(pair.hostEvents).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    } finally { pair.guest.dispose(); pair.host.dispose(); }
+  });
 
   it("does not restore when the host opts in but the guest has no adopter", async () => {
     const pair = makeUndoPeerPair();

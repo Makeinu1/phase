@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import i18n from "i18next";
+import { takeSandboxUndoConsent } from "./sandboxUndoConsentStore";
 
 import type { PlayerAvatarIdentity } from "../services/playerAvatars.ts";
 
@@ -3467,6 +3468,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             nativeP2P,
           );
           adapter = p2pAdapter;
+          if (takeSandboxUndoConsent()) p2pAdapter.enableUndoSyncExperiment();
 
           p2pAdapter.onEvent((event) => {
             if (!isCurrentAttempt()) return;

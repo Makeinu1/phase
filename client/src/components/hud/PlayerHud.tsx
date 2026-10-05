@@ -12,6 +12,7 @@ import { getWaitingForPlayerChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { ManualManaToggle } from "../board/ManualManaToggle.tsx";
 import { UndoButton } from "../board/UndoButton.tsx";
+import { SandboxPrecastUndoButton } from "../board/SandboxPrecastUndoButton.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
@@ -150,6 +151,7 @@ export function PlayerHud() {
       <div className="pointer-events-none absolute left-full top-1/2 z-20 ml-1 flex -translate-y-1/2 flex-col items-start gap-1 [&>*]:pointer-events-auto">
         <ManualManaToggle />
         <UndoButton />
+        <SandboxPrecastUndoButton />
       </div>
     </div>
   );

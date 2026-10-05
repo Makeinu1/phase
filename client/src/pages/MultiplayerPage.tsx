@@ -17,6 +17,7 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { useInShell } from "../components/chrome/ShellContext";
 import { BrokerOfflinePrompt } from "../components/lobby/BrokerOfflinePrompt";
 import { HostSetup } from "../components/lobby/HostSetup";
+import { SandboxUndoConsent } from "../components/lobby/SandboxUndoConsent";
 import type { LobbyGame } from "../components/lobby/GameListItem";
 import { JoinErrorDialog } from "../components/lobby/JoinErrorDialog";
 import { LobbyView } from "../components/lobby/LobbyView";
@@ -1162,6 +1163,7 @@ function MultiplayerPageContent({
         contentWidthClass={view === "host-setup" ? "max-w-4xl" : "max-w-3xl"}
       >
         <div className="flex w-full flex-col items-start">
+        <SandboxUndoConsent />
         {/* Player identity — always available on lobby/host-setup so users
             can edit their name without hunting in Preferences. */}
         {(view === "lobby" || view === "host-setup") && <PlayerIdentityBanner />}

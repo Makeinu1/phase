@@ -1,4 +1,7 @@
 {
+  "sandboxUndo": {
+    "consent": "I agree that the host may undo their cast for the next browser P2P connection, when both seats agree. No vote for each Undo."
+  },
   "lan": {
     "title": "Réseau local",
     "guidance": "Saisissez une adresse de serveur pour rejoindre manuellement. Les pages HTTPS nécessitent un serveur wss:// sécurisé ; utilisez l’application de bureau pour les adresses ws:// locales.",

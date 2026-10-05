@@ -167,14 +167,14 @@ function sameBoundGameSession(
 /**
  * Discard every queued and in-flight dispatch and release the mutex.
  *
- * Two callers, both of which abandon the game the pending work belongs to:
+ * Used when the engine state is replaced or a game-session boundary abandons it:
  * `restoreGameState` (the engine state is replaced wholesale) and
  * `clearPromptOverlayState` (a game-session boundary). Bumping
  * `dispatchGeneration` makes every downstream `isDispatchContextCurrent` guard
  * decline, so a `processAction` continuation still in flight can neither commit
- * nor release a newer dispatch's mutex. That covers the dispatch pipeline only:
- * `dispatchInteraction` and `restoreGameState` commit without capturing the
- * generation, so they are unaffected by the bump and can still write.
+ * nor release a newer dispatch's mutex. Interaction continuations capture both
+ * this generation and the game session. `restoreGameState` remains a separate
+ * local persistence path outside the generation gate.
  * Queued work is *resolved*, not rejected: a caller
  * awaiting an action in an abandoned game has nothing to recover from and
  * must not see a spurious rejection.
@@ -864,6 +864,8 @@ export async function dispatchInteraction(
 ): Promise<void> {
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
+  const generation = dispatchGeneration;
+  const session: BoundGameSession = { adapter, generation: useGameStore.getState().gameSessionGeneration };
 
   try {
     if (!adapter.submitInteraction) {
@@ -874,13 +876,16 @@ export async function dispatchInteraction(
       );
     }
     const result = await adapter.submitInteraction(submission, actor);
+    if (!isDispatchContextCurrent(generation, session)) return;
     const snapshot = await adapter.getSnapshot();
+    if (!isDispatchContextCurrent(generation, session)) return;
     useGameStore.getState().commitEngineSnapshot(snapshot, {
       events: result.events,
       logEntries: result.log_entries ?? [],
       extraState: { restoredStackAutomation: null },
     });
   } catch (err) {
+    if (!isDispatchContextCurrent(generation, session)) return;
     reportActionError(err);
     throw err;
   }

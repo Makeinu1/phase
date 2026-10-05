@@ -1,4 +1,8 @@
 {
+  "sandboxUndo": {
+    "restore": "Sandbox：唱える前へ戻す",
+    "failed": "Undoを完了できませんでした。"
+  },
   "playerLatency": {
     "host": "ホスト",
     "waiting": "待機中",

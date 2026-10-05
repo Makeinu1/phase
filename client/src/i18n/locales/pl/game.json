@@ -1,4 +1,8 @@
 {
+  "sandboxUndo": {
+    "restore": "Sandbox pre-cast Undo",
+    "failed": "Undo could not be completed."
+  },
   "playerLatency": {"host":"Host","waiting":"Oczekiwanie","value":"{{ms}} ms","description":"Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."},
   "abilityBlock": {
     "badge": "Zablokowana",

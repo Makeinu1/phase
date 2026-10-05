@@ -11,6 +11,8 @@ import {
 } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
+import { takeSandboxUndoConsent } from "../stores/sandboxUndoConsentStore";
+import { bindSandboxUndoAdoption } from "../game/sandboxPrecastUndo";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import {
@@ -1097,6 +1099,7 @@ export function GameProvider({
             );
             p2pAdapter = adapter;
             // Ownership of the Peer transfers to the adapter here; don't
+            if (takeSandboxUndoConsent()) adapter.enableUndoSyncExperiment();
             // double-destroy in the compensating cleanup below.
             hostPeerHandle = null;
 
@@ -1160,9 +1163,17 @@ export function GameProvider({
             p2pAdapter = adapter;
             hostPeerHandle = null;
 
+            let adoptUndo: ReturnType<typeof bindSandboxUndoAdoption> | null = null;
+            const undoAgreed = takeSandboxUndoConsent();
+            if (undoAgreed) adapter.configureUndoSyncAdoption(async (snapshot) => {
+              if (!adoptUndo) throw new Error("Undo UI initialization is not complete");
+              await adoptUndo(snapshot);
+            });
+
             wireP2PEvents(adapter);
 
             await initGame(gameId, adapter, undefined, undefined, undefined, matchConfig);
+            if (undoAgreed) adoptUndo = bindSandboxUndoAdoption(adapter, gameId);
             signal.throwIfAborted();
             saveActiveGame({ id: gameId, mode: "p2p-join", difficulty: "", p2pRoomCode: code });
           }
