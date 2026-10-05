@@ -11438,13 +11438,35 @@ pub fn submit_interaction_with_rejection(
     actor: PlayerId,
     submission: InteractionSubmission,
 ) -> Result<AppliedInteraction, ActionRejection> {
-    let action = resolve_interaction_response(state, actor, &submission)
-        .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
-    let semantic_owner = PlayerId(
-        slot_for_submission(state, actor, &submission.interaction_id)
-            .map_err(action_rejection_for_interaction_reason)?
-            .semantic_owner,
-    );
+    submit_interaction_with_rejection_observed(state, actor, submission, |_, _| {})
+}
+
+/// Observe the authenticated semantic action before apply, including decode or
+/// authorization refusal. The observer cannot replace the resolved action.
+pub fn submit_interaction_with_rejection_observed(
+    state: &mut GameState,
+    actor: PlayerId,
+    submission: InteractionSubmission,
+    before_apply: impl FnOnce(&GameState, Option<(PlayerId, &GameAction)>),
+) -> Result<AppliedInteraction, ActionRejection> {
+    let resolved = (|| {
+        let action = resolve_interaction_response(state, actor, &submission)
+            .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
+        let owner = PlayerId(
+            slot_for_submission(state, actor, &submission.interaction_id)
+                .map_err(action_rejection_for_interaction_reason)?
+                .semantic_owner,
+        );
+        Ok::<_, ActionRejection>((owner, action))
+    })();
+    let (semantic_owner, action) = match resolved {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            before_apply(state, None);
+            return Err(error);
+        }
+    };
+    before_apply(state, Some((semantic_owner, &action)));
     let result = apply_interaction_with_rejection(state, actor, semantic_owner, action.clone())?;
     Ok(AppliedInteraction { action, result })
 }
