@@ -22,7 +22,36 @@ import { installTelemetry } from "./services/telemetryEvents";
 import { initializeHostPlatform } from "./services/platform";
 import { initializeConnectivity } from "./stores/connectivityStore";
 
+function privateQaRtcNamespaceFromFragment(): string | null {
+  const fragment = window.location.hash.startsWith("#")
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  return new URLSearchParams(fragment).get("phase-qa-rtc");
+}
+
+async function installPrivateQaRtcBeforeRender(): Promise<void> {
+  const namespace = privateQaRtcNamespaceFromFragment();
+  if (namespace === null) return;
+
+  try {
+    const { installPrivateQaRtcTransport } = await import("./qa/privateRtcBootstrap");
+    installPrivateQaRtcTransport(namespace);
+  } catch (error) {
+    // An explicit QA opt-in must fail closed. Do not continue into the app,
+    // where the default PeerJS selector could otherwise create public traffic.
+    const root = document.getElementById("root");
+    if (root) {
+      root.textContent = "Private QA RTC could not start. Remove #phase-qa-rtc=… to launch without QA mode.";
+    }
+    throw error;
+  }
+}
+
 export async function bootstrap(): Promise<void> {
+  // The optional selector must precede React effects and every game factory
+  // selection. Without the explicit URL fragment, production stays untouched.
+  await installPrivateQaRtcBeforeRender();
+
   await initializeHostPlatform();
 
   // Cloud-sync restores its Supabase session from an App effect, so migration

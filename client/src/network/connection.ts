@@ -160,7 +160,15 @@ export async function fetchFreshTurnConfig(signal?: AbortSignal): Promise<RTCCon
   }
 }
 
-async function getPeerConfig(): Promise<RTCConfiguration> {
+async function getPeerConfig(transportFactory?: PeerTransportFactory): Promise<RTCConfiguration> {
+  // An injected transport may own its RTC route entirely. Resolve its config
+  // before the shared TURN fetch/fallback so an isolated transport can avoid
+  // both external credential requests and public STUN defaults. A rejected
+  // provider is not silently replaced with the public fallback.
+  if (transportFactory?.getRtcConfiguration) {
+    return await transportFactory.getRtcConfiguration();
+  }
+
   const now = Date.now();
   if (cachedIceConfig && cachedIceConfig.expiresAt > now) {
     recordDiagnostic({ kind: "credentials", observedAt: now, outcome: "cache" });
@@ -481,9 +489,10 @@ async function openHostPeer(
     ? UNAVAILABLE_ID_RETRY_BACKOFF_MS.length + 1
     : 1;
 
-  // Fetch ICE config once up front so all retry attempts reuse it (and we don't
-  // hit the credentials endpoint per attempt).
-  const config = await getPeerConfig();
+  // Resolve RTC config once up front so all retry attempts reuse it. The
+  // default factory fetches short-lived TURN credentials here; an isolated
+  // factory may instead supply an empty local-only config.
+  const config = await getPeerConfig(transportFactory);
   const peerOptions = { config };
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -504,7 +513,11 @@ async function openHostPeer(
         const onOpen = () => {
           traceP2P("Host", "peer-open", { roomCode, peerId, attempt });
           signal?.removeEventListener("abort", onAbort);
-          console.log("[P2P Host] registered on signaling server, code:", roomCode);
+          // The QA RTC factory's open event means its local peer is ready;
+          // BroadcastChannel signaling does not register with a server.
+          if (!transportFactory.getRtcConfiguration) {
+            console.log("[P2P Host] registered on signaling server, code:", roomCode);
+          }
           peer.off("error", onError);
           resolve();
         };
@@ -695,7 +708,7 @@ export async function joinRoom(
     { role: "guest", hostPeerId: peerId },
     transportFactory,
   );
-  const config = await getPeerConfig();
+  const config = await getPeerConfig(selectedFactory);
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Aborted", "AbortError"));
@@ -721,7 +734,10 @@ export async function joinRoom(
         return;
       }
       traceP2P("Guest", "peer-open", { peerId });
-      console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
+      // The QA RTC factory's open event is local readiness, not server registration.
+      if (!selectedFactory.getRtcConfiguration) {
+        console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
+      }
       const conn = dialPeer(peer, peerId, timeoutMs, signal);
       traceP2P("Guest", "connect-called", { peerId, connOpen: conn.open });
 

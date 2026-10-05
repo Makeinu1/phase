@@ -54,6 +54,11 @@ export interface TransportPeer {
 /** A future signaling backend implements this one construction seam. */
 export interface PeerTransportFactory {
   create(id?: string, options?: TransportPeerOptions): TransportPeer;
+  /**
+   * Optional transport-owned RTC configuration. When absent, the shared game
+   * path retains its existing TURN credential lookup and STUN fallback.
+   */
+  getRtcConfiguration?(): RTCConfiguration | Promise<RTCConfiguration>;
 }
 
 export type PeerTransportSelectionContext = Readonly<{
