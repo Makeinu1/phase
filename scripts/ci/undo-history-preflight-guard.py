@@ -90,6 +90,9 @@ finally:
         except Exception as error:
             code = 1
             record["cleanupFailure"] = str(error)[:240]
+    record["supervisorSignal"] = stop_signal
+    if stop_signal and code == 0:
+        code = 1
     code = code if isinstance(code, int) and 0 <= code <= 255 else 1
     record.update(exitCode=code, passCommand=code == 0,
                   finishedAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
