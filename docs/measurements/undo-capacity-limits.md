@@ -32,3 +32,19 @@ Before publishing workflow edits, parse the YAML and check expression roots agai
 Run `37406168240` at candidate `50f1055ae6e55133e60fe556d37d648b596e3e67` selected `phase-engine --lib` through `cargo nextest run --locked --build-jobs 1 --profile ci`, with test opt-level 0, debug 0, incremental false and cranelift. The guard observed working set **13,978,275,840 bytes**, above the unchanged 13 GiB limit, and terminated the command with exit **-15** before tests ran: runtime verdict **NOT RUN**. Actual concurrent rustc count and baseline preflight readings were not received and are not inferred from jobs=1.
 
 The next venue selects existing `--test host_precast_undo_acceptance` for phase-engine, unfiltered, retaining all 22 assertions instead of compiling the full unit-test population. The previously successful control `0d74cf0314bec06949cd03231cd7979091d03f95` used this bounded target. Engine-wasm continues to select its existing filtered `--lib` tests. Verbose Cargo evidence records selected targets/features/profile. This venue change does not predict memory use or establish a successful runtime result; the resource limits and test assertions are unchanged.
+
+
+### First exact-head native verification receipt
+
+The parent verified [run 37407473256](https://github.com/Makeinu1/phase/actions/runs/37407473256) through authorized GitHub read access at candidate **`f48a0d6ee0b143e4ec15b482249a70c932f7bde5`**: **SUCCESS**.
+
+| Check | Observed result |
+| --- | --- |
+| Bounded phase-engine acceptance | 22 passed, 0 skipped: 20 Undo assertions and 2 registration guards |
+| Engine-wasm native boundary | 10 passed; 53 outside-scope tests excluded by the existing filter |
+| Fixed-toolchain formatting and parser Gate A | Passed |
+| Resource guard stop | None |
+| Sampled phase-engine working-set maximum | 10,158,006,272 bytes, below 13 GiB |
+| Sampled engine-wasm working-set maximum | 11,991,519,232 bytes, below 13 GiB |
+
+This receipt supports native behavior at that exact candidate head. The engine-wasm results are native boundary tests, not execution of compiled WASM: compiled-WASM and real-browser validation of this capacity candidate remain **NOT RUN**. The sampled CI working set is not live Undo heap, a guaranteed instantaneous peak, or a target-device safety budget. The earlier e10955dc measurement artifact does not validate this new code. The prior resource-stop record remains applicable to its different full-lib venue.
