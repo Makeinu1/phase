@@ -213,6 +213,10 @@ try {
     await pause(250);
   }
   assert(result, 'finite browser campaign deadline');
+  if (localUi && !result.pass) {
+    const capture = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, pageSession);
+    await writeFile(path.join(evidence, 'failure.png'), Buffer.from(capture.data, 'base64'));
+  }
   await writeFile(path.join(evidence, 'browser-result.json'), JSON.stringify({ ...result, browser: version.product,
     sourceSha: 'e10955dc5977f1ba7c65cb1518cb8f4b1679fe92', candidateSha: process.env.GITHUB_SHA,
     bindingOriginalSha256: digest(originalGlue), bindingRuntimeSha256: digest(originalGlue), bindingUnmodified: true, publicMethods,

@@ -23,16 +23,20 @@ import { canonical, equalRekey } from './qa-history-comparator.mjs';
 const check = (ok, code) => { if (!ok) throw Error(code); };
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = async raw => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))), n => n.toString(16).padStart(2, '0')).join('');
-const checks = [], operations = [], workers = [], NativeWorker = globalThis.Worker;
-let stage = 'bootstrap', adapter, actionCount = 0, captureObserved, restoreObserved, root;
+const checks = [], operations = [], delayTrials = [], workers = [], NativeWorker = globalThis.Worker;
+let stage = 'bootstrap', adapter, ownedGameWorker, workerSerial = 0, actionCount = 0, captureObserved, restoreObserved, root;
 class ObservedWorker extends NativeWorker {
-  handler = null; inFlight = new Map(); gate = null; held = null;
+  handler = null; inFlight = new Map(); gate = null; held = null; heldRequest = null;
+  identity = ++workerSerial; requests = {};
   constructor(url, options) {
     super(url, options); workers.push(this);
     this.addEventListener('message', e => {
       const request = this.inFlight.get(e.data.id);
       if (request?.type === 'exportState' && e.data.type === 'result') captureObserved = e.data.data;
-      if (request?.type === this.gate && !this.held) { this.gate = null; this.held = () => { this.held = null; this.deliver(e); }; return; }
+      if (request?.type === this.gate && !this.held) {
+        this.gate = null; this.heldRequest = { identity: this.identity, id: e.data.id, type: request.type, responseType: e.data.type };
+        this.held = () => { this.held = null; this.deliver(e); }; return;
+      }
       this.deliver(e);
     });
   }
@@ -41,14 +45,16 @@ class ObservedWorker extends NativeWorker {
   deliver(e) { this.inFlight.delete(e.data.id); this.handler?.call(this, e); }
   postMessage(message, transfer) {
     this.inFlight.set(message.id, { type: message.type });
+    this.requests[message.type] = (this.requests[message.type] ?? 0) + 1;
     if (['submitAction', 'submitInteraction'].includes(message.type)) actionCount++;
     if (message.type === 'restoreState') restoreObserved = message.stateJson;
     super.postMessage(message, transfer ?? []);
   }
-  terminate() { super.terminate(); this.inFlight.clear(); this.handler = this.held = this.gate = null; workers.splice(workers.indexOf(this), 1); }
+  terminate() { super.terminate(); this.inFlight.clear(); this.handler = this.held = this.gate = null; const index = workers.indexOf(this); if (index >= 0) workers.splice(index, 1); }
 }
 globalThis.Worker = ObservedWorker;
 const store = () => useGameStore.getState();
+const workerInfo = () => workers.map(w => ({ identity: w.identity, ownedGame: w === ownedGameWorker, requests: { ...w.requests } }));
 const raw = () => adapter.exportPersistenceState();
 const mark = name => { checks.push(name); globalThis.__qaProgress = { stage, checks: [...checks], roots: store().localHistory?.entries }; };
 async function until(predicate, code) {
@@ -104,13 +110,18 @@ async function roundTrip(type, name, screenshot) {
   const id = await ready(type, name), before = await raw(), display = { legal: legalDisplay(), log: store().logHistory, events: store().eventHistory };
   const entries = store().localHistory.entries, submits = actionCount;
   const selector = `[data-hand-card][data-object-id="${id}"]`;
-  const worker = workers.at(-1); worker.gate = 'submitAction';
+  const worker = ownedGameWorker; worker.gate = 'submitAction';
   await uiClick(selector, true);
   await until(() => !!worker.held, 'actual-product-submit-response-held');
-  check(store().localHistory.phase === 'busy', 'common-lock-during-delayed-normal-worker-response');
+  check(worker.heldRequest.type === 'submitAction' && worker.inFlight.has(worker.heldRequest.id)
+    && store().localHistory.phase === 'busy' && store().localHistory.entries === entries, 'real-game-request-inflight-common-lock-before-client-adoption');
   // Another real double click must not create a second root or submit.
   await uiClick(selector, true);
   check(actionCount === submits + 1 && document.querySelector('[data-local-history-undo]').disabled, 'rapid-product-click-and-undo-locked');
+  delayTrials.push({ actionType: type, workerIdentity: worker.identity, heldRequestType: worker.heldRequest.type,
+    heldResponseType: worker.heldRequest.responseType, requestStillInFlight: worker.inFlight.has(worker.heldRequest.id),
+    rootsBefore: entries, rootsWhileHeld: store().localHistory.entries, submissionsBefore: submits, submissionsAfterRepeatedUiInput: actionCount,
+    phaseWhileHeld: store().localHistory.phase, undoDisabled: document.querySelector('[data-local-history-undo]').disabled });
   worker.held();
   await until(() => store().localHistory.phase === 'idle', 'product-commit-terminal');
   check(store().localHistory.entries === entries + 1 && captureObserved === before, 'one-product-operation-one-root-exact-pre');
@@ -141,6 +152,9 @@ async function campaign() {
   try { await store().initGame('qa-local-product-ui', adapter, { player: { main_deck: [...Array(24).fill('Forest'), ...Array(16).fill('Grizzly Bears')] }, opponent: { main_deck: Array(40).fill('Island') } }, FORMAT_REGISTRY.find(f => f.format === 'Limited').default_config, 2, undefined, 0, 'best-effort', true); }
   finally { Math.random = random; }
   check(currentLocalHistory()?.ownsSession() && workers.length === 1, 'new-local-dedicated-normal-worker');
+  // Product card-data hooks may initialize a separate shared read Worker after
+  // mounting. Keep the game executor's identity; never select "latest Worker".
+  ownedGameWorker = workers[0];
   const node = document.createElement('div'); document.body.append(node); root = createRoot(node); root.render(React.createElement(BrowserRouter, null, React.createElement(ProductSurface)));
   await until(() => globalThis.__qaSurfaceReady, 'existing-react-components-mounted'); mark('new-local-real-init-existing-components-no-provider-route-claim');
   stage = 'existing-UI-roundtrips'; await roundTrip('PlayLand', 'Forest', 'land');
@@ -152,7 +166,9 @@ async function campaign() {
   await uiClick('[data-local-history-undo]', false, 'creature-post-reexecution');
   await until(() => store().localHistory.phase === 'idle', 'final-undo-terminal');
   check(store().stateHistory.length === 0, 'old-ring-never-touched');
-  stage = 'complete'; root.unmount(); store().reset(); check(workers.length === 0 && !currentLocalHistory(), 'owned-worker-session-ended');
-  return { pass: true, stage, checks, operations, actionCount, rootSemantics: 'one product submission per root; each harness setup pass/keep/combat is a separate explicitly labelled root', scope: 'new Local init via store; actual existing PlayerHand/GameBoard/UndoButton plus normal dispatcher, coordinator and normal module Worker; fixed nine-card test database; not full GameProvider/GamePage route, AI, P2P, two-seat UI or Safari' };
+  const workerObservations = workerInfo();
+  check(workers.filter(w => w !== ownedGameWorker).every(w => !['initializeGame', 'initializeMultiplayerHostGame', 'submitAction', 'submitInteraction', 'submitAiActionProposal', 'restoreState', 'resetGame', 'setMultiplayerMode', 'applySeatMutation'].some(type => w.requests[type])), 'shared-read-workers-no-game-mutations');
+  stage = 'complete'; root.unmount(); store().reset(); check(!workers.includes(ownedGameWorker) && !currentLocalHistory(), 'owned-game-worker-session-ended');
+  return { pass: true, stage, checks, operations, delayTrials, actionCount, workerObservations, sharedReadWorkersRemaining: workers.length, ownedGameWorkerTerminated: true, rootSemantics: 'one product submission per root; each harness setup pass/keep/combat is a separate explicitly labelled root', scope: 'new Local init via store; actual existing PlayerHand/GameBoard/UndoButton plus normal dispatcher, coordinator and normal module Worker; product card-data hooks can use a distinct shared read Worker; fixed nine-card test database; not full GameProvider/GamePage route, AI, P2P, two-seat UI or Safari' };
 }
-globalThis.__qaStart = () => { void campaign().then(r => { globalThis.__qaResult = r; }, e => { globalThis.__qaResult = { pass: false, stage, failure: String(e), checks, operations, actionCount, ui: document.body.innerText.slice(0, 1000), waitingFor: store().waitingFor, localHistory: store().localHistory }; root?.unmount(); store().reset(); }); };
+globalThis.__qaStart = () => { void campaign().then(r => { globalThis.__qaResult = r; }, e => { globalThis.__qaResult = { pass: false, stage, failure: String(e), checks, operations, actionCount, workerObservations: workerInfo(), ownedGameWorkerAlive: workers.includes(ownedGameWorker), ownedGameRequests: ownedGameWorker ? [...ownedGameWorker.inFlight.values()].map(r => r.type) : [], ui: document.body.innerText.slice(0, 1000), waitingFor: store().waitingFor, localHistory: store().localHistory }; root?.unmount(); store().reset(); }); };
