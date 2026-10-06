@@ -122,6 +122,7 @@ jobs:
         with:
           version: 9.15.9
       - name: Verify the pinned actual WASM input
+        id: wasm-input
         working-directory: source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -139,13 +140,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-      - name: Chromium actual-engine module-worker capability (not app UI or RTC acceptance)
-        working-directory: source
-        env:
-          F_EVIDENCE: ${{ github.workspace }}/browser-evidence
-        run: |
-          python3 ../control/scripts/ci/undo-f-guard.py browser-capability \
-            node ../control/scripts/ci/undo-f-browser.mjs "$GITHUB_WORKSPACE/wasm-payload" "$F_EVIDENCE"
       - name: Inspect actual bindings and install frozen client dependencies
         working-directory: source
         env:
@@ -167,6 +161,16 @@ jobs:
             --pool=forks --isolate --coverage.enabled=false --reporter=verbose \
             src/game/__tests__/wasmLegalActions.integration.test.ts \
             src/data/__tests__/formatRegistry.integration.test.ts
+      - name: Chromium actual-engine module-worker capability (not app UI or RTC acceptance)
+        # Run after integration, even if its bindings/dependencies/tests failed.
+        # A browser failure cannot suppress the independent WASM test evidence.
+        if: ${{ !cancelled() && steps.wasm-input.outcome == 'success' }}
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/browser-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py browser-capability \
+            node ../control/scripts/ci/undo-f-browser.mjs "$GITHUB_WORKSPACE/wasm-payload" "$F_EVIDENCE"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

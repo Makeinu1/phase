@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -10,8 +10,14 @@ import { setTimeout as pause } from "node:timers/promises";
 const directory = path.resolve(process.argv[2]);
 const evidence = path.resolve(process.argv[3]);
 await mkdir(evidence, { recursive: true });
-const executable = ["google-chrome", "chromium", "chromium-browser"].find(name => spawnSync("which", [name]).status === 0);
+const executable = ["google-chrome", "chromium", "chromium-browser"]
+  .map(name => spawnSync("which", [name], { encoding: "utf8" }).stdout?.trim())
+  .find(Boolean);
 assert(executable, "no installed Chromium executable; do not substitute a stub");
+const versionProbe = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 10000, maxBuffer: 16384 });
+const launch = { executable, realpath: await realpath(executable),
+  version: { status: versionProbe.status, signal: versionProbe.signal, error: versionProbe.error?.message,
+    stdout: versionProbe.stdout?.slice(-6000), stderr: versionProbe.stderr?.slice(-6000) } };
 const expected = ["host_precast_undo_status", "enable_host_precast_undo", "restore_host_precast_undo", "disable_host_precast_undo"];
 const worker = `import init, * as engine from '/engine_wasm.js';
 try { await init(); const ping = engine.ping();
@@ -41,12 +47,30 @@ const server = http.createServer((request, response) => {
 });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const profile = await mkdtemp(path.join(process.env.RUNNER_TEMP, "undo-f-chrome-"));
-const chrome = spawn(executable, ["--headless=new", "--disable-gpu", "--disable-background-networking",
+const args = ["--headless", "--disable-gpu", "--disable-background-networking",
   "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check",
-  "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"],
-  { stdio: ["ignore", "ignore", "pipe"] });
+  "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"];
+const chrome = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
+Object.assign(launch, { args, pid: chrome.pid, startupDeadlineMs: 10000 });
 let diagnostic = "";
+let stdout = "";
+let spawnError;
+let exit;
+let activePort;
+let endpointSource;
+let failure;
 chrome.stderr.on("data", bytes => { diagnostic = (diagnostic + bytes).slice(-6000); });
+chrome.stdout.on("data", bytes => { stdout = (stdout + bytes).slice(-6000); });
+chrome.on("error", error => { spawnError = error.message; });
+chrome.on("exit", (code, signal) => { exit = { code, signal }; });
+async function readActivePort() {
+  try { activePort = (await readFile(path.join(profile, "DevToolsActivePort"), "utf8")).slice(0,4096); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  // Chromium writes the ephemeral port and browser path into this fresh profile.
+  const match = activePort?.match(/^(\d+)\r?\n(\/devtools\/browser\/[A-Za-z0-9-]+)\r?\n?$/);
+  if (!match || Number(match[1]) < 1 || Number(match[1]) > 65535) return;
+  return `ws://127.0.0.1:${match[1]}${match[2]}`;
+}
 let socket;
 let serial = 0;
 const pending = new Map();
@@ -61,8 +85,10 @@ function call(method, params = {}, sessionId) {
 try {
   let endpoint;
   for (let attempt = 0; attempt < 100 && !endpoint; attempt++) {
-    assert(chrome.exitCode === null, "Chromium exited before the probe");
+    assert(!spawnError && chrome.exitCode === null && chrome.signalCode === null, "Chromium exited or failed before the probe");
     endpoint = diagnostic.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/\S+)/)?.[1];
+    if (endpoint) endpointSource = "stderr";
+    else { endpoint = await readActivePort(); if (endpoint) endpointSource = "DevToolsActivePort"; }
     if (!endpoint) await pause(100);
   }
   assert(endpoint, "Chromium did not expose its local DevTools endpoint");
@@ -90,8 +116,19 @@ try {
   await writeFile(path.join(evidence, "browser-capability.json"), JSON.stringify(result, null, 2) + "\n");
   console.log(JSON.stringify(result));
   await call("Browser.close").catch(() => {});
+} catch (error) {
+  failure = String(error);
+  throw error;
 } finally {
   for (const request of pending.values()) clearTimeout(request.timer);
-  socket?.close(); chrome.kill("SIGTERM"); server.close();
+  socket?.close(); server.close();
+  const beforeCleanup = { exitCode: chrome.exitCode, signalCode: chrome.signalCode, exit, spawnError };
+  await readActivePort().catch(error => { launch.portFileError = error.message; });
+  chrome.kill("SIGTERM");
+  for (let attempt = 0; attempt < 20 && !exit && !spawnError; attempt++) await pause(100);
+  await writeFile(path.join(evidence, "chromium-launch.json"), JSON.stringify({ ...launch, beforeCleanup,
+    afterCleanup: { exitCode: chrome.exitCode, signalCode: chrome.signalCode, exit, spawnError },
+    DevToolsActivePort: activePort ?? null, endpointSource: endpointSource ?? null, failure: failure ?? null }, null, 2) + "\n");
+  await writeFile(path.join(evidence, "chromium.stdout.log"), stdout);
   await writeFile(path.join(evidence, "chromium.stderr.log"), diagnostic);
 }
