@@ -109,12 +109,20 @@ try {
   const target = await call('Target.createTarget', { url: 'about:blank' });
   pageSession = (await call('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
   assert(!args.some(x => /no-sandbox|disable.*sandbox/.test(x)), 'browser sandbox must stay enabled');
-  const listedRegions = await wasmMemoryRegions(call, pageSession);
+  let listedRegions;
+  await evaluate('globalThis.__qaSyntheticMemory = new WebAssembly.Memory({ initial: 1 }); true');
+  try {
+    listedRegions = await wasmMemoryRegions(call, pageSession);
+    assert(listedRegions.regionBytes.includes(65536), 'synthetic one-page Memory must be enumerated');
+  } finally {
+    await evaluate('delete globalThis.__qaSyntheticMemory').catch(() => {});
+  }
   await call('HeapProfiler.collectGarbage', {}, pageSession);
   const mainHeap = await call('Runtime.getHeapUsage', {}, pageSession);
   await writeFile(path.join(evidence, 'browser-selfcheck.json'), JSON.stringify({ pass: true,
     candidateSha: process.env.GITHUB_SHA, browser: version.product, executable, args,
-    sandboxDisableFlags: false, phaseEngineStarted: false, listedRegions, mainHeap }, null, 2) + '\n');
+    sandboxDisableFlags: false, phaseEngineStarted: false,
+    syntheticMemoryCheck: { pages: 1, expectedBytes: 65536, referenceDeletionAttempted: true }, listedRegions, mainHeap }, null, 2) + '\n');
   if (!browserOnly) {
   stage = 'QA-module-load';
   await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
