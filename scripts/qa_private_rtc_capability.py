@@ -4,6 +4,7 @@
 import argparse
 import base64
 import copy
+import errno
 import hashlib
 import importlib.metadata
 import json
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +45,28 @@ def write_json(path, value):
     with path.open("x", encoding="utf-8") as stream:
         json.dump(value, stream, indent=2)
         stream.write("\n")
+
+
+def error_details(error):
+    """Code locations and OS codes only; never exception text, paths or locals."""
+    number = error.errno if isinstance(error, OSError) and type(error.errno) is int else None
+    return {"type": type(error).__name__, "errno": number, "code": errno.errorcode.get(number),
+            "frames": [{"file": Path(frame.filename).name, "function": frame.name, "line": frame.lineno}
+                       for frame in traceback.extract_tb(error.__traceback__)[-8:]]}
+
+
+def stop_browser_process(process, cleanup):
+    state = {"terminateSent": False, "killSent": False, "exitCode": None}
+    cleanup["browserProcess"] = state
+    if process.poll() is None:
+        process.terminate()
+        state["terminateSent"] = True
+    try:
+        state["exitCode"] = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        state["killSent"] = True
+        state["exitCode"] = process.wait(timeout=5)
 
 
 class EntryMetadata(HTMLParser):
@@ -211,82 +235,86 @@ def run_browser(args, manifest, contents, result):
         def log_message(self, *_args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    server.daemon_threads = True
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    origin = f"http://127.0.0.1:{server.server_port}"
-    result["origin"] = origin
+    server = None
+    thread = None
+    serving = False
+    profile = None
+    playwright = None
     browser = None
     process = None
     page = None
-    profile = tempfile.TemporaryDirectory(prefix="phase-rtc-ci-profile-")
+    result["cleanup"] = {"result": "running", "steps": []}
     try:
+        result["stage"] = "start-http-server"
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        serving = True
+        origin = f"http://127.0.0.1:{server.server_port}"
+        result["origin"] = origin
+        result["stage"] = "create-profile"
+        # Explicit removal prevents a finalizer deleting a still-running browser's profile.
+        profile = tempfile.mkdtemp(prefix="phase-rtc-ci-profile-")
+        result["stage"] = "start-playwright"
         playwright = sync_playwright().start()
-        try:
-            result["stage"] = "launch-browser"
-            # Playwright's launch defaults disable some browser protections. Start
-            # the standard browser ourselves and use only its loopback CDP API.
-            command = [args.browser_path, "--headless", "--remote-debugging-address=127.0.0.1",
-                       "--remote-debugging-port=0", "--user-data-dir=" + profile.name]
-            result["browserArguments"] = command
-            require(not any(arg == flag or arg.startswith(flag + "=") for arg in command for flag in FORBIDDEN_ARGS), "forbidden browser security argument")
-            with (args.output_dir / "browser-launch.stdout.txt").open("xb") as stdout, (args.output_dir / "browser-launch.stderr.txt").open("xb") as stderr:
-                process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
-            port_file = Path(profile.name) / "DevToolsActivePort"
-            deadline = time.monotonic() + 20
-            port = None
-            while process.poll() is None and time.monotonic() < deadline:
-                try:
-                    value = int(port_file.read_text().splitlines()[0])
-                    if 0 < value < 65536:
-                        port = value
-                        break
-                except (OSError, ValueError, IndexError):
-                    pass  # Chromium can still be writing this new profile's port file.
-                time.sleep(0.05)
-            require(process.poll() is None and port is not None, "Chromium could not start sandboxed; see browser-launch.stderr.txt")
-            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=10_000, no_defaults=True)
-            result["browserVersion"] = browser.version
-            context = browser.new_context(ignore_https_errors=False)
-            page = context.new_page()
-            page.set_default_timeout(10_000)
-            result["stage"] = "a1-setup"
-            page.goto(origin + "/" + HTML + "#qa-environment-accepted=1", wait_until="load")
-            page.wait_for_function("""() => {
-                const status = document.getElementById('qa-harness-status');
-                return status && !status.textContent.startsWith('Reading');
-            }""")
-            setup = json.loads(page.locator("#qa-a1-output").inner_text())["setup"]
-            result["setup"] = setup
-            check_a1(setup, manifest, origin)
-            require(page.locator("#qa-a2-output").inner_text() == "Not run"
-                    and page.locator("#qa-a2-run").is_enabled(), "A2 started early or setup gate disabled")
-            # This CI contract and pinned artifact supply the external run record.
-            # Use the existing button; do not call native control or modify any API.
-            result["stage"] = "a2-run"
-            page.locator("#qa-a2-run").click()
-            page.wait_for_function("""() => {
-                const text = document.getElementById('qa-a2-output').textContent;
-                const status = document.getElementById('qa-harness-status').textContent;
-                return (text !== 'Not run' && JSON.parse(text).result !== 'running')
-                    || status.startsWith('Before-run observation failed')
-                    || status.startsWith('Environment drift observed');
-            }""", timeout=40_000)
-            observed = json.loads(page.locator("#qa-a1-output").inner_text())
-            result["a1"] = observed
-            check_reobservation(setup, observed, manifest, origin)
-            result["a2"] = json.loads(page.locator("#qa-a2-output").inner_text())
-            check_a2(result["a2"])
-            require(page.locator("#qa-a2-run").is_disabled(), "one-run button remained enabled")
-            result["stage"] = "complete"
-        finally:
+        result["stage"] = "launch-browser"
+        # Playwright's launch defaults disable some browser protections. Start
+        # the standard browser ourselves and use only its loopback CDP API.
+        command = [args.browser_path, "--headless", "--remote-debugging-address=127.0.0.1",
+                   "--remote-debugging-port=0", "--user-data-dir=" + profile]
+        result["browserArguments"] = command
+        require(not any(arg == flag or arg.startswith(flag + "=") for arg in command for flag in FORBIDDEN_ARGS), "forbidden browser security argument")
+        with (args.output_dir / "browser-launch.stdout.txt").open("xb") as stdout, (args.output_dir / "browser-launch.stderr.txt").open("xb") as stderr:
+            process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
+        result["cleanup"]["launchFilesClosed"] = stdout.closed and stderr.closed
+        port_file = Path(profile) / "DevToolsActivePort"
+        deadline = time.monotonic() + 20
+        port = None
+        while process.poll() is None and time.monotonic() < deadline:
             try:
-                if browser is not None:
-                    browser.close()
-                    browser = None
-            finally:
-                playwright.stop()
+                value = int(port_file.read_text().splitlines()[0])
+                if 0 < value < 65536:
+                    port = value
+                    break
+            except (OSError, ValueError, IndexError):
+                pass  # Chromium can still be writing this new profile's port file.
+            time.sleep(0.05)
+        require(process.poll() is None and port is not None, "Chromium could not start sandboxed; see browser-launch.stderr.txt")
+        browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=10_000, no_defaults=True)
+        result["browserVersion"] = browser.version
+        context = browser.new_context(ignore_https_errors=False)
+        page = context.new_page()
+        page.set_default_timeout(10_000)
+        result["stage"] = "a1-setup"
+        page.goto(origin + "/" + HTML + "#qa-environment-accepted=1", wait_until="load")
+        page.wait_for_function("""() => {
+            const status = document.getElementById('qa-harness-status');
+            return status && !status.textContent.startsWith('Reading');
+        }""")
+        setup = json.loads(page.locator("#qa-a1-output").inner_text())["setup"]
+        result["setup"] = setup
+        check_a1(setup, manifest, origin)
+        require(page.locator("#qa-a2-output").inner_text() == "Not run"
+                and page.locator("#qa-a2-run").is_enabled(), "A2 started early or setup gate disabled")
+        # This CI contract and pinned artifact supply the external run record.
+        # Use the existing button; do not call native control or modify any API.
+        result["stage"] = "a2-run"
+        page.locator("#qa-a2-run").click()
+        page.wait_for_function("""() => {
+            const text = document.getElementById('qa-a2-output').textContent;
+            const status = document.getElementById('qa-harness-status').textContent;
+            return (text !== 'Not run' && JSON.parse(text).result !== 'running')
+                || status.startsWith('Before-run observation failed')
+                || status.startsWith('Environment drift observed');
+        }""", timeout=40_000)
+        observed = json.loads(page.locator("#qa-a1-output").inner_text())
+        result["a1"] = observed
+        check_reobservation(setup, observed, manifest, origin)
+        result["a2"] = json.loads(page.locator("#qa-a2-output").inner_text())
+        check_a2(result["a2"])
+        require(page.locator("#qa-a2-run").is_disabled(), "one-run button remained enabled")
+        result["stage"] = "complete"
     except Exception as error:
         if result["stage"] == "launch-browser":
             # Launch errors precede gameplay and contain no SDP or ICE descriptions.
@@ -299,22 +327,47 @@ def run_browser(args, manifest, contents, result):
                     pass
         raise
     finally:
-        try:
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-        finally:
+        # Keep an earlier observation failure authoritative while retaining every
+        # teardown failure. A successful observation never hides failed cleanup.
+        primary_error = sys.exc_info()[1]
+        failures = []
+
+        def clean(stage, action):
+            step = {"stage": stage, "result": "running"}
+            result["cleanup"]["steps"].append(step)
             try:
-                profile.cleanup()
-            finally:
-                server.shutdown()
-                server.server_close()
+                action()
+            except Exception as error:
+                step.update(result="fail", error=error_details(error))
+                failures.append(error)
+                return False
+            step["result"] = "pass"
+            return True
+
+        if browser is not None:
+            clean("browser-close", browser.close)
+        if playwright is not None:
+            clean("playwright-stop", playwright.stop)
+        process_released = process is None or clean("browser-process-stop", lambda: stop_browser_process(process, result["cleanup"]))
+        if profile is not None:
+            if process_released:
+                clean("profile-remove", lambda: shutil.rmtree(profile))
+            else:
+                result["cleanup"]["steps"].append({"stage": "profile-remove", "result": "skipped",
+                                                   "reason": "browser-process-release-unconfirmed"})
+        if server is not None:
+            if serving:
+                clean("http-server-shutdown", server.shutdown)
+            clean("http-server-close", server.server_close)
+        if serving:
+            def join_server():
                 thread.join(timeout=2)
-                result["httpRequests"] = requests
+                require(not thread.is_alive(), "HTTP server thread did not stop")
+            clean("http-thread-join", join_server)
+        result["httpRequests"] = requests
+        result["cleanup"]["result"] = "fail" if failures else "pass"
+        if failures and primary_error is None:
+            raise failures[0]
 
 
 def main():
@@ -355,6 +408,7 @@ def main():
         result["result"] = "pass"
     except Exception as error:
         result["errorType"] = type(error).__name__
+        result["errorDetails"] = error_details(error)
         result["error"] = str(error) if isinstance(error, ValueError) else "Execution failed; see stage and available launch/A1/A2 evidence."
     finally:
         result["driverElapsedSeconds"] = time.monotonic() - started

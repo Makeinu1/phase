@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Validator tests only: no mocked WebRTC and no browser capability claim."""
+"""Validator/cleanup fault injection only; no browser capability proof."""
 
 import copy
 import base64
+import errno
 import hashlib
 import json
 import tempfile
+import shutil
+import sys
+import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import Mock, patch
+
+import qa_private_rtc_capability as driver
 
 from qa_private_rtc_capability import HTML, MANIFEST, SOURCE_INPUTS, check_a1, check_a2, check_reobservation, load_artifact, stable_a1
 
@@ -189,6 +197,149 @@ class ArtifactTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         load_artifact(build, client, source_sha, "a" * 40)
+
+
+class CleanupTests(unittest.TestCase):
+    """Fake page snapshots isolate teardown; no native/browser process is run."""
+
+    def setUp(self):
+        contract = ContractTests()
+        contract.setUp()
+        self.manifest = contract.manifest
+        observed = {"setup": contract.a1, "monitoring": contract.a1["drift"], "beforeRun": contract.a1}
+        self.page = Mock()
+        outputs = {"#qa-a1-output": [json.dumps({"setup": contract.a1}), json.dumps(observed)],
+                   "#qa-a2-output": ["Not run", json.dumps(contract.a2)]}
+        locators = {key: Mock() for key in [*outputs, "#qa-a2-run"]}
+        for key, values in outputs.items():
+            locators[key].inner_text.side_effect = values
+        self.page.locator.side_effect = lambda key: locators[key]
+        locators["#qa-a2-run"].is_enabled.return_value = True
+        locators["#qa-a2-run"].is_disabled.return_value = True
+        self.browser = Mock(version="test-only")
+        self.browser.new_context.return_value.new_page.return_value = self.page
+        self.playwright = Mock()
+        self.playwright.chromium.connect_over_cdp.return_value = self.browser
+        self.process = Mock()
+        self.process.poll.return_value = None
+        self.process.wait.return_value = 0
+        self.server = Mock(server_port=1234)
+        self.thread = Mock()
+        self.thread.is_alive.return_value = False
+        module = types.ModuleType("playwright.sync_api")
+        module.sync_playwright = lambda: Mock(start=lambda: self.playwright)
+        self.modules = {"playwright": types.ModuleType("playwright"), "playwright.sync_api": module}
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.args = types.SimpleNamespace(browser_path="/not-run/browser", output_dir=Path(directory.name))
+        self.result = {"result": "fail", "stage": "artifact-check"}
+
+    def run_fault(self):
+        error = None
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(sys.modules, self.modules))
+            stack.enter_context(patch.object(driver, "ThreadingHTTPServer", return_value=self.server))
+            stack.enter_context(patch.object(driver.threading, "Thread", return_value=self.thread))
+            stack.enter_context(patch.object(driver.subprocess, "Popen", return_value=self.process))
+            stack.enter_context(patch.object(driver.Path, "read_text", return_value="1234\n"))
+            try:
+                driver.run_browser(self.args, self.manifest, {}, self.result)
+            except Exception as failure:
+                error = failure
+        command = self.result["browserArguments"]
+        self.profile = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--user-data-dir=")))
+        self.addCleanup(shutil.rmtree, self.profile, ignore_errors=True)
+        return error
+
+    def test_two_cleanup_errors_preserve_first_and_release_remaining_resources(self):
+        self.browser.close.side_effect = OSError(errno.EBADF, "private-error-text")
+        self.playwright.stop.side_effect = OSError(errno.EIO, "second-private-error-text")
+        error = self.run_fault()
+        self.assertEqual(error.errno, errno.EBADF)
+        self.assertEqual(self.result["a2"]["result"], "pass")
+        self.assertEqual(self.result["cleanup"]["result"], "fail")
+        errors = [x for x in self.result["cleanup"]["steps"] if x["result"] == "fail"]
+        self.assertEqual([(x["stage"], x["error"]["errno"]) for x in errors], [("browser-close", errno.EBADF), ("playwright-stop", errno.EIO)])
+        self.assertNotIn("private-error-text", json.dumps(self.result["cleanup"]))
+        self.process.wait.assert_called_once_with(timeout=5)
+        self.server.server_close.assert_called_once()
+        self.thread.join.assert_called_once_with(timeout=2)
+
+    def test_server_shutdown_error_still_closes_socket_and_preserves_requests(self):
+        self.server.shutdown.side_effect = OSError(errno.EIO, "private-server-path")
+        error = self.run_fault()
+        self.assertEqual(error.errno, errno.EIO)
+        self.server.server_close.assert_called_once()
+        self.thread.join.assert_called_once_with(timeout=2)
+        self.assertEqual(self.result["httpRequests"], [])
+        self.assertEqual(self.result["cleanup"]["result"], "fail")
+
+    def test_process_stop_error_retains_profile_and_fails(self):
+        self.process.terminate.side_effect = OSError(errno.EPERM, "private-process-detail")
+        error = self.run_fault()
+        self.assertEqual(error.errno, errno.EPERM)
+        self.assertTrue(self.profile.is_dir())
+        profile = next(x for x in self.result["cleanup"]["steps"] if x["stage"] == "profile-remove")
+        self.assertEqual(profile["result"], "skipped")
+        self.assertEqual(self.result["cleanup"]["result"], "fail")
+        self.server.server_close.assert_called_once()
+
+    def test_observation_error_remains_authoritative_when_cleanup_also_fails(self):
+        self.page.goto.side_effect = ValueError("fixed-observation-failure")
+        self.browser.close.side_effect = OSError(errno.EBADF, "private-close-detail")
+        error = self.run_fault()
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(str(error), "fixed-observation-failure")
+        self.assertEqual(self.result["cleanup"]["result"], "fail")
+        self.server.server_close.assert_called_once()
+
+    def test_successful_cleanup_keeps_complete_and_reaps_before_profile_removal(self):
+        self.assertIsNone(self.run_fault())
+        self.assertEqual(self.result["stage"], "complete")
+        self.assertEqual(self.result["cleanup"]["result"], "pass")
+        self.assertTrue(self.result["cleanup"]["launchFilesClosed"])
+        self.assertEqual(self.result["cleanup"]["browserProcess"]["exitCode"], 0)
+        self.assertFalse(self.profile.exists())
+
+    def test_exited_process_is_reaped_without_sending_signals(self):
+        self.process.poll.return_value = 0
+        cleanup = {}
+        driver.stop_browser_process(self.process, cleanup)
+        self.process.terminate.assert_not_called()
+        self.process.kill.assert_not_called()
+        self.process.wait.assert_called_once_with(timeout=5)
+        self.assertEqual(cleanup["browserProcess"]["exitCode"], 0)
+
+    def test_termination_timeout_escalates_only_to_owned_process_and_reaps(self):
+        self.process.wait.side_effect = [driver.subprocess.TimeoutExpired("test-only", 5), -9]
+        cleanup = {}
+        driver.stop_browser_process(self.process, cleanup)
+        self.process.terminate.assert_called_once()
+        self.process.kill.assert_called_once()
+        self.assertEqual(self.process.wait.call_args_list, [unittest.mock.call(timeout=5), unittest.mock.call(timeout=5)])
+        self.assertEqual(cleanup["browserProcess"], {"terminateSent": True, "killSent": True, "exitCode": -9})
+
+    def test_main_saves_passed_a2_but_returns_failure_with_safe_error_code(self):
+        def fail_cleanup(args, manifest, contents, result):
+            result.update(stage="complete", a2={"result": "pass"}, cleanup={"result": "fail"})
+            raise OSError(errno.ENOTEMPTY, "private-message", "/private/profile/name")
+
+        output = self.args.output_dir / "result-run"
+        argv = ["driver", "--build-dir", "not-used", "--output-dir", str(output),
+                "--browser-path", sys.executable, "--expected-source-sha256", "a" * 64,
+                "--expected-source-head", "b" * 40]
+        with patch.object(sys, "argv", argv), patch.object(driver.importlib.metadata, "version", return_value="test-only"), \
+                patch.object(driver.subprocess, "run", return_value=types.SimpleNamespace(returncode=0, stdout="test browser")), \
+                patch.object(driver, "load_artifact", return_value=(self.manifest, {}, {})), \
+                patch.object(driver, "run_browser", side_effect=fail_cleanup):
+            self.assertEqual(driver.main(), 1)
+        saved = json.loads((output / "result.json").read_text())
+        self.assertEqual(saved["result"], "fail")
+        self.assertEqual(saved["a2"]["result"], "pass")
+        self.assertEqual(saved["errorDetails"]["errno"], errno.ENOTEMPTY)
+        self.assertEqual(saved["errorDetails"]["code"], "ENOTEMPTY")
+        self.assertNotIn("private-message", json.dumps(saved))
+        self.assertNotIn("/private/profile/name", json.dumps(saved))
 
 
 if __name__ == "__main__":
