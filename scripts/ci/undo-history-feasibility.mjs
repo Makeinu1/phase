@@ -7,7 +7,8 @@ import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
-const [directoryArg, fixtureArg, outputArg, campaign] = process.argv.slice(2);
+const [directoryArg, fixtureArg, outputArg, campaign, historyCountArg] = process.argv.slice(2);
+const historyTargetCount = Number(historyCountArg ?? 1000);
 const output = path.resolve(outputArg);
 mkdirSync(output, { recursive: true });
 const sourceSha = 'e10955dc5977f1ba7c65cb1518cb8f4b1679fe92';
@@ -19,7 +20,7 @@ const observedInteractionNamespaces = new Set();
 const sha = raw => createHash('sha256').update(raw).digest('hex');
 const check = (value, code) => { if (!value) { failedCheck = code; throw Error(code); } };
 const receipt = (name, value) => {
-  const item = { sourceSha, campaign, ...value };
+  const item = { sourceSha, campaign, ...(campaign === 'history' ? { historyTargetCount } : {}), ...value };
   // Synchronous writes preserve completed samples if the external watchdog stops us.
   writeFileSync(path.join(output, name + '.json'), JSON.stringify(item, null, 2) + '\n', { flag: 'wx' });
   console.log(JSON.stringify(item));
@@ -369,6 +370,7 @@ function distribution(values) {
   return { min: sorted[0], p50: sorted[Math.floor((sorted.length - 1) * .5)], p95: sorted[Math.floor((sorted.length - 1) * .95)], max: sorted.at(-1) };
 }
 function history() {
+  const preparationStart = performance.now();
   init([...copies(12, 'Forest'), ...copies(12, 'Island'), ...copies(8, 'Seeker of Skybreak'), ...copies(8, 'Wake Thrasher')], copies(40, 'Island'));
   spellReady(0, 'Seeker of Skybreak', 3); castNamed(0, 'Seeker of Skybreak'); resolveAll();
   spellReady(0, 'Wake Thrasher', 3); castNamed(0, 'Wake Thrasher'); resolveAll();
@@ -376,54 +378,96 @@ function history() {
   const wake = state().battlefield.find(id => state().objects[id].name === 'Wake Thrasher');
   const activation = () => legal(0).find(a => a.type === 'ActivateAbility' && a.data.source_id === seeker);
   seek(s => s.waiting_for.type === 'Priority' && s.waiting_for.data.player === 0 && s.stack.length === 0 && activation(), { landGoal: 3 });
+  const canonicalInitialPreSha256 = sha(JSON.stringify(canonical(rawState())));
   global.gc(); const baseline = memory();
+  const preparationMs = performance.now() - preparationStart;
+  const measurementMethod = 'independent fresh game for requested count; restore probes only after this count; unlike75b5 no intermediate50 probe in200/1000 progression';
+  receipt('preparation', { pass: true, preparationMs, actualSetupActionCount: stepCount,
+    canonicalInitialPreSha256, initialHashScope: 'complete canonical trusted PRE, original four interaction carriers excluded; no private values disclosed',
+    measurementMethod, baselineMemory: baseline,
+    timingScope: 'preparation includes real initialization/setup actions, starting-state hash and baseline GC; excludes prior input validation/WASM initialization' });
   const retained = [], hashes = new Set(), captures = [], sizes = [];
   const numericSamples = path.join(output, 'capture-samples.jsonl');
   check(!existsSync(numericSamples), 'do-not-overwrite-or-retry-campaign');
   let totalBytes = 0, activationCount = 0, untapCount = 0, triggers = 0;
-  for (let n = 1; n <= 1000; n++) {
+  const totals = { preRootLegalValidationMs: 0, snapshotExportMs: 0, snapshotHashAndObservationMs: 0,
+    normalProgressionAndValidationMs: 0, bookkeepingAndJournalMs: 0 };
+  const captureLoopStart = performance.now();
+  for (let n = 1; n <= historyTargetCount; n++) {
     stage = 'actual-history-' + n;
+    const legalStart = performance.now();
     check(activation(), 'real-reusable-ability-legal');
-    const start = performance.now(), raw = rawState(); captures.push(performance.now() - start);
+    const preRootLegalValidationMs = performance.now() - legalStart;
+    const start = performance.now(), raw = rawState();
+    const snapshotExportMs = performance.now() - start;
+    const observationStart = performance.now();
+    captures.push(snapshotExportMs);
     const bytes = Buffer.byteLength(raw); totalBytes += bytes; sizes.push(bytes);
     const digest = sha(JSON.stringify(canonical(raw))); check(!hashes.has(digest), 'independently-distinct-real-pre-state'); hashes.add(digest);
     const preEffects = state().transient_continuous_effects.length;
+    const snapshotHashAndObservationMs = performance.now() - observationStart;
+    const progressionStart = performance.now();
     const events = [...submit(0, activation()), ...finishDeclaration({ target: seeker }), ...resolveAll()];
     check(events.some(e => e.type === 'AbilityActivated'), 'real-activation-event'); activationCount++;
     const untaps = events.filter(e => e.type === 'PermanentUntapped' && e.data.object_id === seeker).length;
     check(untaps > 0 && !state().objects[seeker].tapped, 'actual-self-untap'); untapCount += untaps;
     const triggered = events.filter(e => e.type === 'EffectResolved' && e.data.source_id === wake && ['Pump', 'PumpSelf'].includes(e.data.kind)).length;
     check(triggered > 0 && state().transient_continuous_effects.length > preEffects, 'actual-wake-trigger-growth'); triggers += triggered;
+    const normalProgressionAndValidationMs = performance.now() - progressionStart;
+    totals.preRootLegalValidationMs += preRootLegalValidationMs;
+    totals.snapshotExportMs += snapshotExportMs;
+    totals.snapshotHashAndObservationMs += snapshotHashAndObservationMs;
+    totals.normalProgressionAndValidationMs += normalProgressionAndValidationMs;
+    const bookkeepingStart = performance.now();
     retained.push(raw);
-    appendFileSync(numericSamples, JSON.stringify({ n, snapshotUtf8Bytes: bytes, captureMs: captures.at(-1), completedRealRoot: true }) + '\n');
-    if ([50, 200, 1000].includes(n)) {
+    appendFileSync(numericSamples, JSON.stringify({ n, snapshotUtf8Bytes: bytes, captureMs: snapshotExportMs, completedRealRoot: true,
+      phases: { preRootLegalValidationMs, snapshotExportMs, snapshotHashAndObservationMs, normalProgressionAndValidationMs } }) + '\n');
+    totals.bookkeepingAndJournalMs += performance.now() - bookkeepingStart;
+    if (n % 10 === 0 || n === historyTargetCount) receipt('progress-' + n, { completedRealRoots: n, cumulativeUtf8Bytes: totalBytes,
+      phaseTotals: { ...totals }, captureLoopElapsedMs: performance.now() - captureLoopStart,
+      timingScope: 'nonoverlapping measured phases; loop elapsed also includes receipt and miscellaneous harness overhead' });
+    if (n === historyTargetCount) {
       global.gc(); const retainedMemory = memory();
       receipt('milestone-' + n, { pass: true, measurementPointsNotCaps: true, realRoots: activationCount, actualUntaps: untapCount, actualWakeTriggerEffectResolutions: triggers, distinctCanonicalPreSnapshots: hashes.size,
         cumulativeUtf8Bytes: totalBytes, snapshotBytes: distribution(sizes), captureMs: distribution(captures), baselineMemory: baseline, retainedMemory,
+        preparationMs, capturePhaseTotals: { ...totals }, captureLoopElapsedMs: performance.now() - captureLoopStart, measurementMethod,
         memoryScope: 'whole Node process: growing engine Wake effects plus retained snapshot strings and measurement/runtime allocations; not isolated history-only RSS' });
-      const current = rawState(), restoreSamples = [];
+      const suiteStart = performance.now(), current = rawState(), restoreSamples = [];
       for (const position of [0, Math.floor((n - 1) / 2), n - 1]) {
+        const probeStart = performance.now();
         const elapsed = restore(retained[position]);
+        const restoreProbeMs = performance.now() - probeStart;
         const continuationStart = performance.now();
         const continued = [...submit(0, activation()), ...finishDeclaration({ target: seeker }), ...resolveAll()];
         check(continued.some(e => e.type === 'AbilityActivated'), 'restored-real-history-legal-continuation');
-        restoreSamples.push({ position, restoreMs: elapsed, continuationMs: performance.now() - continuationStart });
+        const continuationMs = performance.now() - continuationStart;
+        const reinstallStart = performance.now();
         restore(current); // Authentic diagnostic reinstall, not a product Redo/history point.
+        restoreSamples.push({ position, restoreMs: elapsed, restoreProbeMs, continuationMs,
+          currentReinstallProbeMs: performance.now() - reinstallStart });
       }
       receipt('restore-' + n, { pass: true, historyLength: n, restoreSamples, diagnosticCurrentReinstalls: 3,
+        restoreSuiteElapsedMs: performance.now() - suiteStart,
+        timingScope: 'restoreMs is one engine install; probe includes checked installs/fresh-vs-normal control; suite includes current export, three probes/continuations/current reinstalls and validation receipts',
         interactionCarrierFieldsExcluded: authorityFields, privateEpochRelation: 'exact saved u64 +1 modulo, minimum1; all remaining trusted fields exact',
         authorityChecks: 'every actual install, including controls: new never-reused namespace and real stale-capability rejection' });
     }
   }
+  const releaseStart = performance.now();
   retained.length = 0; hashes.clear(); global.gc();
-  receipt('history', { pass: true, workload: 'finite legal growing Seeker/Wake ability-loop stress; not ordinary-game frequency', realRoots: activationCount, afterHistoryReleaseMemory: memory(), releaseScope: 'paired whole-process observation; live game Wake effects remain, no pure history-only RSS attribution', ancestorTargetTruncationAndStaleTargetRefusal: 'NOT RUN: no product history-target controller', normalGameFullDb: 'NOT RUN', appUi: 'NOT RUN', twoSeatSync: 'NOT RUN', productPruningBudget: 'NOT CHOSEN' });
+  receipt('history', { pass: true, workload: 'finite legal growing Seeker/Wake ability-loop stress; not ordinary-game frequency', realRoots: activationCount,
+    preparationMs, capturePhaseTotals: { ...totals }, historyElapsedMs: performance.now() - preparationStart,
+    releaseMs: performance.now() - releaseStart, measurementMethod,
+    afterHistoryReleaseMemory: memory(), releaseScope: 'paired whole-process observation; live game Wake effects remain, no pure history-only RSS attribution', ancestorTargetTruncationAndStaleTargetRefusal: 'NOT RUN: no product history-target controller', normalGameFullDb: 'NOT RUN', appUi: 'NOT RUN', twoSeatSync: 'NOT RUN', productPruningBudget: 'NOT CHOSEN' });
 }
 
 try {
   check(!isDeepStrictEqual(lossless('{"x":1}'), lossless('{"x":"@number:1"}')), 'comparator-preserves-number-string-type');
   check(!isDeepStrictEqual(lossless('{"x":18446744073709551614}'), lossless('{"x":18446744073709551615}')), 'comparator-preserves-u64-token');
   check(['payment', 'multistack', 'ability-response', 'rng', 'history'].includes(campaign), 'fixed-campaign');
+  check(campaign !== 'history' || [50, 200, 1000].includes(historyTargetCount), 'fixed-independent-history-measurement-count');
   check(typeof global.gc === 'function', 'expose-gc-required');
+  const inputStart = performance.now();
   const directory = path.resolve(directoryArg), fixture = path.resolve(fixtureArg);
   const wasm = readFileSync(path.join(directory, 'engine_wasm_bg.wasm'));
   check(wasm.length === 295869347 && sha(wasm) === '1861c7d90af448a1c98d17bcd42e9dc6ad41f317a05afe2ec1cc13e4de2e450f', 'exact-e109-wasm-binary');
@@ -433,7 +477,8 @@ try {
   engine = await import(pathToFileURL(path.join(directory, 'engine_wasm.js')));
   wasmModule = await engine.default({ module_or_path: await WebAssembly.compile(wasm) });
   check(engine.ping() === 'phase-rs engine ready' && engine.load_card_database(fixtureRaw) === 9, 'real-wasm-and-fixture-compatible');
-  receipt('inputs', { pass: true, binaryProfile: 'unoptimized tool WASM; not release-device latency', fixtureCards: 9, node: process.version, memory: memory() });
+  receipt('inputs', { pass: true, inputValidationAndWasmInitMs: performance.now() - inputStart,
+    binaryProfile: 'unoptimized tool WASM; not release-device latency', fixtureCards: 9, node: process.version, memory: memory() });
   stage = campaign;
   ({ payment, multistack, 'ability-response': abilityResponse, rng, history })[campaign]();
 } catch {
