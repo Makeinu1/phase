@@ -359,3 +359,76 @@ jobs:
           path: single-host-ui-evidence
           if-no-files-found: warn
           retention-days: 7
+
+  two-seat-ui:
+    # Full App, two real contexts, real loopback PeerJS/native RTC. Independent
+    # from RTC capability, native, WASM and single-host-negative job outcomes.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 03b13eccaa6823ed41a0832044c33fb1821187e9
+          path: frontend
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Verify the same compiled WASM input without building an engine
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py pair-wasm-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/pair-wasm-payload" "$GITHUB_WORKSPACE/pair-reused-inputs/wasm.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/pair-wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+      - name: Install pinned frontend dependencies and an ephemeral official loopback PeerServer
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          test "$(git -C ../frontend rev-parse HEAD)" = 03b13eccaa6823ed41a0832044c33fb1821187e9
+          python3 ../control/scripts/ci/undo-f-guard.py pair-client-dependencies \
+            pnpm --dir ../frontend/client install --frozen-lockfile
+          mkdir "$RUNNER_TEMP/pair-peer-server"
+          printf '%s\n' '{"name":"undo-f-loopback-signaling","private":true}' > "$RUNNER_TEMP/pair-peer-server/package.json"
+          python3 ../control/scripts/ci/undo-f-guard.py pair-signaling-dependency \
+            npm --prefix "$RUNNER_TEMP/pair-peer-server" install --save-exact --ignore-scripts --no-audit --no-fund peer@1.0.2
+      - name: Real two-seat full App host cast, pointer Undo, exact ACK barrier and next legal cast
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py two-seat-ui \
+            node ../control/scripts/ci/undo-f-two-seat-ui.mjs \
+            "$GITHUB_WORKSPACE/frontend/client" "$GITHUB_WORKSPACE/pair-wasm-payload" \
+            crates/engine-wasm/src/fixtures/host-precast-card-data.json \
+            "$RUNNER_TEMP/pair-peer-server" "$F_EVIDENCE"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-two-seat-ui-evidence
+          path: two-seat-ui-evidence
+          if-no-files-found: warn
+          retention-days: 7

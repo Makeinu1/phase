@@ -1,0 +1,242 @@
+// One bounded full-App host-cast case. No real-time retry or fake guest/ACK.
+import assert from "node:assert/strict";
+import { spawn, execFileSync, spawnSync } from "node:child_process";
+import { copyFile, readFile, writeFile, mkdir, mkdtemp } from "node:fs/promises";
+import path from "node:path";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { setTimeout as pause } from "node:timers/promises";
+
+const [client, wasm, fixture, serverPackages, evidence] = process.argv.slice(2).map(x => path.resolve(x));
+const frontendSha = "03b13eccaa6823ed41a0832044c33fb1821187e9";
+const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
+const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+const git = (...args) => execFileSync("git", ["-C", client, ...args], { encoding: "utf8" }).trim();
+await mkdir(evidence, { recursive: true });
+const result = { frontendSha, engineSha, workflowSha: process.env.GITHUB_SHA,
+  scope: "real full App + isolated contexts + loopback PeerJS/native RTC; one host cast; pointer Undo",
+  guestCast: "NOT RUN", safari: "NOT RUN", memoryReclamation: "NOT RUN" };
+let stage = "verify-inputs", category = "setup";
+let vite, chrome, server, socket;
+const pages = {};
+let viteLog = "", chromeErr = "";
+let serial = 0;
+const pending = new Map();
+const cdp = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+  const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Error("CDP timeout")); }, 15000);
+  pending.set(id, { resolve, reject, timer });
+  socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+});
+async function stop(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  for (let i = 0; i < 50 && child.exitCode === null && child.signalCode === null; i++) await pause(100);
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+}
+try {
+  assert(git("rev-parse", "HEAD") === frontendSha, "frontend pin differs"); git("diff", "--exit-code");
+  const raw = await readFile(path.join(wasm, "manifest.json")), manifest = JSON.parse(raw);
+  assert(hash(raw) === "f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659" && manifest.source_sha === engineSha, "engine manifest differs");
+  assert(hash(await readFile(path.join(client, "pnpm-lock.yaml"))) === manifest.input_sha256["client/pnpm-lock.yaml"], "frontend lock differs");
+  result.runtimeHashes = {};
+  for (const name of ["engine_wasm.js", "engine_wasm_bg.wasm"]) {
+    const digest = hash(await readFile(path.join(wasm, name))); assert(digest === manifest.files[name].sha256, "runtime file differs");
+    result.runtimeHashes[name] = digest; await copyFile(path.join(wasm, name), path.join(client, "src/wasm", name));
+  }
+  const harness = path.join(path.dirname(fileURLToPath(import.meta.url)), "undo-f-two-seat-bootstrap.ts");
+  result.harnessSha256 = hash(await readFile(harness)); result.fixtureSha256 = hash(await readFile(fixture));
+  assert(result.fixtureSha256 === "4e3ca5348602f8f7ea762a27c36cfade8ed6fade547eefa279714dfd166cea66", "official fixture pin differs");
+  await copyFile(harness, path.join(client, "src/qa-two-seat.ts"));
+  await copyFile(fixture, path.join(client, "public/qa-host-card-data.json"));
+  await writeFile(path.join(client, "vite.two-seat.config.ts"), `import base from './vite.config';import {defineConfig} from 'vite';
+export default defineConfig(async env=>{const c=typeof base==='function'?await base(env):base;return {...c,
+optimizeDeps:{...c.optimizeDeps,entries:[]},plugins:[...c.plugins,{name:'ci-app-bootstrap',transformIndexHtml(html){return html.replace('/src/main.tsx','/src/qa-two-seat.ts');}}]};});`);
+  const lock = JSON.parse(await readFile(path.join(serverPackages, "package-lock.json")));
+  const pkg = lock.packages["node_modules/peer"];
+  assert(pkg.version === "1.0.2" && pkg.integrity === "sha512-ZObVEhAaoskd3KuSxr5DJLM8QuqQW4w3i0MqrI8H7Bzz8DjRC3DjUg2XtQQGfdc36+8Xk+wIPT/tL5wE+KnIqg==", "PeerServer package pin differs");
+  result.peerServer = { version: pkg.version, integrity: pkg.integrity, lockSha256: hash(await readFile(path.join(serverPackages, "package-lock.json"))), address: "127.0.0.1:9000" };
+  await writeFile(path.join(serverPackages, "server.cjs"), `const {PeerServer}=require('peer');
+PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=>console.log('loopback-ready'));`);
+  let serverReady = false;
+  server = spawn(process.execPath, [path.join(serverPackages, "server.cjs")], { stdio: ["ignore", "pipe", "ignore"] });
+  server.stdout.on("data", b => { if (String(b).includes("loopback-ready")) serverReady = true; });
+  for (let i = 0; i < 100 && !serverReady && server.exitCode === null; i++) await pause(100);
+  assert(serverReady, "loopback signaling server startup failed");
+  stage = "vite-start";
+  vite = spawn(process.execPath, [path.join(client, "node_modules/vite/bin/vite.js"), "--config", "vite.two-seat.config.ts", "--host", "127.0.0.1", "--port", "5188", "--strictPort"], {
+    cwd: client, env: { ...process.env, VITE_PHASE_SANDBOX: "1", CARD_DATA_URL: "/qa-host-card-data.json", TELEMETRY_URL: "", SUPABASE_URL: "", SUPABASE_ANON_KEY: "",
+      OFFICIAL_MULTIPLAYER_SERVER_URL: "ws://127.0.0.1:9/ws", DEFAULT_MULTIPLAYER_SERVER_URL: "ws://127.0.0.1:9/ws", TURN_CREDENTIALS_URL: "http://127.0.0.1:9/turn-credentials" }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  for (const stream of [vite.stdout, vite.stderr]) stream.on("data", b => { viteLog = (viteLog + b).slice(-12000); });
+  let ready = false;
+  for (let i = 0; i < 300 && !ready && vite.exitCode === null; i++) {
+    try { ready = (await fetch("http://127.0.0.1:5188/", { signal: AbortSignal.timeout(1000) })).ok; } catch {}
+    if (!ready) await pause(100);
+  }
+  assert(ready, "Vite startup failed");
+  stage = "chromium-start";
+  const executable = "/usr/bin/google-chrome";
+  result.browserVersion = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 10000 }).stdout?.trim();
+  const profile = await mkdtemp(path.join(process.env.RUNNER_TEMP, "undo-f-pair-chrome-"));
+  chrome = spawn(executable, ["--headless", "--disable-gpu", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--no-first-run", "--no-default-browser-check", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+  chrome.stderr.on("data", b => { chromeErr = (chromeErr + b).slice(-12000); });
+  let endpoint;
+  for (let i = 0; i < 100 && !endpoint && chrome.exitCode === null; i++) {
+    endpoint = chromeErr.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/\S+)/)?.[1];
+    if (!endpoint) await pause(100);
+  }
+  assert(endpoint, "standard Chromium CDP unavailable");
+  socket = new WebSocket(endpoint);
+  socket.addEventListener("message", ({ data }) => {
+    const m = JSON.parse(data), p = pending.get(m.id); if (!p) return;
+    pending.delete(m.id); clearTimeout(p.timer);
+    if (m.error) p.reject(Error("CDP command failed")); else p.resolve(m.result);
+  });
+  await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
+  for (const role of ["host", "guest"]) {
+    const context = await cdp("Target.createBrowserContext");
+    const target = await cdp("Target.createTarget", { url: "about:blank", browserContextId: context.browserContextId });
+    const { sessionId } = await cdp("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+    await cdp("Page.enable", {}, sessionId); await cdp("Network.enable", {}, sessionId);
+    // Hermetic app HTTP resource policy. Actual PeerJS signaling uses loopback.
+    await cdp("Network.setBlockedURLs", { urls: ["https://*", "wss://*"] }, sessionId);
+    await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, sessionId);
+    await cdp("Page.addScriptToEvaluateOnNewDocument", { source: `sessionStorage.setItem('qa-seat',${JSON.stringify(role)});` }, sessionId);
+    const evaluate = async expression => {
+      const a = await cdp("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+      assert(!a.exceptionDetails, "app operation failed"); return a.result.value;
+    };
+    const wait = async (expression, seconds = 30) => {
+      for (let i = 0; i < seconds * 10; i++) { if (await evaluate(expression)) return; await pause(100); }
+      throw Object.assign(Error("app stage deadline"), { qaDeadline: true });
+    };
+    const point = async (x, y, double = false) => {
+      for (const clickCount of double ? [1, 2] : [1]) {
+        await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount }, sessionId);
+        await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount }, sessionId);
+      }
+    };
+    const click = async expression => {
+      const r = await evaluate(`(()=>{const n=${expression};if(!n||n.disabled)return null;n.scrollIntoView({block:'center'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+      assert(r, "app control unavailable"); await point(r.x, r.y);
+    };
+    const button = text => `[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)})`;
+    const cropControl = async (expression, name) => {
+      const clip = await evaluate(`(()=>{const n=${expression};if(!n)return null;const r=n.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,scale:1};})()`);
+      assert(clip && clip.width > 0 && clip.height > 0, "public control crop unavailable");
+      const s = await cdp("Page.captureScreenshot", { format: "png", clip }, sessionId);
+      await writeFile(path.join(evidence, name), Buffer.from(s.data, "base64"));
+    };
+    pages[role] = { evaluate, wait, click, point, button, cropControl, sessionId };
+    await cdp("Page.navigate", { url: "http://127.0.0.1:5188/multiplayer" }, sessionId);
+  }
+  const { host, guest } = pages;
+  stage = "full-app-consent";
+  for (const page of [host, guest]) {
+    await page.wait("window.__twoSeatQa && [...document.querySelectorAll('input[type=checkbox]')].some(n=>n.closest('label')?.textContent.includes('I agree that the host'))", 90);
+    const consent = "[...document.querySelectorAll('input[type=checkbox]')].find(n=>n.closest('label')?.textContent.includes('I agree that the host'))";
+    assert(await page.evaluate(`!(${consent}).checked && !window.__twoSeatQa.status().agreed`), "consent not initially off");
+    await page.click(consent); await page.wait("window.__twoSeatQa.status().agreed===true");
+  }
+  result.bothRealConsentChecked = true;
+  stage = "host-app-setup";
+  await host.click(host.button("Host Game"));
+  await host.wait("document.querySelector('button[aria-label=Format]')");
+  await host.click("document.querySelector('button[aria-label=Format]')");
+  await host.wait("[...document.querySelectorAll('[role=option]')].some(n=>n.textContent.includes('Limited'))");
+  await host.click("[...document.querySelectorAll('[role=option]')].find(n=>n.textContent.includes('Limited'))");
+  await host.click(host.button("You host (P2P)"));
+  await host.wait(`(()=>{const b=${host.button("Host Game")};return b&&!b.disabled;})()`, 90);
+  await host.click(host.button("Host Game"));
+  await host.wait(`Boolean(${host.button("Continue without lobby")})`);
+  await host.click(host.button("Continue without lobby"));
+  category = "communication"; stage = "loopback-signaling";
+  await host.wait("window.__twoSeatQa.status().signalingOpened && window.__twoSeatQa.roomCode()", 45);
+  const code = await host.evaluate("window.__twoSeatQa.roomCode()"); assert(/^[A-Z2-9]{5}$/.test(code), "actual direct room code unavailable");
+  stage = "guest-app-join";
+  await guest.click("document.querySelector('input[placeholder=" + JSON.stringify("Enter code or CODE@IP:PORT") + "]')");
+  await cdp("Input.insertText", { text: code }, guest.sessionId);
+  await guest.click(guest.button("Join"));
+  // Auto-start is an existing host option. If off, use the actual host control.
+  if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) {
+    const start = host.button("Start Game");
+    await host.wait(`window.__twoSeatQa.status().ready || Boolean(${start})`);
+    if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) await host.click(start);
+  }
+  await host.wait("window.__twoSeatQa.status().ready", 90);
+  await guest.wait("window.__twoSeatQa.status().ready", 90);
+  for (const page of [host, guest]) {
+    await page.wait("window.__twoSeatQa.status().route==='game' && window.__twoSeatQa.status().nativeChannels");
+    const control = "[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')==='Full Control Off')";
+    await page.wait(`Boolean(${control})`);
+    await page.click(control);
+    await page.wait("window.__twoSeatQa.status().fullControl && window.__twoSeatQa.status().fullControlApplied");
+    assert(!(await page.evaluate("window.__twoSeatQa.status().agreed")), "consent was not consumed");
+  }
+  assert((await host.evaluate("window.__twoSeatQa.status().seat")) === 0 && (await guest.evaluate("window.__twoSeatQa.status().seat")) === 1, "real seat assignment mismatch");
+  result.realTwoSeatAppConnected = true;
+  category = "setup"; stage = "ordinary-app-actions";
+  let reached = false, steps = 0;
+  for (; steps < 500; steps++) {
+    const h = await host.evaluate("window.__twoSeatQa.step()");
+    if (h === "ready-to-cast") { reached = true; break; }
+    await guest.evaluate("window.__twoSeatQa.step()"); await pause(100);
+  }
+  assert(reached, "ordinary host cast not reached"); result.setupSteps = steps;
+  assert(await host.evaluate("window.__twoSeatQa.prepareCast()"), "pre-floating semantic mana setup failed");
+  category = "product"; stage = "host-pointer-cast";
+  const castPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(castPoint, "Bears hand card pointer unavailable");
+  await host.point(castPoint.x, castPoint.y, true);
+  await host.wait("window.__twoSeatQa.status().stackCount===1", 30);
+  assert(await host.evaluate("window.__twoSeatQa.recordCast()"), "real app cast snapshot missing");
+  await guest.wait("window.__twoSeatQa.status().stackCount===1");
+  const beforeRevision = await guest.evaluate("window.__twoSeatQa.status().lastStateRevision");
+  const undo = host.button("Sandbox pre-cast Undo");
+  await host.wait(`(()=>{const b=${undo};return b&&!b.disabled;})()`);
+  await host.cropControl(undo, "host-armed-undo-control.png");
+  stage = "host-pointer-undo";
+  await host.click(undo);
+  await host.wait("window.__twoSeatQa.restoreWitness()", 30);
+  await guest.wait("window.__twoSeatQa.status().stackCount===0 && !window.__twoSeatQa.status().blocked", 30);
+  const h = await host.evaluate("window.__twoSeatQa.status()"), g = await guest.evaluate("window.__twoSeatQa.status()");
+  assert(h.wire.filter(x => x.direction === "send" && x.type === "state_update").map(x => x.phase).join() === "adopted,released", "host phase ordering failed");
+  assert(g.wire.filter(x => x.direction === "send" && x.type === "state_ack").map(x => x.phase).join() === "adopted,released", "guest exact ACK ordering failed");
+  assert(h.wire.filter(x => x.direction === "receive" && x.type === "state_ack").map(x => x.phase).join() === "adopted,released"
+    && g.wire.filter(x => x.direction === "receive" && x.type === "state_update").map(x => x.phase).join() === "adopted,released", "both phase deliveries were not observed");
+  for (const phase of ["adopted", "released"]) {
+    const hs = h.wire.find(x => x.direction === "send" && x.phase === phase);
+    const hr = h.wire.find(x => x.direction === "receive" && x.phase === phase);
+    const gs = g.wire.find(x => x.direction === "send" && x.phase === phase);
+    const gr = g.wire.find(x => x.direction === "receive" && x.phase === phase);
+    assert(hs.revision > beforeRevision && [hr, gs, gr].every(x => x.revision === hs.revision), "exact state revision ACK failed");
+  }
+  assert([...h.wire, ...g.wire].every(x => x.exactTransaction) && h.wire.filter(x => x.direction === "send").every(x => x.blocked) && g.wire.filter(x => x.direction === "send").every(x => x.blocked), "phase identity/input lock failed");
+  assert(!h.blocked && !g.blocked && g.lastStateRevision > beforeRevision, "release/fresh P2P revision failed");
+  assert(await host.evaluate("window.__twoSeatQa.publicState()") === await guest.evaluate("window.__twoSeatQa.publicState()"), "public board differs after restore");
+  assert(g.privateProjectionChecks > 0 && g.privateProjectionOk && await guest.evaluate("window.__twoSeatQa.privacy()"), "guest projection privacy failed");
+  result.restore = { host: h, guest: g, beforeRevision, publicBoardEqual: true, guestRedaction: true };
+  await host.cropControl(undo, "host-restored-undo-control.png");
+  stage = "next-legal-pointer-cast";
+  const nextPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(nextPoint, "restored hand card pointer unavailable");
+  await host.point(nextPoint.x, nextPoint.y, true);
+  await host.wait("window.__twoSeatQa.status().stackCount===1"); await guest.wait("window.__twoSeatQa.status().stackCount===1");
+  result.nextLegalCast = true; result.pass = true; stage = "complete";
+  git("diff", "--exit-code");
+  await cdp("Browser.close").catch(() => {});
+} catch (cause) {
+  result.pass = false; result.failureCategory = category;
+  result.failure = cause instanceof assert.AssertionError ? cause.message : cause.qaDeadline ? "stage deadline" : "driver operation failed";
+  result.lastObservation = {};
+  for (const [role, page] of Object.entries(pages)) {
+    try { result.lastObservation[role] = await page.evaluate("window.__twoSeatQa?.status() ?? null"); } catch {}
+  }
+  // Never serialize raw page exceptions, frames, hands, library, keys or receipts.
+} finally {
+  result.stage = stage; for (const p of pending.values()) clearTimeout(p.timer);
+  socket?.close(); await stop(chrome); await stop(vite); await stop(server);
+  await writeFile(path.join(evidence, "two-seat-ui-result.json"), JSON.stringify(result, null, 2) + "\n");
+  await writeFile(path.join(evidence, "two-seat-vite.log"), viteLog);
+  await writeFile(path.join(evidence, "two-seat-chromium.stderr.log"), chromeErr);
+  console.log(JSON.stringify({ pass: result.pass, stage, category: result.failureCategory, failure: result.failure, frontendSha, engineSha }));
+}
+process.exitCode = result.pass ? 0 : 1;
