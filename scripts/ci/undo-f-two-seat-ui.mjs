@@ -66,6 +66,107 @@ const bounds=n=>{const r=n.getBoundingClientRect();return{x:r.x,y:r.y,width:r.wi
 const publicShape=(${publicNodeShape});const shape=n=>{const splitter=n.closest('[data-flex-splitter]')?.getAttribute('data-flex-splitter'),role=n.getAttribute('role');return{...publicShape(n),role:['separator','slider'].includes(role)?role:publicShape(n).role,bounds:bounds(n),pointerEvents:pointer(getComputedStyle(n).pointerEvents),railRoot:n===rail,withinRail:rail.contains(n),withinResizeHandle:Boolean(n.closest('[role="slider"][aria-label="Resize"]')),splitter:splitter==null?null:['top','bottom'].includes(splitter)?splitter:'other',editClasses:['z-[70]','z-[71]','z-[72]','cursor-grab','cursor-row-resize'].filter(c=>n.classList.contains(c))};};
 const top=document.elementFromPoint(x,y),hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return{...shape(n),ancestors};});
 return{point:{x,y},exactRootHit:top===rail,railContainsHit:rail.contains(top),inlinePointerEvents:pointer(rail.style.pointerEvents),computedPointerEvents:pointer(getComputedStyle(rail).pointerEvents),hits,geometry:{viewport:area.viewport,boardBounds:area.boardBounds,boardScroll:area.boardScroll,windowScroll:area.windowScroll,railBounds:area.railBounds,railCssPosition:area.railCssPosition,stackPanels:area.stackPanels}};})()`;
+// Read-only geometry on one CDP-held product node. No selector re-targeting,
+// DOM mutation, preference setter, synthetic event or game action.
+function widgetDragSnapshot(zone, point) {
+  const widget=this,board=widget.closest(".contain-paint"),header=zone==="stackPanel"?widget.querySelector(".h-9"):null;
+  const bounds=n=>{const r=n.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};};
+  const b=bounds(widget),view={width:innerWidth,height:innerHeight},boardBounds=board?bounds(board):null;
+  const inside=(x,y)=>x>=0&&y>=0&&x<view.width&&y<view.height&&boardBounds&&x>=boardBounds.x&&y>=boardBounds.y&&x<boardBounds.x+boardBounds.width&&y<boardBounds.y+boardBounds.height;
+  const plain=(x,y)=>{const h=document.elementFromPoint(x,y);return zone==="actionRail"?h===widget:
+    Boolean(h&&header?.contains(h)&&h.closest('[data-flex-zone]')===widget&&!h.closest('button,[role="slider"],[data-flex-splitter]'));};
+  const usable=(x,y)=>inside(x,y)&&inside(x+12,y+8)&&plain(x,y);
+  let origin=point??null;
+  if(!origin&&zone==="actionRail"){
+    const rects=[...widget.querySelectorAll('[data-mobile-action-left],[data-mobile-action-right]')].flatMap(n=>[...n.children]).map(bounds);
+    let checked=0;
+    search:for(let y=Math.max(0,b.y)+2;y<Math.min(view.height,b.y+b.height)&&checked<2000;y+=8)
+      for(let x=Math.max(0,b.x)+2;x<Math.min(view.width,b.x+b.width)&&checked<2000;x+=8){
+        checked++;
+        if(!rects.some(r=>x>=r.x&&x<=r.x+r.width&&y>=r.y&&y<=r.y+r.height)&&usable(x,y)){origin={x,y};break search;}
+      }
+  } else if(!origin&&header){
+    const r=bounds(header);
+    for(const [fx,fy] of [[.5,.5],[.5,.1],[.1,.5],[.9,.5],[.5,.9]]){
+      const x=r.x+r.width*fx,y=r.y+r.height*fy;if(usable(x,y)){origin={x,y};break;}
+    }
+  }
+  const c=getComputedStyle(widget),m=new DOMMatrixReadOnly(c.transform==="none"?undefined:c.transform);
+  return {connected:widget.isConnected,zoneMatches:widget.getAttribute("data-flex-zone")===zone,
+    pointerEvents:c.pointerEvents,bounds:b,origin,originHittable:Boolean(origin&&plain(origin.x,origin.y)),
+    gestureInBounds:Boolean(origin&&inside(origin.x,origin.y)&&inside(origin.x+12,origin.y+8)),
+    matrix:{a:m.a,b:m.b,c:m.c,d:m.d,x:m.e,y:m.f},boardBounds,
+    boardScroll:board?{top:board.scrollTop,left:board.scrollLeft}:null,windowScroll:{x:scrollX,y:scrollY}};
+}
+const nativeWidgetDrag = async (page,zone,key) => {
+  assert(["actionRail","stackPanel"].includes(zone),"unreviewed widget drag target");
+  const started=Date.now(),deadline=started+30000;
+  const witness=result[key]={zone,requestedDelta:{x:12,y:8},samples:[],sampleCount:0,pass:false};
+  const timeout=()=>Object.assign(Error("app widget drag deadline"),{qaDeadline:true});
+  const run=async operation=>{
+    const remaining=deadline-Date.now();if(remaining<=0)throw timeout();let timer;
+    try {const value=await Promise.race([operation(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(timeout()),Math.min(remaining,15000));})]);
+      if(Date.now()>=deadline)throw timeout();return value;
+    } finally {clearTimeout(timer);}
+  };
+  let objectId,point,pressed=false,released=false;
+  const read=async origin=>{
+    const answer=await run(()=>cdp("Runtime.callFunctionOn",{objectId,functionDeclaration:widgetDragSnapshot.toString(),
+      arguments:[{value:zone},{value:origin??null}],returnByValue:true},page.sessionId));
+    assert(!answer.exceptionDetails,"widget drag observation failed");const sample=answer.result.value;
+    witness.sampleCount++;witness.samples.push(sample);if(witness.samples.length>10)witness.samples.shift();return sample;
+  };
+  const frame=()=>run(()=>page.evaluate("new Promise(resolve=>requestAnimationFrame(resolve))"));
+  const sane=s=>s?.connected&&s.zoneMatches&&s.pointerEvents==="auto"&&s.gestureInBounds&&s.boardScroll?.top===0&&s.boardScroll.left===0&&s.windowScroll.x===0&&s.windowScroll.y===0
+    &&Object.values(s.bounds).every(Number.isFinite)&&Object.values(s.matrix).every(Number.isFinite)
+    &&Math.abs(s.matrix.a-1)<.01&&Math.abs(s.matrix.d-1)<.01&&Math.abs(s.matrix.b)<.01&&Math.abs(s.matrix.c)<.01;
+  const home=s=>sane(s)&&Math.abs(s.matrix.x)<.5&&Math.abs(s.matrix.y)<.5;
+  const settle=async (predicate,origin)=>{
+    let previous,stable=0;
+    for(let i=0;i<120;i++){
+      await frame();const sample=await read(origin),signature=JSON.stringify(sample);
+      stable=predicate(sample)?signature===previous?stable+1:1:0;previous=signature;
+      if(Date.now()>=deadline)throw timeout();
+      if(stable>=3)return sample;
+    }
+    throw Object.assign(Error("app widget drag geometry did not settle"),{qaDeadline:true});
+  };
+  try {
+    const held=await run(()=>cdp("Runtime.evaluate",{expression:"document.querySelector('[data-flex-zone=\""+zone+"\"]')",returnByValue:false},page.sessionId));
+    objectId=held.result.objectId;assert(!held.exceptionDetails&&objectId,"widget drag target missing");
+    const initial=await read();assert(home(initial)&&initial.origin&&initial.originHittable,"widget drag origin not at home or not hittable");
+    point=initial.origin;witness.origin=point;
+    await run(()=>cdp("Input.dispatchMouseEvent",{type:"mouseMoved",...point,button:"none",buttons:0},page.sessionId));
+    const before=await settle(s=>home(s)&&s.originHittable,point);witness.before=before;
+    // Exactly one press; two native moves cross the product pan threshold.
+    await run(()=>{pressed=true;result.actualDrag="ATTEMPTED";witness.pressAttempted=true;
+      return cdp("Input.dispatchMouseEvent",{type:"mousePressed",...point,button:"left",buttons:1,clickCount:1},page.sessionId);});
+    point={x:witness.origin.x+6,y:witness.origin.y+4};
+    await run(()=>cdp("Input.dispatchMouseEvent",{type:"mouseMoved",...point,button:"none",buttons:1},page.sessionId));
+    await frame();
+    point={x:witness.origin.x+12,y:witness.origin.y+8};
+    await run(()=>cdp("Input.dispatchMouseEvent",{type:"mouseMoved",...point,button:"none",buttons:1},page.sessionId));
+    const moved=await settle(s=>sane(s)&&Math.abs(s.bounds.x-before.bounds.x-12)<1.5&&Math.abs(s.bounds.y-before.bounds.y-8)<1.5
+      &&Math.abs(s.matrix.x-12)<1.5&&Math.abs(s.matrix.y-8)<1.5,witness.origin);
+    witness.heldMovement=moved;
+    // Observe real held movement before releasing. The 12/8 delta is below
+    // product SNAP_HOME=28, so the product then persists its normal custom home.
+    await run(()=>{released=true;
+      return cdp("Input.dispatchMouseEvent",{type:"mouseReleased",...point,button:"left",buttons:0,clickCount:1},page.sessionId);});
+    witness.releaseCompleted=true;
+    const after=await settle(s=>home(s)&&Math.abs(s.bounds.x-before.bounds.x)<1&&Math.abs(s.bounds.y-before.bounds.y)<1
+      &&Math.abs(s.bounds.width-before.bounds.width)<1&&Math.abs(s.bounds.height-before.bounds.height)<1,witness.origin);
+    if(Date.now()>=deadline)throw timeout();
+    witness.after=after;witness.snapHome=true;witness.pass=true;
+  } finally {
+    if(pressed&&!released){
+      released=true;witness.cleanupReleaseAttempted=true;
+      try {await cdp("Input.dispatchMouseEvent",{type:"mouseReleased",...point,button:"left",buttons:0,clickCount:1},page.sessionId);witness.cleanupReleaseCompleted=true;}catch{witness.cleanupReleaseCompleted=false;}
+    }
+    if(objectId){try{await cdp("Runtime.releaseObject",{objectId},page.sessionId);}catch{witness.objectReleaseFailed=true;}}
+    witness.elapsedMs=Date.now()-started;
+  }
+};
 const observeRail = async (page,width,height) => {
   const started=Date.now(),deadline=started+30000;
   const witness={viewport:{width,height},samples:[],sampleCount:0,stable:false};
@@ -648,7 +749,11 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   await cdp("Input.dispatchKeyEvent", {type:"keyUp",key:"L",code:"KeyL",modifiers:10,windowsVirtualKeyCode:76}, host.sessionId);
   await host.wait("document.querySelector('[data-flex-zone=actionRail]')?.style.pointerEvents==='auto'");
   result.railGapWitness.edit = await host.evaluate(railGapProbe(gap));
-  assert(await host.evaluate(`document.elementFromPoint(${gap.x},${gap.y})===document.querySelector('[data-flex-zone="actionRail"]')`), "layout edit mode cannot grab rail empty space");
+  stage = "layout-edit-native-rail-drag";
+  await nativeWidgetDrag(host,"actionRail","railActualDrag");
+  stage = "layout-edit-native-stack-header-drag";
+  await nativeWidgetDrag(host,"stackPanel","stackActualDrag");
+  assert(result.railActualDrag.pass && result.stackActualDrag.pass,"native widget drag or snap-home incomplete");
   const stackEditArea = await host.evaluate(railHitAreas);
   result.stackEditArea = stackEditArea;
   assert(stackEditArea.stackPanels.length===1 && stackEditArea.stackPanels.every(s=>s.pointerEvents === "auto" && s.headerSurface?.exposedPoint), "layout edit mode cannot reach stack drag surface");
@@ -659,7 +764,9 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
     const after=await page.evaluate("window.__twoSeatQa.status()");
     for (const key of ["localCommitSeq","lastStateRevision","stackCount"]) assert(Number.isFinite(after[key]) && after[key]===railStateBefore[role][key], "layout-only regression changed committed game state");
   }
-  result.actionRailGap = {...gap,playPassThrough:true,editModeWrapperHit:true,actualDrag:"NOT RUN"};
+  result.actualDrag = "PASS";
+  result.actionRailGap = {...gap,playPassThrough:true,editModeWrapperHit:result.railGapWitness.edit.exactRootHit,
+    railDragOrigin:result.railActualDrag.origin,stackDragOrigin:result.stackActualDrag.origin,actualDrag:"PASS"};
   result.stagesPassed.push("actual-responsive-rail-hit-areas-edit-mode");
   result.responsiveAcceptancePassed = true; stage = "complete";
   result.lifecycleTimeline = { host: await host.evaluate("window.__twoSeatQa.lifecycleSnapshot()"), guest: await guest.evaluate("window.__twoSeatQa.lifecycleSnapshot()") };
@@ -675,7 +782,7 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   result.driverFailureAtUnixMs=Date.now();
   result.failure = cause instanceof assert.AssertionError ? cause.message : cause.qaDeadline ? "stage deadline" : "driver operation failed";
   if (cause.qaCdpMethod) result.cdpFailure = {kind:cause.qaCdpTimeout?"timeout":"response-error",
-    method:["Runtime.evaluate","Input.dispatchMouseEvent","Input.dispatchKeyEvent","Page.navigate","Page.captureScreenshot","Page.enable","Page.addScriptToEvaluateOnNewDocument","Network.enable","Network.setBlockedURLs","Emulation.setDeviceMetricsOverride","Target.createBrowserContext","Target.createTarget","Target.attachToTarget","Browser.close"].includes(cause.qaCdpMethod)?cause.qaCdpMethod:"other",
+    method:["Runtime.evaluate","Runtime.callFunctionOn","Runtime.releaseObject","Input.dispatchMouseEvent","Input.dispatchKeyEvent","Page.navigate","Page.captureScreenshot","Page.enable","Page.addScriptToEvaluateOnNewDocument","Network.enable","Network.setBlockedURLs","Emulation.setDeviceMetricsOverride","Target.createBrowserContext","Target.createTarget","Target.attachToTarget","Browser.close"].includes(cause.qaCdpMethod)?cause.qaCdpMethod:"other",
     code:Number.isInteger(cause.qaCdpErrorCode)?cause.qaCdpErrorCode:null};
   result.lastObservation = {};
   result.lifecycleTimeline = {};
