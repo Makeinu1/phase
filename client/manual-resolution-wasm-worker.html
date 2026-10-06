@@ -15,7 +15,7 @@
       const completionPromise = new Promise((resolve) => { resolveCompletion = resolve; });
       let finished = false;
       const deadline = setTimeout(() => finish({
-        status: "fail", reason: "timeout", rows: [], pageUrl: location.href,
+        status: "fail", reason: "timeout", error: "page-deadline", rows: [],
       }), 120000);
       function finish(result) {
         if (finished) return;
@@ -26,14 +26,14 @@
         resolveCompletion(terminal);
       }
       window.manualWasmBootstrap = { completionPromise, finish };
-      addEventListener("error", (event) => finish({
-        status: "fail", reason: "uncaught-error", error: event.message,
-        rows: [], pageUrl: location.href,
-      }));
-      addEventListener("unhandledrejection", (event) => finish({
-        status: "fail", reason: "unhandled-rejection", error: String(event.reason),
-        rows: [], pageUrl: location.href,
-      }));
+      addEventListener("error", (event) => {
+        event.preventDefault();
+        finish({ status: "fail", reason: "uncaught-error", error: "page-error", rows: [] });
+      });
+      addEventListener("unhandledrejection", (event) => {
+        event.preventDefault();
+        finish({ status: "fail", reason: "unhandled-rejection", error: "page-rejection", rows: [] });
+      });
     </script>
     <script type="module" src="/src/adapter/__tests__/manual-resolution-wasm-worker.harness.ts"></script>
   </body>

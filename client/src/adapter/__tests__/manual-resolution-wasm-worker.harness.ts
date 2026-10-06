@@ -17,8 +17,23 @@ type Inputs = {
 };
 type Observation = { state: unknown; persistence: string | null; replay: string | null };
 type Invocation = { value?: unknown; error?: Error; response?: RecordValue };
-type Control = { name: string; status: "pass"; evidence: unknown };
-type Row = { name: string; status: "pending" | "pass" | "fail"; evidence: unknown; error?: string };
+// Full inputs, envelopes and resident observations are compared only in memory.
+// Evidence contains fixed case IDs, assertion booleans and public identity hashes.
+type ControlEvidence = {
+  initializationAccepted?: boolean; stateInstalled?: boolean; replayInstalled?: boolean;
+  defaultsMatched?: boolean; refusalClassMatched?: boolean; typedDiscriminatorsMatched?: boolean;
+  clientCodeMatched?: boolean; residentPreserved?: boolean; reachGuard?: string;
+};
+type Control = { name: string; status: "pass"; evidence: ControlEvidence };
+type ArtifactEvidence = {
+  wasmHash: string; servedGlueHash: string;
+  supplied: {
+    candidate_sha: string; baseline_sha: string; candidate_tree: string; baseline_tree: string;
+    glue_sha256: string;
+  };
+};
+type Evidence = Control[] | ArtifactEvidence | Record<string, boolean | number> | null;
+type Row = { name: string; status: "pending" | "pass" | "fail"; evidence: Evidence; error?: string };
 type Endpoint = {
   name: "wasm-shell" | "production-worker";
   reset: () => Promise<void>;
@@ -39,7 +54,6 @@ declare global {
 const rows: Row[] = [];
 const controls: Control[] = [];
 const params = new URLSearchParams(location.search);
-const startedAt = new Date().toISOString();
 const basicName = "Bootstrap Blank Basic";
 const basicDeck = (count = 40, bracketTier = "core") => ({
   main_deck: Array<string>(count).fill(basicName), bracket_tier: bracketTier,
@@ -66,12 +80,33 @@ const validLimited: Inputs = {
   matchConfig: { match_type: "Bo1", loop_detection: "Off" }, playerCount: 2, firstPlayer: 0,
 };
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
+type AssertionCode =
+  | "boundary-object" | "artifact-fetch" | "worker-error-type" | "observation-failure"
+  | "ordinary-init-rejected" | "ordinary-init-envelope" | "ordinary-init-events" | "worker-result"
+  | "ordinary-install" | "default-seed" | "default-player-count" | "default-format"
+  | "default-match-type" | "default-loop-detection" | "wasm-refusal-envelope" | "wasm-refusal-reasons"
+  | "wasm-refusal-reason-type" | "wasm-refusal-class" | "wasm-bracket-discriminator"
+  | "wasm-occupied-discriminator" | "wasm-refusal-classifier" | "worker-refusal" | "worker-refusal-class"
+  | "worker-bracket-discriminator" | "worker-occupied-discriminator" | "client-error-type" | "client-error-code"
+  | "refusal-resident-preservation" | "card-db-load" | "malformed-match-seed" | "malformed-match-type"
+  | "malformed-match-loop-detection" | "checkpoint-mode" | "limited-authority" | "served-wasm-identity"
+  | "served-glue-identity" | "baseline-source-identity" | "source-identity" | "glue-identity"
+  | "ordinary-decision" | "human-decision" | "issued-action" | "action-snapshot-change" | "action-recorded-once";
+
+class AssertionFailure extends Error {
+  constructor(readonly code: AssertionCode) { super(code); }
+}
+
+function check(condition: unknown, code: AssertionCode): asserts condition {
+  if (!condition) throw new AssertionFailure(code);
+}
+
+function failureCode(error: unknown): string {
+  return error instanceof AssertionFailure ? error.code : "boundary-failure";
 }
 
 function record(value: unknown): RecordValue {
-  check(value !== null && typeof value === "object", "Expected an object at the real boundary");
+  check(value !== null && typeof value === "object", "boundary-object");
   return value as RecordValue;
 }
 
@@ -85,12 +120,12 @@ function json(value: unknown): string {
 
 async function sha256(url: string): Promise<string> {
   const response = await fetch(url, { cache: "no-store" });
-  check(response.ok, `Artifact fetch failed: ${url} (${response.status})`);
+  check(response.ok, "artifact-fetch");
   const digest = await crypto.subtle.digest("SHA-256", await response.arrayBuffer());
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function runRow(name: string, body: () => Promise<unknown>): Promise<void> {
+async function runRow(name: string, body: () => Promise<Evidence>): Promise<void> {
   const row: Row = { name, status: "pending", evidence: null };
   rows.push(row);
   try {
@@ -98,13 +133,13 @@ async function runRow(name: string, body: () => Promise<unknown>): Promise<void>
     row.status = "pass";
   } catch (error) {
     row.status = "fail";
-    row.error = error instanceof Error ? error.message : String(error);
+    row.error = failureCode(error);
     if (name === "ordinary_initializer_preservation") row.evidence = controls;
     throw error;
   }
 }
 
-function addControl(endpoint: Endpoint, shell: Shell, name: string, evidence: unknown): void {
+function addControl(endpoint: Endpoint, shell: Shell, name: string, evidence: ControlEvidence): void {
   controls.push({ name: `${endpoint.name}.${shell}.${name}`, status: "pass", evidence });
 }
 
@@ -134,7 +169,7 @@ function workerEndpoint(client: EngineWorkerClient): Endpoint {
         );
         return { value, response: responses[responses.length - 1] };
       } catch (error) {
-        check(error instanceof Error, "Worker rejection must reconstruct an Error");
+        check(error instanceof Error, "worker-error-type");
         return { error, response: responses[responses.length - 1] };
       }
     },
@@ -145,7 +180,7 @@ function workerEndpoint(client: EngineWorkerClient): Endpoint {
         persistence = await client.exportState();
         state = await client.getState();
       } catch (error) {
-        check(error instanceof Error && error.message.includes("NOT_INITIALIZED:"), "Unexpected observation failure");
+        check(error instanceof Error && error.message.includes("NOT_INITIALIZED:"), "observation-failure");
         state = null;
         persistence = null;
       }
@@ -179,10 +214,10 @@ function wasmEndpoint(): Endpoint {
 }
 
 function assertSuccess(endpoint: Endpoint, outcome: Invocation): void {
-  check(!outcome.error, `Ordinary ${endpoint.name} initialization failed: ${outcome.error?.message}`);
-  check(classifyInitFailure(outcome.value) === null, `Ordinary shell returned an error: ${json(outcome.value)}`);
-  check(Array.isArray(record(outcome.value).events), "Successful ordinary init must return actual events");
-  if (endpoint.name === "production-worker") check(outcome.response?.type === "result", "Missing real Worker result");
+  check(!outcome.error, "ordinary-init-rejected");
+  check(classifyInitFailure(outcome.value) === null, "ordinary-init-envelope");
+  check(Array.isArray(record(outcome.value).events), "ordinary-init-events");
+  if (endpoint.name === "production-worker") check(outcome.response?.type === "result", "worker-result");
 }
 
 async function positive(endpoint: Endpoint, shell: Shell, name: string, input: Inputs): Promise<Observation> {
@@ -190,10 +225,11 @@ async function positive(endpoint: Endpoint, shell: Shell, name: string, input: I
   const outcome = await endpoint.invoke(shell, input);
   assertSuccess(endpoint, outcome);
   const observation = await endpoint.observe();
-  check(observation.persistence !== null && observation.replay !== null, "Successful init must install state and replay");
+  check(observation.persistence !== null && observation.replay !== null, "ordinary-install");
+  JSON.parse(observation.persistence);
+  JSON.parse(observation.replay);
   addControl(endpoint, shell, name, {
-    input, result: outcome.value, response: outcome.response,
-    state: observation.state, persistence: JSON.parse(observation.persistence), replay: JSON.parse(observation.replay),
+    initializationAccepted: true, stateInstalled: true, replayInstalled: true,
   });
   return observation;
 }
@@ -203,12 +239,12 @@ function assertDefaults(observation: Observation, format: "Standard" | "FreeForA
   const replay = record(JSON.parse(observation.replay ?? "null"));
   const header = record(replay.header);
   const match = record(header.match_config);
-  check(state.rng_seed === 42 && header.seed === 42, "Omitted seed must stay 42 in state and replay input");
-  check(state.players.length === count && header.player_count === count, `Expected ${count} installed seats`);
-  check(state.format_config?.format === format && record(header.format_config).format === format, `Wrong undeclared default: ${format}`);
-  check(state.match_config?.match_type === "Bo1" && match.match_type === "Bo1", "Null/undefined/malformed match config must fall back to Bo1");
+  check(state.rng_seed === 42 && header.seed === 42, "default-seed");
+  check(state.players.length === count && header.player_count === count, "default-player-count");
+  check(state.format_config?.format === format && record(header.format_config).format === format, "default-format");
+  check(state.match_config?.match_type === "Bo1" && match.match_type === "Bo1", "default-match-type");
   // Off is intentionally elided by the engine's existing serde contract.
-  check((state.loop_detection ?? "Off") === "Off" && (match.loop_detection ?? "Off") === "Off", "Default loop detection must stay Off");
+  check((state.loop_detection ?? "Off") === "Off" && (match.loop_detection ?? "Off") === "Off", "default-loop-detection");
 }
 
 async function refusal(
@@ -220,35 +256,31 @@ async function refusal(
   const outcome = await endpoint.invoke(shell, input);
   if (endpoint.name === "wasm-shell") {
     const envelope = record(outcome.value);
-    check(envelope.error === true, `${name} must return error:true from the actual WASM shell`);
-    check(Array.isArray(envelope.reasons) && envelope.reasons.length > 0, `${name} must supply reasons`);
-    check(envelope.reasons.every((item) => typeof item === "string"), "Refusal reasons must be strings");
-    check(reason.test(envelope.reasons.join("; ")), `${name} returned the wrong refusal class: ${json(envelope)}`);
-    check((envelope.cedh_bracket_violation === true) === (kind === "bracketViolation"), "cEDH typed discriminator was lost or spuriously set");
-    check((envelope.engine_occupied === true) === (kind === "engineOccupied"), "Occupied typed discriminator was lost or spuriously set");
-    check(classifyInitFailure(envelope)?.kind === kind, "Actual shell envelope was misclassified");
+    check(envelope.error === true, "wasm-refusal-envelope");
+    check(Array.isArray(envelope.reasons) && envelope.reasons.length > 0, "wasm-refusal-reasons");
+    check(envelope.reasons.every((item) => typeof item === "string"), "wasm-refusal-reason-type");
+    check(reason.test(envelope.reasons.join("; ")), "wasm-refusal-class");
+    check((envelope.cedh_bracket_violation === true) === (kind === "bracketViolation"), "wasm-bracket-discriminator");
+    check((envelope.engine_occupied === true) === (kind === "engineOccupied"), "wasm-occupied-discriminator");
+    check(classifyInitFailure(envelope)?.kind === kind, "wasm-refusal-classifier");
   } else {
-    check(outcome.error && outcome.response?.type === "error", `${name} must reject through the production Worker/client`);
+    check(outcome.error && outcome.response?.type === "error", "worker-refusal");
     const reasonsMessage = outcome.error.message.replace(/^Deck validation failed: /, "");
-    check(reason.test(reasonsMessage) || kind === "engineOccupied", `${name} returned the wrong reconstructed reason`);
-    check((outcome.response.bracketViolation === true) === (kind === "bracketViolation"), "Worker cEDH discriminator differs");
-    check((outcome.response.engineOccupied === true) === (kind === "engineOccupied"), "Worker occupied discriminator differs");
+    check(reason.test(reasonsMessage) || kind === "engineOccupied", "worker-refusal-class");
+    check((outcome.response.bracketViolation === true) === (kind === "bracketViolation"), "worker-bracket-discriminator");
+    check((outcome.response.engineOccupied === true) === (kind === "engineOccupied"), "worker-occupied-discriminator");
     if (kind === "bracketViolation" || kind === "engineOccupied") {
-      check(outcome.error instanceof AdapterError, "Typed Worker refusal must reconstruct AdapterError");
+      check(outcome.error instanceof AdapterError, "client-error-type");
       const expected = kind === "bracketViolation" ? AdapterErrorCode.BRACKET_VIOLATION : AdapterErrorCode.ENGINE_OCCUPIED;
-      check(outcome.error.code === expected, `Client must reconstruct ${expected}`);
+      check(outcome.error.code === expected, "client-error-code");
     }
   }
   const after = await endpoint.observe();
-  check(json(before) === json(after), `${name} changed resident state, persistence or replay after refusal`);
+  check(json(before) === json(after), "refusal-resident-preservation");
   addControl(endpoint, shell, name, {
-    input, reachGuard, envelope: outcome.value, workerResponse: outcome.response,
-    classifier: endpoint.name === "wasm-shell" ? classifyInitFailure(outcome.value) : undefined,
-    reconstructedError: outcome.error ? {
-      name: outcome.error.name, message: outcome.error.message,
-      code: outcome.error instanceof AdapterError ? outcome.error.code : null,
-    } : undefined,
-    before, after,
+    reachGuard, refusalClassMatched: true, typedDiscriminatorsMatched: true,
+    ...(endpoint.name === "production-worker" && (kind === "bracketViolation" || kind === "engineOccupied")
+      ? { clientCodeMatched: true } : {}), residentPreserved: true,
   });
 }
 
@@ -264,7 +296,7 @@ async function ordinaryControls(endpoint: Endpoint): Promise<void> {
       endpoint.name === "wasm-shell" ? /^Card database not loaded in engine worker\./ : /^Card database not loaded\. Call loadCardDb/,
       endpoint.name === "wasm-shell" ? "deckValidation" : "workerMissingDb", `${endpoint.name}.${shell}.valid_limited`);
   }
-  check(await endpoint.loadDb() === 1, "The existing card-DB loader must load the synthetic basic");
+  check(await endpoint.loadDb() === 1, "card-db-load");
   for (const shell of ["local", "host"] as const) {
     const defaults = [
       { name: "omitted_defaults", input: {}, format: "Standard", count: 2 },
@@ -278,12 +310,13 @@ async function ordinaryControls(endpoint: Endpoint): Promise<void> {
       if (fixture.format === "Limited") {
         const state = stateFrom(observation.state);
         const header = record(record(JSON.parse(observation.replay ?? "null")).header);
-        check(state.rng_seed === 42 && header.seed === 42, "Malformed-match fixture must also preserve omitted seed");
-        check(state.match_config?.match_type === "Bo1" && record(header.match_config).match_type === "Bo1", "Malformed MatchConfig must fall back to Bo1");
-        check((state.loop_detection ?? "Off") === "Off" && (record(header.match_config).loop_detection ?? "Off") === "Off", "Malformed MatchConfig must fall back to Off");
+        check(state.rng_seed === 42 && header.seed === 42, "malformed-match-seed");
+        check(state.match_config?.match_type === "Bo1" && record(header.match_config).match_type === "Bo1", "malformed-match-type");
+        check((state.loop_detection ?? "Off") === "Off" && (record(header.match_config).loop_detection ?? "Off") === "Off", "malformed-match-loop-detection");
       } else {
         assertDefaults(observation, fixture.format, fixture.count);
       }
+      controls[controls.length - 1].evidence.defaultsMatched = true;
     }
 
     const failures = [
@@ -323,20 +356,26 @@ async function ordinaryControls(endpoint: Endpoint): Promise<void> {
 async function main(): Promise<void> {
   let client: EngineWorkerClient | undefined;
   try {
-    check(params.get("artifact") === "baseline", "This tests-only checkpoint accepts explicit baseline mode only");
-    check(limited?.format === "Limited", "Missing existing Limited registry authority");
+    check(params.get("artifact") === "baseline", "checkpoint-mode");
+    check(limited?.format === "Limited", "limited-authority");
     await runRow("artifact_identity", async () => {
       const wasmUrl = "/src/wasm/engine_wasm_bg.wasm";
       const glueUrl = "/src/wasm/engine_wasm.js";
       const wasmHash = await sha256(wasmUrl);
       const servedGlueHash = await sha256(glueUrl);
-      check(wasmHash === params.get("wasm_sha256"), "Served WASM differs from the immutable baseline bindgen artifact");
-      check(servedGlueHash === params.get("served_glue_sha256"), "Served glue differs from the alias module recorded by CI");
-      check(params.get("baseline_sha") === "8fcd0f33451058f55b110e707d50497545763615", "Wrong immutable baseline source");
-      for (const key of ["candidate_sha", "candidate_tree", "baseline_tree", "glue_sha256"]) {
-        check(/^[a-f0-9]{40,64}$/.test(params.get(key) ?? ""), `Missing source/artifact identity: ${key}`);
+      check(wasmHash === params.get("wasm_sha256"), "served-wasm-identity");
+      check(servedGlueHash === params.get("served_glue_sha256"), "served-glue-identity");
+      check(params.get("baseline_sha") === "8fcd0f33451058f55b110e707d50497545763615", "baseline-source-identity");
+      const supplied = {
+        candidate_sha: params.get("candidate_sha") ?? "", baseline_sha: "8fcd0f33451058f55b110e707d50497545763615",
+        candidate_tree: params.get("candidate_tree") ?? "", baseline_tree: params.get("baseline_tree") ?? "",
+        glue_sha256: params.get("glue_sha256") ?? "",
+      };
+      for (const identity of [supplied.candidate_sha, supplied.candidate_tree, supplied.baseline_tree]) {
+        check(/^[a-f0-9]{40}$/.test(identity), "source-identity");
       }
-      return { wasmUrl, glueUrl, wasmHash, servedGlueHash, supplied: Object.fromEntries(params) };
+      check(/^[a-f0-9]{64}$/.test(supplied.glue_sha256), "glue-identity");
+      return { wasmHash, servedGlueHash, supplied };
     });
     await initWasm();
     client = new EngineWorkerClient();
@@ -351,17 +390,18 @@ async function main(): Promise<void> {
       await positive(endpoint, "local", "issued_action_reach", validLimited);
       const before = await client!.getSnapshot();
       const state = stateFrom(before.state);
-      check(state.waiting_for.type === "MulliganDecision", "Valid Limited install must reach its ordinary mulligan decision");
-      check(state.waiting_for.data.pending.some((pending) => pending.player === 0), "Human seat 0 must have an issued decision");
+      check(state.waiting_for.type === "MulliganDecision", "ordinary-decision");
+      check(state.waiting_for.data.pending.some((pending) => pending.player === 0), "human-decision");
       const action = before.legalResult.actions.find((candidate) =>
         candidate.type === "MulliganDecision" && candidate.data.choice.type === "Keep");
-      check(action, "The real engine must issue an ordinary Keep action");
-      const result = await client!.submitAction(0, action);
+      check(action, "issued-action");
+      await client!.submitAction(0, action);
       const after = await client!.getSnapshot();
-      check(json(before.state) !== json(after.state), "The engine-issued action must change the actual Worker snapshot");
+      check(json(before.state) !== json(after.state), "action-snapshot-change");
       const replay = record(JSON.parse(await client!.exportReplayLog()));
-      check(Array.isArray(replay.actions) && replay.actions.length === 1, "Ordinary action must be recorded exactly once");
-      return { action, result, before, after, replay };
+      check(Array.isArray(replay.actions) && replay.actions.length === 1, "action-recorded-once");
+      return { ordinaryDecisionReached: true, humanDecisionIssued: true, engineIssuedAction: true,
+        snapshotChanged: true, replayRecordedOnce: true, recordedActionCount: replay.actions.length };
     });
 
     // The production Worker imports this same Vite alias and has just proved
@@ -375,18 +415,17 @@ async function main(): Promise<void> {
     const missingExports = Object.entries(availability).filter(([, present]) => !present).map(([name]) => name);
     rows.push({
       name: "experimental_availability", status: missingExports.length ? "fail" : "pass", evidence: availability,
-      error: missingExports.length ? `Missing required runtime exports: ${missingExports.join(", ")}` : undefined,
+      error: missingExports.length ? "experimental-exports-absent" : undefined,
     });
     window.manualWasmBootstrap.finish({
       status: "fail", reason: availability.initialize_experimental_local_game || availability.experimental_local_actor
         ? "unexpected-baseline-exports" : "expected-experimental-availability",
-      artifact: "baseline", startedAt, finishedAt: new Date().toISOString(), pageUrl: location.href, rows,
+      artifact: "baseline", rows,
     });
   } catch (error) {
     window.manualWasmBootstrap.finish({
-      status: "fail", reason: "incomplete-controls", artifact: params.get("artifact"),
-      error: error instanceof Error ? error.message : String(error), startedAt,
-      finishedAt: new Date().toISOString(), pageUrl: location.href, rows,
+      status: "fail", reason: "incomplete-controls", artifact: "baseline",
+      error: failureCode(error), rows,
     });
   } finally {
     client?.dispose();

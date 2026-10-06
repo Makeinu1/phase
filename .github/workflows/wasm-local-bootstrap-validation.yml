@@ -15,7 +15,7 @@ concurrency:
 env:
   # Product source is admitted only after a measured qualifying baseline RED.
   # The later product checkpoint must explicitly replace this fixed lane.
-  BOOTSTRAP_CHECKPOINT_MODE: privacy-repair
+  BOOTSTRAP_CHECKPOINT_MODE: baseline-red
   BOOTSTRAP_BASE_SHA: 8fcd0f33451058f55b110e707d50497545763615
   MANUAL_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
   MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-evidence
@@ -77,7 +77,8 @@ jobs:
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py hosted-tools bash -euo pipefail <<'TOOLS'
-          command -v google-chrome curl jq
+          exec 2>/dev/null
+          command -v google-chrome curl jq >/dev/null
           driver_binary=$(command -v chromedriver || true)
           if [ -z "$driver_binary" ] && [ -n "${CHROMEWEBDRIVER:-}" ]; then
             driver_binary="$CHROMEWEBDRIVER/chromedriver"
@@ -85,78 +86,114 @@ jobs:
           test -n "$driver_binary"
           test -x "$driver_binary"
           printf 'BOOTSTRAP_CHROMEDRIVER=%s\n' "$driver_binary" >> "$GITHUB_ENV"
-          rustc -Vv
-          cargo -V
-          wasm-bindgen --version
+          rustc -Vv >/dev/null
+          cargo -V >/dev/null
           test "$(wasm-bindgen --version)" = 'wasm-bindgen 0.2.121'
           test "$(node --version)" = v22.16.0
           test "$(pnpm --version)" = 9.15.9
-          google-chrome --version
-          "$driver_binary" --version
           chrome_major=$(google-chrome --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
           driver_major=$("$driver_binary" --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
           test "$chrome_major" = "$driver_major"
           test -z "${ENGINE_WASM_URL:-}"
+          printf '{"hosted_tools_verified":true}\n'
           TOOLS
       - name: Install one frozen candidate client dependency tree
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py client-dependencies \
-            pnpm --dir client install --frozen-lockfile
+            bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile >/dev/null 2>&1'
       - name: Check full candidate client types
         working-directory: candidate-source
         run: |
-          python3 scripts/ci/manual-integration-guard.py client-types pnpm --dir client run type-check
+          python3 scripts/ci/manual-integration-guard.py client-types \
+            bash -euo pipefail -c 'pnpm --dir client run type-check >/dev/null 2>&1'
       - name: Lint full candidate client
         working-directory: candidate-source
         run: |
-          python3 scripts/ci/manual-integration-guard.py client-lint pnpm --dir client run lint
+          python3 scripts/ci/manual-integration-guard.py client-lint \
+            bash -euo pipefail -c 'pnpm --dir client run lint >/dev/null 2>&1'
       - name: Check candidate protocol
         working-directory: candidate-source
         run: |
-          python3 scripts/ci/manual-integration-guard.py client-protocol pnpm --dir client run protocol:check
+          python3 scripts/ci/manual-integration-guard.py client-protocol \
+            bash -euo pipefail -c 'pnpm --dir client run protocol:check >/dev/null 2>&1'
       - name: Compile immutable baseline engine WASM once, default off
         working-directory: baseline-source
         run: |
           MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
             python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-wasm-build \
-            cargo build --locked -p engine-wasm --target wasm32-unknown-unknown \
-            --profile wasm-dev --no-default-features
+            bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown \
+            --profile wasm-dev --no-default-features >/dev/null 2>&1'
       - name: Bind the baseline artifact outside both source trees
         working-directory: baseline-source
         run: |
           MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
             python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-bindgen \
-            wasm-bindgen --target web --out-name engine_wasm \
+            bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm \
             --out-dir "$RUNNER_TEMP/bootstrap-bindgen-baseline" \
-            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"
+            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1'
       - name: Copy only ignored runtime glue and WASM to the candidate alias
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py baseline-runtime-copy bash -euo pipefail <<'COPY'
+          exec 2>/dev/null
           artifact="$RUNNER_TEMP/bootstrap-bindgen-baseline"
           test ! -d "$artifact/snippets"
           test -s "$artifact/engine_wasm.js"
           test -s "$artifact/engine_wasm_bg.wasm"
-          git check-ignore client/src/wasm/engine_wasm.js client/src/wasm/engine_wasm_bg.wasm
+          git check-ignore client/src/wasm/engine_wasm.js client/src/wasm/engine_wasm_bg.wasm >/dev/null
           cp "$artifact/engine_wasm.js" client/src/wasm/engine_wasm.js
           cp "$artifact/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
           sha256sum "$artifact/engine_wasm.js" "$artifact/engine_wasm_bg.wasm" \
             client/src/wasm/engine_wasm.js client/src/wasm/engine_wasm_bg.wasm \
             client/src/wasm/engine_wasm.d.ts > "$MANUAL_EVIDENCE/baseline-artifacts.sha256"
-          cmp "$artifact/engine_wasm.js" client/src/wasm/engine_wasm.js
-          cmp "$artifact/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+          cmp -s "$artifact/engine_wasm.js" client/src/wasm/engine_wasm.js
+          cmp -s "$artifact/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
           COPY
       - name: Run existing affected adapter tests with one worker
         working-directory: candidate-source
         run: |
-          python3 scripts/ci/manual-integration-guard.py client-adapter-tests \
-            pnpm --dir client exec vitest run --config vitest.config.ts \
-            --pool=forks --isolate --maxWorkers=1 --no-file-parallelism \
-            --coverage.enabled=false --reporter=verbose \
-            src/adapter/__tests__/engine-worker.test.ts \
-            src/adapter/__tests__/engine-worker-client.test.ts \
-            src/adapter/__tests__/wasm-adapter.test.ts
+          # Pinned Vitest 4.1.0's JSON reporter writes to stdout when outputFile
+          # is absent. Raw report/failure text stays in memory; stderr is discarded.
+          # https://github.com/vitest-dev/vitest/blob/v4.1.0/packages/vitest/src/node/reporters/json.ts
+          python3 scripts/ci/manual-integration-guard.py client-adapter-tests python3 - 2>/dev/null <<'TESTS'
+          import json, os, subprocess
+          from pathlib import Path
+          summary = {'runner_exit_code': None, 'report_valid': False, 'all_selected_tests_passed': False}
+          result = None
+          try:
+              result = subprocess.run([
+                  'pnpm', '--dir', 'client', 'exec', 'vitest', 'run', '--config', 'vitest.config.ts',
+                  '--pool=forks', '--isolate', '--maxWorkers=1', '--no-file-parallelism',
+                  '--coverage.enabled=false', '--reporter=json', '--silent=true',
+                  'src/adapter/__tests__/engine-worker.test.ts',
+                  'src/adapter/__tests__/engine-worker-client.test.ts',
+                  'src/adapter/__tests__/wasm-adapter.test.ts',
+              ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, encoding='utf-8', errors='replace',
+                  env={**os.environ, 'NO_COLOR': '1', 'FORCE_COLOR': '0'})
+              summary['runner_exit_code'] = result.returncode
+              report = json.loads(result.stdout)
+              statuses = [case['status'] for file in report['testResults'] for case in file['assertionResults']]
+              counts = {status: statuses.count(status) for status in ['passed', 'failed', 'skipped', 'pending', 'todo', 'disabled']}
+              valid = (len(report['testResults']) == 3 and len(statuses) > 0 and
+                       sum(counts.values()) == len(statuses) == report['numTotalTests'] and
+                       counts['passed'] == report['numPassedTests'] and counts['failed'] == report['numFailedTests'])
+              if valid:
+                  summary.update(report_valid=True, tests_total=len(statuses),
+                                 tests_executed=counts['passed'] + counts['failed'],
+                                 tests_passed=counts['passed'], tests_failed=counts['failed'],
+                                 tests_skipped=counts['skipped'], tests_pending=counts['pending'],
+                                 tests_todo=counts['todo'], tests_disabled=counts['disabled'],
+                                 all_selected_tests_passed=result.returncode == 0 and counts['passed'] == len(statuses))
+          except Exception:
+              summary['error'] = 'adapter-report-unavailable'
+          Path(os.environ['MANUAL_EVIDENCE'], 'adapter-assertions.json').write_text(json.dumps(summary) + '\n')
+          print(json.dumps(summary))
+          code = result.returncode if result is not None else 1
+          if code == 0 and not summary['all_selected_tests_passed']:
+              code = 1
+          raise SystemExit(code if code >= 0 else 128 - code)
+          TESTS
       - name: Run actual baseline page and retain its terminal failure
         id: baseline-browser
         working-directory: candidate-source
@@ -166,74 +203,100 @@ jobs:
           # https://developer.chrome.com/docs/chromedriver/get-started
           # https://www.w3.org/TR/webdriver2/#execute-async-script
           python3 scripts/ci/manual-integration-guard.py baseline-browser bash -euo pipefail <<'BROWSER'
+          # Raw W3C replies and session IDs stay in shell memory. Neither server
+          # output nor browser/performance/driver logs are recorded, even on failure.
+          exec 2>/dev/null
           session_id=''
           vite_pid=''
           driver_pid=''
           cleanup() {
             if [ -n "$session_id" ]; then
               curl --silent --max-time 10 -X DELETE "http://127.0.0.1:9515/session/$session_id" \
-                > "$MANUAL_EVIDENCE/chromedriver-delete.json" || true
+                >/dev/null || true
             fi
             if [ -n "$vite_pid" ]; then kill "$vite_pid" 2>/dev/null || true; fi
             if [ -n "$driver_pid" ]; then kill "$driver_pid" 2>/dev/null || true; fi
           }
           trap cleanup EXIT
-          pnpm --dir client dev --host 127.0.0.1 --port 5173 --strictPort \
-            > "$MANUAL_EVIDENCE/vite.log" 2>&1 &
+          trap 'printf "{\"error\":\"browser-command-failed\"}\n"' ERR
+          TELEMETRY_URL='' pnpm --dir client dev --host 127.0.0.1 --port 5173 --strictPort \
+            >/dev/null 2>&1 &
           vite_pid=$!
-          "$BOOTSTRAP_CHROMEDRIVER" --port=9515 --verbose --log-path="$MANUAL_EVIDENCE/chromedriver.log" \
-            > "$MANUAL_EVIDENCE/chromedriver-stdout.log" 2>&1 &
+          CHROME_LOG_FILE=/dev/null "$BOOTSTRAP_CHROMEDRIVER" --port=9515 --log-path=/dev/null \
+            >/dev/null 2>&1 &
           driver_pid=$!
           # One bounded startup interval and one preflight request; no polling or retry.
           sleep 5
           kill -0 "$vite_pid" "$driver_pid"
-          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:9515/status \
-            > "$MANUAL_EVIDENCE/chromedriver-status.json"
-          jq -e '.value.ready == true' "$MANUAL_EVIDENCE/chromedriver-status.json"
-          curl --fail --silent --show-error --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm.js \
-            > "$MANUAL_EVIDENCE/served-engine-glue.js"
-          curl --fail --silent --show-error --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm_bg.wasm \
-            > "$RUNNER_TEMP/served-engine-wasm-baseline.wasm"
-          cmp client/src/wasm/engine_wasm_bg.wasm "$RUNNER_TEMP/served-engine-wasm-baseline.wasm"
+          driver_status=$(curl --fail --silent --max-time 10 http://127.0.0.1:9515/status)
+          printf '%s' "$driver_status" | jq -e '.value.ready == true' >/dev/null
+          served_glue_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm.js \
+            | sha256sum | cut -d ' ' -f 1)
+          served_wasm_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm_bg.wasm \
+            | sha256sum | cut -d ' ' -f 1)
           wasm_hash=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | cut -d ' ' -f 1)
           glue_hash=$(sha256sum client/src/wasm/engine_wasm.js | cut -d ' ' -f 1)
-          served_glue_hash=$(sha256sum "$MANUAL_EVIDENCE/served-engine-glue.js" | cut -d ' ' -f 1)
+          test "$served_wasm_hash" = "$wasm_hash"
+          printf '%s  served-engine-glue\n%s  served-engine-wasm\n' "$served_glue_hash" "$served_wasm_hash" \
+            > "$MANUAL_EVIDENCE/served-artifacts.sha256"
           baseline_tree=$(git -C ../baseline-source rev-parse HEAD^{tree})
           candidate_tree=$(git rev-parse HEAD^{tree})
           url="http://127.0.0.1:5173/manual-resolution-wasm-worker.html?artifact=baseline&baseline_sha=$BOOTSTRAP_BASE_SHA&candidate_sha=$MANUAL_EXPECTED_SOURCE_SHA&baseline_tree=$baseline_tree&candidate_tree=$candidate_tree&wasm_sha256=$wasm_hash&glue_sha256=$glue_hash&served_glue_sha256=$served_glue_hash"
-          jq -n --arg binary "$(command -v google-chrome)" '{capabilities:{alwaysMatch:{browserName:"chrome","goog:chromeOptions":{binary:$binary,args:["--headless=new","--no-sandbox","--disable-dev-shm-usage"]},"goog:loggingPrefs":{browser:"ALL",performance:"ALL"}}}}' \
-            > "$MANUAL_EVIDENCE/chromedriver-session-request.json"
-          curl --fail --silent --show-error --max-time 60 -H 'Content-Type: application/json' \
-            --data-binary @"$MANUAL_EVIDENCE/chromedriver-session-request.json" \
-            http://127.0.0.1:9515/session > "$MANUAL_EVIDENCE/chromedriver-session.json"
-          session_id=$(jq -er '.value.sessionId' "$MANUAL_EVIDENCE/chromedriver-session.json")
-          jq -n '{script:130000,pageLoad:60000,implicit:0}' > "$MANUAL_EVIDENCE/chromedriver-timeouts-request.json"
-          curl --fail --silent --show-error --max-time 10 -H 'Content-Type: application/json' \
-            --data-binary @"$MANUAL_EVIDENCE/chromedriver-timeouts-request.json" \
-            "http://127.0.0.1:9515/session/$session_id/timeouts" > "$MANUAL_EVIDENCE/chromedriver-timeouts.json"
-          jq -n --arg url "$url" '{url:$url}' > "$MANUAL_EVIDENCE/chromedriver-url-request.json"
-          curl --fail --silent --show-error --max-time 65 -H 'Content-Type: application/json' \
-            --data-binary @"$MANUAL_EVIDENCE/chromedriver-url-request.json" \
-            "http://127.0.0.1:9515/session/$session_id/url" > "$MANUAL_EVIDENCE/chromedriver-url.json"
-          jq -n '{script:"const done = arguments[arguments.length - 1]; window.manualWasmBootstrap.completionPromise.then(done);",args:[]}' \
-            > "$MANUAL_EVIDENCE/chromedriver-execute-request.json"
-          curl --fail --silent --show-error --max-time 140 -H 'Content-Type: application/json' \
-            --data-binary @"$MANUAL_EVIDENCE/chromedriver-execute-request.json" \
-            "http://127.0.0.1:9515/session/$session_id/execute/async" > "$MANUAL_EVIDENCE/baseline-terminal-raw.json"
-          jq '.value' "$MANUAL_EVIDENCE/baseline-terminal-raw.json" > "$MANUAL_EVIDENCE/baseline-terminal.json"
-          for log_type in browser performance; do
-            jq -n --arg type "$log_type" '{type:$type}' > "$MANUAL_EVIDENCE/chromedriver-log-request.json"
-            curl --fail --silent --show-error --max-time 10 -H 'Content-Type: application/json' \
-              --data-binary @"$MANUAL_EVIDENCE/chromedriver-log-request.json" \
-              "http://127.0.0.1:9515/session/$session_id/se/log" > "$MANUAL_EVIDENCE/chromedriver-$log_type.json"
-          done
+          session_response=$(jq -n --arg binary "$(command -v google-chrome)" \
+            '{capabilities:{alwaysMatch:{browserName:"chrome","goog:chromeOptions":{binary:$binary,args:["--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-logging","--log-level=3"]},"goog:loggingPrefs":{browser:"OFF",performance:"OFF"}}}}' \
+            | curl --fail --silent --max-time 60 -H 'Content-Type: application/json' \
+              --data-binary @- http://127.0.0.1:9515/session)
+          session_id=$(printf '%s' "$session_response" \
+            | jq -er '.value.sessionId | select(type == "string" and test("^[a-zA-Z0-9-]+$"))')
+          timeouts_response=$(jq -n '{script:130000,pageLoad:60000,implicit:0}' \
+            | curl --fail --silent --max-time 10 -H 'Content-Type: application/json' \
+              --data-binary @- "http://127.0.0.1:9515/session/$session_id/timeouts")
+          printf '%s' "$timeouts_response" | jq -e '.value == null' >/dev/null
+          navigation_response=$(jq -n --arg url "$url" '{url:$url}' \
+            | curl --fail --silent --max-time 65 -H 'Content-Type: application/json' \
+              --data-binary @- "http://127.0.0.1:9515/session/$session_id/url")
+          printf '%s' "$navigation_response" | jq -e '.value == null' >/dev/null
+          terminal_response=$(jq -n '{script:"const done = arguments[arguments.length - 1]; window.manualWasmBootstrap.completionPromise.then(done);",args:[]}' \
+            | curl --fail --silent --max-time 140 -H 'Content-Type: application/json' \
+              --data-binary @- "http://127.0.0.1:9515/session/$session_id/execute/async")
+          # Select allowlisted fields before the first write. Unexpected values
+          # become fixed invalid codes, never raw transport or application text.
+          printf '%s' "$terminal_response" | jq -c '
+            def fixed($values): . as $value | if ($values | index($value)) != null then $value else "invalid" end;
+            def boolean: if type == "boolean" then . else null end;
+            def hash($length): if type == "string" and test("^[a-f0-9]{" + ($length | tostring) + "}$") then . else null end;
+            def control_id: if type == "string" and test("^(wasm-shell|production-worker)\\.(local|host)\\.(resident_without_database|missing_database|omitted_defaults|null_defaults|undeclared_four_seats|malformed_match_fallback|valid_limited|all_cedh_bracket_reach|cedh_bracket_refusal|occupied_direction|resident_for_(local|host)_occupied|(valid_limited_for_)?(malformed_format|format_player_count|malformed_deck|player_deck_validation|opponent_deck_validation|empty_library_after_load))$") then . else "invalid-case" end;
+            .value | {status:(.status | fixed(["pass","fail"])),
+              reason:(.reason | fixed(["expected-experimental-availability","unexpected-baseline-exports","incomplete-controls","timeout","uncaught-error","unhandled-rejection"])),
+              artifact:(.artifact | fixed(["baseline"])), error:(if .error then "page-failure" else null end),
+              rows:[(.rows // [])[] | {name:(.name | fixed(["artifact_identity","ordinary_initializer_preservation","ordinary_worker_action","experimental_availability"])),
+                status:(.status | fixed(["pass","fail","pending"])), error:(if .error then "row-failure" else null end),
+                evidence:(if .name == "artifact_identity" then .evidence | {
+                  wasmHash:(.wasmHash | hash(64)), servedGlueHash:(.servedGlueHash | hash(64)),
+                  supplied:{candidate_sha:(.supplied.candidate_sha | hash(40)), baseline_sha:(.supplied.baseline_sha | hash(40)),
+                    candidate_tree:(.supplied.candidate_tree | hash(40)), baseline_tree:(.supplied.baseline_tree | hash(40)),
+                    glue_sha256:(.supplied.glue_sha256 | hash(64))}}
+                elif .name == "ordinary_initializer_preservation" then [(.evidence // [])[] | {
+                  name:(.name | control_id), status:(.status | fixed(["pass"])), evidence:{
+                    reachGuard:(if .evidence.reachGuard == null then null else .evidence.reachGuard | control_id end),
+                    initializationAccepted:(.evidence.initializationAccepted | boolean), stateInstalled:(.evidence.stateInstalled | boolean),
+                    replayInstalled:(.evidence.replayInstalled | boolean), defaultsMatched:(.evidence.defaultsMatched | boolean),
+                    refusalClassMatched:(.evidence.refusalClassMatched | boolean), typedDiscriminatorsMatched:(.evidence.typedDiscriminatorsMatched | boolean),
+                    clientCodeMatched:(.evidence.clientCodeMatched | boolean), residentPreserved:(.evidence.residentPreserved | boolean)}}]
+                elif .name == "ordinary_worker_action" then .evidence | {
+                  ordinaryDecisionReached:(.ordinaryDecisionReached | boolean), humanDecisionIssued:(.humanDecisionIssued | boolean),
+                  engineIssuedAction:(.engineIssuedAction | boolean), snapshotChanged:(.snapshotChanged | boolean),
+                  replayRecordedOnce:(.replayRecordedOnce | boolean), recordedActionCount:(if .recordedActionCount == 1 then 1 else null end)}
+                elif .name == "experimental_availability" then .evidence | {
+                  initialize_experimental_local_game:(.initialize_experimental_local_game | boolean), experimental_local_actor:(.experimental_local_actor | boolean)}
+                else null end)}]}' > "$MANUAL_EVIDENCE/baseline-terminal.json"
           jq '{status,reason,rows:[.rows[] | {name,status,error,controls:
             (if (.evidence | type) == "array" then [.evidence[] | {name,status}] else null end)}]}' \
             "$MANUAL_EVIDENCE/baseline-terminal.json"
           jq -e '.status == "fail" and .reason == "expected-experimental-availability" and
             (.rows | length == 4) and
             ([.rows[] | select(.status == "fail") | .name] == ["experimental_availability"]) and
-            ([.rows[] | select(.status == "pending")] | length == 0)' "$MANUAL_EVIDENCE/baseline-terminal.json"
+            ([.rows[] | select(.status == "pending")] | length == 0)' "$MANUAL_EVIDENCE/baseline-terminal.json" >/dev/null
           # Preserve the experimental assertion's actual nonzero outcome.
           exit 1
           BROWSER
@@ -248,7 +311,7 @@ jobs:
       - name: Adjudicate complete RED from retained evidence
         if: always()
         run: |
-          python3 - <<'PY'
+          python3 - 2>/dev/null <<'PY'
           import hashlib, json, os
           from pathlib import Path
           root = Path(os.environ['MANUAL_EVIDENCE'])
@@ -257,7 +320,7 @@ jobs:
                     'baseline-wasm-build', 'baseline-bindgen', 'baseline-runtime-copy',
                     'client-dependencies', 'client-types', 'client-lint', 'client-protocol',
                     'client-adapter-tests', 'baseline-browser', 'candidate-source-after', 'baseline-source-after']
-          complete = True
+          complete = os.environ['BOOTSTRAP_CHECKPOINT_MODE'] == 'baseline-red'
           records = {}
           for label in labels:
               path = root / (label + '.json')
@@ -272,7 +335,12 @@ jobs:
           terminal_path = root / 'baseline-terminal.json'
           terminal = json.loads(terminal_path.read_text()) if terminal_path.is_file() else {}
           if not isinstance(terminal, dict):
-              terminal = {'invalid_terminal': terminal}
+              terminal = {}
+          adapter_path = root / 'adapter-assertions.json'
+          adapter = json.loads(adapter_path.read_text()) if adapter_path.is_file() else {
+              'report_valid': False, 'error': 'adapter-tests-not-run'}
+          complete &= adapter.get('report_valid') is True and adapter.get('all_selected_tests_passed') is True
+          complete &= adapter.get('runner_exit_code') == 0
           rows = terminal.get('rows', [])
           complete &= terminal.get('status') == 'fail' and terminal.get('reason') == 'expected-experimental-availability'
           complete &= [row.get('name') for row in rows] == [
@@ -289,21 +357,43 @@ jobs:
               complete &= supplied.get('baseline_tree') == (records.get('baseline-source-before') or {}).get('source_tree')
               controls = rows[1].get('evidence', [])
               names = {control.get('name') for control in controls}
-              complete &= len(controls) == 90 and len(names) == 90
+              complete &= len(controls) == 90 and len(names) == 90 and 'invalid-case' not in names
               complete &= all(control.get('status') == 'pass' for control in controls)
               for control in controls:
-                  reach_guard = control.get('evidence', {}).get('reachGuard')
+                  assertions = control.get('evidence', {})
+                  reach_guard = assertions.get('reachGuard')
                   complete &= reach_guard is None or reach_guard in names
+                  if reach_guard is None:
+                      complete &= all(assertions.get(key) is True for key in [
+                          'initializationAccepted', 'stateInstalled', 'replayInstalled'])
+                  else:
+                      complete &= all(assertions.get(key) is True for key in [
+                          'refusalClassMatched', 'typedDiscriminatorsMatched', 'residentPreserved'])
+                  name = control.get('name', '')
+                  if name.rsplit('.', 1)[-1] in ['omitted_defaults', 'null_defaults', 'undeclared_four_seats', 'malformed_match_fallback']:
+                      complete &= assertions.get('defaultsMatched') is True
+                  if name.startswith('production-worker.') and name.rsplit('.', 1)[-1] in ['cedh_bracket_refusal', 'occupied_direction']:
+                      complete &= assertions.get('clientCodeMatched') is True
+              complete &= rows[2].get('evidence') == {
+                  'ordinaryDecisionReached': True, 'humanDecisionIssued': True, 'engineIssuedAction': True,
+                  'snapshotChanged': True, 'replayRecordedOnce': True, 'recordedActionCount': 1}
               wasm_path = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-bindgen-baseline/engine_wasm_bg.wasm'
               glue_path = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-bindgen-baseline/engine_wasm.js'
               complete &= wasm_path.is_file() and observed.get('wasmHash') == hashlib.sha256(wasm_path.read_bytes()).hexdigest()
               complete &= glue_path.is_file() and supplied.get('glue_sha256') == hashlib.sha256(glue_path.read_bytes()).hexdigest()
-              complete &= observed.get('servedGlueHash') == hashlib.sha256((root / 'served-engine-glue.js').read_bytes()).hexdigest()
+              served_path = root / 'served-artifacts.sha256'
+              served = {line.split()[1]: line.split()[0] for line in served_path.read_text().splitlines()} if served_path.is_file() else {}
+              complete &= observed.get('servedGlueHash') == served.get('served-engine-glue')
+              complete &= observed.get('wasmHash') == served.get('served-engine-wasm')
           verdict = {'checkpoint_mode': os.environ['BOOTSTRAP_CHECKPOINT_MODE'],
                      'qualifying_baseline_red': bool(complete), 'terminal_status': terminal.get('status'),
+                     'baseline_browser_executed': (records.get('baseline-browser') or {}).get('exit_code') is not None,
+                     'adapter_assertions': adapter,
                      'product_green': 'NOT RUN: tests-only checkpoint', 'commands': records}
           (root / 'red-adjudication.json').write_text(json.dumps(verdict, indent=2) + '\n')
-          text = 'Qualifying baseline RED: ' + str(bool(complete)) + '. Experimental row remains failed; product GREEN is not run.\n'
+          text = ('Qualifying baseline RED: true. All 90 controls and the real Worker action completed; '
+                  'the expected experimental availability assertion failed. Product GREEN: NOT RUN.\n') if complete else (
+                  'Qualifying baseline RED: false. Execution evidence is incomplete. Product GREEN: NOT RUN.\n')
           print(text)
           with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
               summary.write(text)
@@ -313,6 +403,28 @@ jobs:
         if: always()
         with:
           name: local-worker-bootstrap-baseline-red-evidence
-          path: bootstrap-evidence/
+          path: |
+            bootstrap-evidence/baseline-source.txt
+            bootstrap-evidence/candidate-source.txt
+            bootstrap-evidence/baseline-inputs.sha256
+            bootstrap-evidence/baseline-artifacts.sha256
+            bootstrap-evidence/served-artifacts.sha256
+            bootstrap-evidence/adapter-assertions.json
+            bootstrap-evidence/baseline-terminal.json
+            bootstrap-evidence/red-adjudication.json
+            bootstrap-evidence/candidate-source-before.json
+            bootstrap-evidence/baseline-source-before.json
+            bootstrap-evidence/hosted-tools.json
+            bootstrap-evidence/client-dependencies.json
+            bootstrap-evidence/client-types.json
+            bootstrap-evidence/client-lint.json
+            bootstrap-evidence/client-protocol.json
+            bootstrap-evidence/baseline-wasm-build.json
+            bootstrap-evidence/baseline-bindgen.json
+            bootstrap-evidence/baseline-runtime-copy.json
+            bootstrap-evidence/client-adapter-tests.json
+            bootstrap-evidence/baseline-browser.json
+            bootstrap-evidence/candidate-source-after.json
+            bootstrap-evidence/baseline-source-after.json
           if-no-files-found: warn
           retention-days: 7
