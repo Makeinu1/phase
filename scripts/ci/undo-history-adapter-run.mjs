@@ -8,17 +8,33 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as pause } from 'node:timers/promises';
 import { wasmMemoryRegions } from './undo-history-memory-cdp.mjs';
 
-const [candidateArg, payloadArg, evidenceArg] = process.argv.slice(2);
+const [candidateArg, payloadArg, evidenceArg, mode] = process.argv.slice(2);
+assert([undefined, '--selfcheck-only', '--browser-selfcheck-only'].includes(mode), 'unknown consumer mode');
+const inputOnly = mode === '--selfcheck-only', browserOnly = mode === '--browser-selfcheck-only';
 const candidate = path.resolve(candidateArg), payload = path.resolve(payloadArg), evidence = path.resolve(evidenceArg);
 await mkdir(evidence, { recursive: true });
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-const originalGlue = await readFile(path.join(payload, 'engine_wasm.js'));
-assert.equal(digest(originalGlue), 'cc3e67a1e4cf930a9107826aa676ee9b36a16494c92887897ec881251cc0ea6a');
-assert.equal(digest(await readFile(path.join(payload, 'engine_wasm_bg.wasm'))), '1861c7d90af448a1c98d17bcd42e9dc6ad41f317a05afe2ec1cc13e4de2e450f');
-const bindingModule = await import(pathToFileURL(path.join(payload, 'engine_wasm.js')));
+let originalGlue, fixture;
 const publicMethods = ['default', 'ping', 'initialize_game', 'load_card_database', 'submit_action', 'submit_interaction_js', 'export_game_state_json', 'restore_game_state', 'get_game_state', 'get_legal_actions_js'];
-assert.ok(publicMethods.every(name => typeof bindingModule[name] === 'function'), 'verified binding public exports required by normal Worker');
-await writeFile(path.join(evidence, 'input-public-exports.json'), JSON.stringify({ bindingSha256: digest(originalGlue), publicMethods, inspectedWithoutInstantiation: true, bindingUnmodified: true }, null, 2) + '\n');
+try {
+  originalGlue = await readFile(path.join(payload, 'engine_wasm.js'));
+  assert.equal(digest(originalGlue), 'cc3e67a1e4cf930a9107826aa676ee9b36a16494c92887897ec881251cc0ea6a');
+  assert.equal(digest(await readFile(path.join(payload, 'engine_wasm_bg.wasm'))), '1861c7d90af448a1c98d17bcd42e9dc6ad41f317a05afe2ec1cc13e4de2e450f');
+  const bindingModule = await import(pathToFileURL(path.join(payload, 'engine_wasm.js')));
+  assert.ok(publicMethods.every(name => typeof bindingModule[name] === 'function'), 'verified binding public exports required by normal Worker');
+  fixture = await readFile(path.join(candidate, 'scripts/fixtures/undo-history/official-history-cards-b0.json'));
+  assert.equal(digest(fixture), '1849fbe675e2e5acac2b32e6f96fd8d4e2d67a8c426138452d32cb0db4f494db');
+  await writeFile(path.join(evidence, 'input-public-exports.json'), JSON.stringify({ pass: true, candidateSha: process.env.GITHUB_SHA,
+    bindingSha256: digest(originalGlue), fixtureSha256: digest(fixture), publicMethods,
+    inspectedWithoutInstantiation: true, bindingUnmodified: true }, null, 2) + '\n');
+} catch (error) {
+  await writeFile(path.join(evidence, 'input-public-exports.json'), JSON.stringify({ pass: false, stage: 'input-public-exports',
+    candidateSha: process.env.GITHUB_SHA, failure: String(error).slice(0, 240), engineInstantiated: false }, null, 2) + '\n');
+  throw error;
+}
+if (inputOnly) { console.log(JSON.stringify({ pass: true, stage: 'input-public-exports', noWasmInstantiation: true })); process.exit(0); }
+let vite;
+if (!browserOnly) {
 const runtime = await mkdtemp(path.join(process.env.RUNNER_TEMP, 'history-adapter-runtime-'));
 const client = path.join(runtime, 'client');
 await cp(path.join(candidate, 'client'), client, { recursive: true, filter: p => !['node_modules', '.git', 'coverage', 'dist'].includes(path.basename(p)) });
@@ -31,26 +47,30 @@ await mkdir(path.join(client, 'src/wasm'), { recursive: true });
 await writeFile(path.join(client, 'src/wasm/engine_wasm.js'), originalGlue);
 await cp(path.join(payload, 'engine_wasm_bg.wasm'), path.join(client, 'src/wasm/engine_wasm_bg.wasm'));
 await mkdir(path.join(client, 'public'), { recursive: true });
-const fixture = await readFile(path.join(candidate, 'scripts/fixtures/undo-history/official-history-cards-b0.json'));
-assert.equal(digest(fixture), '1849fbe675e2e5acac2b32e6f96fd8d4e2d67a8c426138452d32cb0db4f494db');
 await writeFile(path.join(client, 'public/qa-history-cards.json'), fixture);
 process.env.CARD_DATA_URL = '/qa-history-cards.json'; process.env.ENGINE_WASM_URL = '';
 process.env.TELEMETRY_URL = ''; process.env.SUPABASE_URL = ''; process.env.SUPABASE_ANON_KEY = '';
 process.env.MULTIPLAYER_SERVER_URL = 'ws://127.0.0.1:9';
 const { createServer } = await import(pathToFileURL(path.join(candidate, 'client/node_modules/vite/dist/node/index.js')));
-const vite = await createServer({ root: client, configFile: path.join(client, 'vite.config.ts'),
+vite = await createServer({ root: client, configFile: path.join(client, 'vite.config.ts'),
   server: { host: '127.0.0.1', port: 0, strictPort: false },
   plugins: [{ name: 'isolated-history-QA-entry', transformIndexHtml: () => '<!doctype html><title>isolated history QA</title><script type="module" src="/qa-history-adapter.mjs"></script>' }],
 });
 await vite.listen();
+}
 const executable = ['google-chrome', 'chromium', 'chromium-browser'].map(x => spawnSync('which', [x], { encoding: 'utf8' }).stdout?.trim()).find(Boolean);
-assert(executable, 'installed Chromium required');
+if (!executable) {
+  await writeFile(path.join(evidence, 'browser-selfcheck.json'), JSON.stringify({ pass: false,
+    stage: 'browser-executable', candidateSha: process.env.GITHUB_SHA, failure: 'installed Chromium required', phaseEngineStarted: false }, null, 2) + '\n');
+  assert.fail('installed Chromium required');
+}
 const profile = await mkdtemp(path.join(process.env.RUNNER_TEMP, 'history-adapter-chrome-'));
 const args = ['--headless', '--disable-gpu', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run', '--no-default-browser-check', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'];
 const chrome = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-let stderr = '', socket, serial = 0, pageSession, targetWorker, failure;
+let stderr = '', socket, serial = 0, pageSession, targetWorker, failure, spawnError, stage = 'browser-startup';
 const pending = new Map(), heaps = [];
 chrome.stderr.on('data', b => { stderr = (stderr + b).slice(-6000); });
+chrome.on('error', error => { spawnError = String(error); });
 function call(method, params = {}, sessionId, timeout = 10000) {
   return new Promise((resolve, reject) => {
     const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Error(`CDP timeout: ${method}`)); }, timeout);
@@ -71,7 +91,7 @@ const rssSampler = setInterval(() => {
 try {
   let endpoint;
   for (let n = 0; n < 100 && !endpoint; n++) {
-    assert(chrome.exitCode === null, 'Chromium launch exited; do not bypass sandbox');
+    assert(!spawnError && chrome.exitCode === null && chrome.signalCode === null, 'Chromium launch exited; do not bypass sandbox');
     const port = await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; });
     const match = port.match(/^(\d+)\r?\n(\/devtools\/browser\/[A-Za-z0-9-]+)/); if (match) endpoint = `ws://127.0.0.1:${match[1]}${match[2]}`;
     if (!endpoint) await pause(100);
@@ -84,14 +104,25 @@ try {
     if (msg.method === 'Target.detachedFromTarget' && msg.params.sessionId === targetWorker) targetWorker = null;
   });
   await new Promise((yes, no) => { socket.addEventListener('open', yes, { once: true }); socket.addEventListener('error', no, { once: true }); });
+  stage = 'browser-CDP-capability';
   const version = await call('Browser.getVersion');
   const target = await call('Target.createTarget', { url: 'about:blank' });
   pageSession = (await call('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
+  assert(!args.some(x => /no-sandbox|disable.*sandbox/.test(x)), 'browser sandbox must stay enabled');
+  const listedRegions = await wasmMemoryRegions(call, pageSession);
+  await call('HeapProfiler.collectGarbage', {}, pageSession);
+  const mainHeap = await call('Runtime.getHeapUsage', {}, pageSession);
+  await writeFile(path.join(evidence, 'browser-selfcheck.json'), JSON.stringify({ pass: true,
+    candidateSha: process.env.GITHUB_SHA, browser: version.product, executable, args,
+    sandboxDisableFlags: false, phaseEngineStarted: false, listedRegions, mainHeap }, null, 2) + '\n');
+  if (!browserOnly) {
+  stage = 'QA-module-load';
   await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
   await call('Page.navigate', { url: `http://127.0.0.1:${vite.httpServer.address().port}/` }, pageSession);
   let ready = false;
   for (let n = 0; n < 120 && !ready; n++) { ready = await evaluate('typeof globalThis.__qaStart === "function"'); if (!ready) await pause(250); }
   assert(ready, 'QA module failed to load (no fallback/stub)'); await evaluate('globalThis.__qaStart(); true');
+  stage = 'actual-adapter-campaign';
   const started = performance.now(); let result, lastProgress;
   while (performance.now() - started < 230000) {
     const observed = await evaluate('({result:globalThis.__qaResult,heap:globalThis.__qaHeapStage,progress:globalThis.__qaProgress})');
@@ -122,12 +153,19 @@ try {
     heaps,
   }, null, 2) + '\n');
   console.log(JSON.stringify({ pass: result.pass, stage: result.stage, checks: result.checks, failure: result.failure }));
-  assert(result.pass, 'real adapter campaign failed; preserve evidence'); await call('Browser.close').catch(() => {});
+  assert(result.pass, 'real adapter campaign failed; preserve evidence');
+  } else console.log(JSON.stringify({ pass: true, stage: 'browser-CDP-capability', phaseEngineStarted: false }));
+  await call('Browser.close').catch(() => {});
 } catch (e) {
-  failure = String(e); await writeFile(path.join(evidence, 'driver-failure.json'), JSON.stringify({ failure, stderr: stderr.slice(-3000) }, null, 2) + '\n'); throw e;
+  failure = String(e);
+  if (stage === 'browser-startup' || stage === 'browser-CDP-capability') {
+    await writeFile(path.join(evidence, 'browser-selfcheck.json'), JSON.stringify({ pass: false,
+      candidateSha: process.env.GITHUB_SHA, stage, failure, phaseEngineStarted: false, sandboxDisableFlags: false }, null, 2) + '\n');
+  }
+  await writeFile(path.join(evidence, 'driver-failure.json'), JSON.stringify({ failure, stage, spawnError, mode, stderr: stderr.slice(-3000) }, null, 2) + '\n'); throw e;
 } finally {
   clearInterval(rssSampler); for (const request of pending.values()) clearTimeout(request.timer);
-  socket?.close(); await vite.close();
+  socket?.close(); await vite?.close();
   if (chrome.exitCode === null) { chrome.kill('SIGTERM'); for (let n = 0; n < 50 && chrome.exitCode === null; n++) await pause(100); if (chrome.exitCode === null) chrome.kill('SIGKILL'); }
-  await writeFile(path.join(evidence, 'runtime-provenance.json'), JSON.stringify({ candidateSha: process.env.GITHUB_SHA, executable, executablePath: await realpath(executable), args, runtimeIsolation: true, noRustBuild: true, sourceAndCandidateCheckoutsNotModified: true, failure, peakChromeTreeRssBytes }, null, 2) + '\n');
+  await writeFile(path.join(evidence, 'runtime-provenance.json'), JSON.stringify({ candidateSha: process.env.GITHUB_SHA, executable, executablePath: await realpath(executable), args, mode, stage, runtimeIsolation: true, noRustBuild: true, sourceAndCandidateCheckoutsNotModified: true, failure, peakChromeTreeRssBytes }, null, 2) + '\n');
 }

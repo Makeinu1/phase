@@ -35,15 +35,9 @@ jobs:
           ref: ${{ env.F_SOURCE_SHA }}
           path: source
           persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
-        with:
-          version: 9.15.9
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
-      - name: Install only pinned client dependencies
-        working-directory: control/client
-        run: pnpm install --frozen-lockfile
       - name: Verify retained exact e109 WASM without Rust compiler
         id: input
         working-directory: source
@@ -59,8 +53,35 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/adapter-evidence/provenance"
           cp "$GITHUB_WORKSPACE/retained-inputs/wasm.provenance.json" "$GITHUB_WORKSPACE/adapter-evidence/provenance/"
           cp "$GITHUB_WORKSPACE/wasm-payload/manifest.json" "$GITHUB_WORKSPACE/adapter-evidence/provenance/wasm-manifest.json"
-      - name: Normal module Worker history faults and conditional heap observations
+      - name: Lightweight fixed binding public-export selfcheck
+        id: public_api
         if: ${{ !cancelled() && steps.input.outcome == 'success' }}
+        working-directory: source
+        run: |
+          timeout --signal=TERM --kill-after=5s 30s \
+            node ../control/scripts/ci/undo-history-adapter-run.mjs \
+            "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
+            "$GITHUB_WORKSPACE/adapter-evidence/public-api" --selfcheck-only
+      - name: Sandboxed Chrome and CDP capability selfcheck
+        id: browser
+        if: ${{ !cancelled() && steps.public_api.outcome == 'success' }}
+        working-directory: source
+        run: |
+          timeout --signal=TERM --kill-after=5s 30s \
+            node ../control/scripts/ci/undo-history-adapter-run.mjs \
+            "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
+            "$GITHUB_WORKSPACE/adapter-evidence/browser-capability" --browser-selfcheck-only
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
+        with:
+          version: 9.15.9
+      - name: Install only pinned client dependencies
+        id: dependencies
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
+        working-directory: control/client
+        run: pnpm install --frozen-lockfile
+      - name: Normal module Worker history faults and conditional heap observations
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' && steps.dependencies.outcome == 'success' }}
         working-directory: source
         run: |
           F_EVIDENCE="$GITHUB_WORKSPACE/adapter-evidence/guard" \
@@ -69,6 +90,22 @@ jobs:
             "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
             "$GITHUB_WORKSPACE/adapter-evidence/browser"
           test "$(git -C ../control status --porcelain --untracked-files=no)" = ""
+      - name: Preserve checkout identity after every outcome
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          def inspect(folder, expected):
+              command = lambda *args: subprocess.check_output(['git', '-C', folder, *args], text=True).strip()
+              head = command('rev-parse', 'HEAD')
+              dirty = command('status', '--porcelain', '--untracked-files=no')
+              return {'head': head, 'expected': expected, 'tracked_clean': not dirty, 'unchanged': head == expected and not dirty}
+          receipts = {'source': inspect('source', os.environ['F_SOURCE_SHA']), 'candidate': inspect('control', os.environ['GITHUB_SHA'])}
+          evidence = pathlib.Path('adapter-evidence')
+          evidence.mkdir(exist_ok=True)
+          (evidence / 'checkout-identity.json').write_text(json.dumps(receipts, indent=2) + '\n')
+          assert all(row['unchanged'] for row in receipts.values()), 'checkout identity changed'
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
