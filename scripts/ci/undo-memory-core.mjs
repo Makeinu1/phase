@@ -4,6 +4,8 @@ export async function prepare(engine, fixture, config, report = () => {}) {
 let stage = "prepare", failedCheck, progress, lastActionType, lastOutcomeStatus;
 const {cards, minTurn, caseId} = config;
 const trace=[];
+const actionCounts={};
+let neededCardsDiscarded=0;
 const check = (ok, code) => { if (!ok) { failedCheck = code; throw Error(code); } };
 try {
   check(engine.ping() === "phase-rs engine ready", "real-engine");
@@ -28,6 +30,7 @@ try {
   };
   const submit = (actor, action) => {
     trace.push({actor,action});
+    actionCounts[action.type]=(actionCounts[action.type]??0)+1;
     lastActionType = action.type;
     const outcome = engine.submit_action(actor, action);
     lastOutcomeStatus = ["applied", "rejected"].includes(outcome?.status) ? outcome.status : "unknown";
@@ -42,7 +45,11 @@ try {
       const current = state();
       const waiting = current.waiting_for;
       progress = { step, turn: current.turn_number, phase: current.phase, waiting: waiting.type };
-      if(step % 25 === 0) report({stage:"legal-setup-progress",...progress});
+      if(step % 25 === 0) report({stage:"legal-setup-progress",...progress,
+       handCount:current.players[0].hand.length,libraryCount:current.players[0].library.length,
+       neededCardHandCount:current.players[0].hand.filter(id=>current.objects[id].name==="Grizzly Bears").length,
+       neededCardLibraryCount:current.players[0].library.filter(id=>current.objects[id].name==="Grizzly Bears").length,
+       neededCardsDiscarded,actionCounts:{...actionCounts}});
       if (waiting.type === "MulliganDecision") {
         submit(waiting.data.pending[0].player, { type: "MulliganDecision", data: { choice: { type: "Keep" } } });
       } else if (waiting.type === "DeclareAttackers") {
@@ -50,7 +57,15 @@ try {
       } else if (waiting.type === "DeclareBlockers") {
         submit(waiting.data.player, { type: "DeclareBlockers", data: { assignments: [] } });
       } else if (waiting.type === "DiscardToHandSize") {
-        submit(waiting.data.player, { type: "SelectCards", data: { cards: waiting.data.cards.slice(0, waiting.data.count) } });
+        // Use only engine-offered discard candidates. Preserve the fixture's
+        // required cast card when another legal discard candidate exists.
+        // Input deck/seed and the 500-step / 120-second budget stay unchanged.
+        const candidates=waiting.data.cards;
+        const ordered=[...candidates.filter(id=>current.objects[id].name!=="Grizzly Bears"),
+          ...candidates.filter(id=>current.objects[id].name==="Grizzly Bears")];
+        const discards=ordered.slice(0,waiting.data.count);
+        if(waiting.data.player===0) neededCardsDiscarded+=discards.filter(id=>current.objects[id].name==="Grizzly Bears").length;
+        submit(waiting.data.player, { type: "SelectCards", data: { cards: discards } });
       } else {
         check(waiting.type === "Priority", "normal-priority-required");
         const actor = waiting.data.player;
@@ -78,7 +93,7 @@ try {
 report({stage:"legal-setup-start"});
 const {cast, pre} = reachOrdinaryCast("legal-setup");
 report({stage:"legal-setup-complete",reachedTurn:pre.turn_number,traceLength:trace.length});
-const metadata = {reachedTurn:pre.turn_number,traceLength:trace.length,
+const metadata = {preparationPolicy:"legal-candidate-discard-required-cast-card-last-v2",actionCounts,neededCardsDiscarded,reachedTurn:pre.turn_number,traceLength:trace.length,
  preUtf8Bytes:new TextEncoder().encode(engine.export_game_state_json()).byteLength,
  objectCount:Object.keys(pre.objects).length,battlefieldCount:pre.battlefield.length,
  stackCount:pre.stack.length, censusCycles:config.undo ? config.repeats : 0};
@@ -139,7 +154,7 @@ return {pass:true,caseId,cards,minTurn,repeats,undo:config.undo,census:prepared.
 } catch {return {pass:false,caseId,stage,failureClass:stage==="measurement"?"measurement-error-not-automatically-memory":"preparation-failure"};}
 }
 // Expand one factor at a time only after CI validates this measurement contract.
-// Planned: repeat40/128, size80/128, size160/128, history40/minTurn12/128.
+// Finite scope: 40/80/160, short/turn20, OFF1/ON32 after preparation validation.
 export const cases = [
  {caseId:"smoke40-off",cards:40,minTurn:1,repeats:1,undo:false},
  {caseId:"repeat40-on",cards:40,minTurn:1,repeats:32,undo:true}
@@ -152,5 +167,6 @@ export const nodeCases = [...cases,
  {caseId:"short80-off",cards:80,minTurn:1,repeats:1,undo:false},
  {caseId:"short80-on",cards:80,minTurn:1,repeats:32,undo:true},
  {caseId:"short160-off",cards:160,minTurn:1,repeats:1,undo:false},
- {caseId:"short160-on",cards:160,minTurn:1,repeats:32,undo:true}
+ {caseId:"short160-on",cards:160,minTurn:1,repeats:32,undo:true},
+ {caseId:"long40-off",cards:40,minTurn:20,repeats:1,undo:false}
 ];
