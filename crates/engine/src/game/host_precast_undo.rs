@@ -9,8 +9,8 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOccurrence, CastingVariant, GameState, PriorityPassingMode,
-    StackPaidSnapshot, TrustedGameStateEnvelope, WaitingFor,
+    ActionResult, CastOccurrence, CastingVariant, GameState, PriorityPassingMode, StackPaidSnapshot,
+    TrustedGameStateEnvelope, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::interaction::InteractionSubmission;

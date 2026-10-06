@@ -296,13 +296,13 @@ fn capacity_serializer_error_or_json_refusal_casts_once() {
             })
             .unwrap();
         assert_eq!(
-        result
-            .events
-            .iter()
-            .filter(|e| matches!(e, GameEvent::SpellCast { .. }))
-            .count(),
-        1
-    );
+            result
+                .events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::SpellCast { .. }))
+                .count(),
+            1
+        );
         assert_eq!(f.state.stack.len(), 1);
         assert_eq!(f.undo.next_receipt, 0);
         assert!(f.undo.receipt().is_none());
