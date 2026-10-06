@@ -10073,6 +10073,27 @@ fn apply_single_replacement(
                     if draw_is_substituted_away(state, rid, repl_def, ability, &proposed) {
                         return true;
                     }
+                    if let (
+                        ProposedEvent::LifeLoss { amount, .. },
+                        Effect::LoseLife {
+                            amount: execute_amount,
+                            ..
+                        },
+                    ) = (&proposed, &*def.effect)
+                    {
+                        // Suppress only the scalar template the selected live-object
+                        // applier folds. Other sources, structured modifiers, dynamic
+                        // quantities and captured work still need their continuation.
+                        // The producer above builds Resolved exactly when runtime_execute
+                        // exists; every other continuation is a Template.
+                        let folded_template = repl_def.runtime_execute.is_none()
+                            && rid.source != ObjectId(0)
+                            && !state.liminal_entries.contains_key(&rid.source)
+                            && repl_def.quantity_modification.is_none()
+                            && resolve_event_replacement_quantity(execute_amount, *amount)
+                                .is_some();
+                        return !folded_template;
+                    }
                     !matches!(
                         (&proposed, &*def.effect),
                         (ProposedEvent::Draw { .. }, Effect::Draw { .. })
@@ -10080,10 +10101,6 @@ fn apply_single_replacement(
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
                         | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
-                        // CR 614.6 + CR 119.3: the scalar loss quantity is already
-                        // folded by lose_life_applier; executing it again would
-                        // duplicate the loss and re-enter its replacement.
-                        | (ProposedEvent::LifeLoss { .. }, Effect::LoseLife { .. })
                         // CR 614.6 + CR 701.17a: `mill_applier` folds the execute's
                         // resolved count into the substituted Mill event, and
                         // `apply_mill_after_replacement` mills the event's own

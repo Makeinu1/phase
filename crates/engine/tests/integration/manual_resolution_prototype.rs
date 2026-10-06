@@ -11,7 +11,7 @@ mod enabled_tests {
     use engine::game::visibility::filter_state_for_viewer;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityModification,
-        ReplacementDefinition, TargetFilter,
+        ReplacementDefinition, ResolvedAbility, TargetFilter,
     };
     use engine::types::actions::GameAction;
     use engine::types::events::GameEvent;
@@ -657,6 +657,11 @@ mod enabled_tests {
                     player: engine::types::ability::PlayerScope::Controller,
                 },
             },
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: engine::types::ability::PlayerScope::Controller,
+                },
+            },
         ] {
             let (mut runner, p0, stack_entry_id) = execute_quantity_runner(quantity);
             let before = runner.state().clone();
@@ -689,6 +694,211 @@ mod enabled_tests {
         )
         .expect("the large representable rounded result has no arbitrary cap");
         assert_eq!(runner.state().players[p0.0 as usize].life, 1_073_741_823);
+
+        // Synthetic one-shot definitions isolate continuation allocation from
+        // recurring replacements; these are typed fixtures, not card readings.
+        for (
+            label,
+            quantity,
+            modification,
+            sentinel,
+            captured,
+            expected_loss,
+            expected_changes,
+        ) in [
+            (
+                "ordinary life total",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: engine::types::ability::PlayerScope::Controller,
+                    },
+                },
+                None,
+                false,
+                false,
+                1,
+                vec![(-1, 19), (-19, 0)],
+            ),
+            (
+                "ordinary hand size",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: engine::types::ability::PlayerScope::Controller,
+                    },
+                },
+                None,
+                false,
+                false,
+                1,
+                vec![(-1, 19), (-3, 16)],
+            ),
+            (
+                "folded scalar template",
+                QuantityExpr::Fixed { value: 3 },
+                None,
+                false,
+                false,
+                3,
+                vec![(-3, 17)],
+            ),
+            (
+                "structured modifier with execute",
+                QuantityExpr::Fixed { value: 3 },
+                Some(QuantityModification::Times { factor: 2 }),
+                false,
+                false,
+                2,
+                vec![(-2, 18), (-3, 15)],
+            ),
+            (
+                "sentinel scalar template",
+                QuantityExpr::Fixed { value: 3 },
+                None,
+                true,
+                false,
+                1,
+                vec![(-1, 19), (-3, 16)],
+            ),
+            (
+                "captured continuation",
+                QuantityExpr::Fixed { value: 3 },
+                None,
+                false,
+                true,
+                3,
+                vec![(-3, 17), (1, 18)],
+            ),
+        ] {
+            let p0 = PlayerId(0);
+            let p1 = PlayerId(1);
+            let mut scenario = GameScenario::new();
+            scenario
+                .at_phase(Phase::PreCombatMain)
+                .with_life(p0, 20)
+                .with_life(p1, 31)
+                .with_cards_in_hand(p0, &["P0 Hand A", "P0 Hand B", "P0 Hand C"])
+                .with_cards_in_hand(p1, &["P1 Hand A", "P1 Hand B"])
+                .with_graveyard(p0, &["P0 Grave A", "P0 Grave B", "P0 Grave C", "P0 Grave D"])
+                .with_graveyard(p1, &["P1 Grave A"]);
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::LoseLife {
+                        amount: quantity,
+                        target: Some(TargetFilter::Controller),
+                    },
+                ));
+            replacement.quantity_modification = modification;
+            replacement.consume_on_apply = true;
+            let selected = if sentinel {
+                replacement.source_controller = Some(p0);
+                ObjectId(0)
+            } else {
+                let mut source = scenario.add_creature(p1, "Selected Loss Replacement", 1, 1);
+                source.controlled_by(p0);
+                let source_id = source.id();
+                if captured {
+                    replacement = replacement.runtime_execute(ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                        vec![],
+                        source_id,
+                        p0,
+                    ));
+                }
+                source.with_replacement_definition(replacement.clone());
+                source_id
+            };
+            let mut decoy_definition = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::LoseLife {
+                        amount: QuantityExpr::Fixed { value: 11 },
+                        target: Some(TargetFilter::Controller),
+                    },
+                ));
+            decoy_definition.consume_on_apply = true;
+            let decoy = scenario
+                .add_creature(p1, "Other Controller Loss Decoy", 1, 1)
+                .with_replacement_definition(decoy_definition)
+                .id();
+            let mut runner = scenario.build();
+            let registry_index = runner.state().pending_damage_replacements.len();
+            if sentinel {
+                runner
+                    .state_mut()
+                    .pending_damage_replacements
+                    .push(replacement);
+                assert_eq!(
+                    runner.state().pending_damage_replacements[registry_index].source_controller,
+                    Some(p0),
+                    "{label}"
+                );
+            } else {
+                assert_eq!(runner.state().objects[&selected].owner, p1, "{label}");
+                assert_eq!(runner.state().objects[&selected].controller, p0, "{label}");
+                assert_eq!(
+                    runner.state().objects[&selected].base_controller,
+                    Some(p0),
+                    "{label}"
+                );
+            }
+            assert_eq!(runner.state().objects[&decoy].controller, p1, "{label}");
+            assert_eq!(runner.state().players[p0.0 as usize].hand.len(), 3, "{label}");
+            assert_eq!(runner.state().players[p0.0 as usize].graveyard.len(), 4, "{label}");
+            assert_eq!(runner.state().players[p1.0 as usize].hand.len(), 2, "{label}");
+            assert_eq!(runner.state().players[p1.0 as usize].graveyard.len(), 1, "{label}");
+            let mut events = Vec::new();
+            let lost = engine::game::effects::life::apply_life_loss(
+                runner.state_mut(),
+                p0,
+                1,
+                &mut events,
+            )
+            .expect("ordinary one-shot replacement and its continuation complete");
+            let changes: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged {
+                        player_id,
+                        amount,
+                        new_total,
+                    } => Some((*player_id, *amount, new_total.0)),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<_> = expected_changes
+                .iter()
+                .map(|(amount, total)| (p0, *amount, Some(*total)))
+                .collect();
+            assert_eq!(changes, expected, "{label}");
+            assert_eq!(lost, expected_loss, "{label}");
+            assert_eq!(
+                runner.state().players[p0.0 as usize].life,
+                expected_changes.last().expect("case has life changes").1,
+                "{label}"
+            );
+            assert_eq!(runner.state().players[p1.0 as usize].life, 31, "{label}");
+            if sentinel {
+                assert!(
+                    runner.state().pending_damage_replacements[registry_index].is_consumed,
+                    "{label}: exact selected registry entry was applied"
+                );
+            } else {
+                assert!(
+                    runner.state().objects[&selected].replacement_definitions[0].is_consumed,
+                    "{label}: exact selected object definition was applied"
+                );
+            }
+            assert!(
+                !runner.state().objects[&decoy].replacement_definitions[0].is_consumed,
+                "{label}: differently scoped decoy was not applied"
+            );
+            assert!(runner.state().pending_replacement.is_none(), "{label}");
+            assert!(!runner.state().has_post_replacement_drain(), "{label}");
+        }
     }
 
     fn install_control(state: &mut GameState, controller: PlayerId) {
