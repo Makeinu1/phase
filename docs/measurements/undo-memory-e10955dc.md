@@ -21,7 +21,23 @@ All values below are bytes. OFF is one cast only; ON is cast/restore at the same
 
 40-long reaches turn 21 with 306 preparation actions. ON census verifies PRE equality for all 32 cycles; cycle 16 and 32 have the same observed linear size, and clearing the game leaves that size unchanged. The ON child completed in 39.6 seconds without a resource-guard stop. 80-short reaches turn 3 with 38 preparation actions and 160 objects; its census also validates all 32 restores. Deck size and preparation history can change together, so these observations are not a pure size-only causal estimate.
 
-The run evidence artifact `undo-memory-boundary-evidence` contains `census.reachedTurn`, `traceLength`, `objectCount`, `battlefieldCount`, `stackCount`, `preUtf8Bytes`, action counts, preparation policy, and replay-recording booleans. Exact PRE byte counts and the remaining structural counts were not transcribed into this report; use those recorded fields, not inferred values, when defining a gate. Census validates players, objects, battlefield, stack, waiting state, priority, phase, turn and RNG position. It does not assert equality of renewed interaction authority.
+## Recorded PRE census
+
+These are exact successful result fields read from each run's `undo-memory-boundary-evidence` artifact. Counts and bytes are the same in the OFF and ON pair for each profile.
+
+| Node profile | cards per seat | minTurn / reachedTurn | traceLength | objectCount | battlefieldCount | stackCount | preUtf8Bytes | OFF / ON repetitions | ON census equality |
+|---|---:|---|---:|---:|---:|---:|---:|---|---|
+| 40 short | 40 | 1 / 3 | 38 | 80 | 2 | 0 | 259,624 | 1 / 32 | 32 cycles PASS |
+| 80 short | 80 | 1 / 3 | 38 | 160 | 2 | 0 | 391,915 | 1 / 32 | 32 cycles PASS |
+| 40 long | 40 | 20 / 21 | 306 | 80 | 2 | 0 | 256,526 | 1 / 32 | 32 cycles PASS |
+
+OFF has `censusCycles: 0`, `samePreValidated: false`, `replay: []`; it does not claim restore validation. ON has `censusCycles: 32` and `samePreValidated: true`. In every ON case replay recording is true before cycle 1 and false afterward; before/after cycles 2, 4, 8, 16 and 32 it is false. These are recording-enabled booleans, not replay entry counts.
+
+Both 40-long cases record preparation policy `legal-candidate-discard-required-cast-card-last-v2`, `neededCardsDiscarded: 0`, and action counts `{SetPriorityPassingMode: 2, MulliganDecision: 2, PassPriority: 282, PlayLand: 2, SelectCards: 17, TapLandForMana: 1}`. The short runs predate these fields; they are not retrospectively inferred. Long PRE JSON is smaller than short PRE JSON despite the longer preparation trace, so trace length alone does not describe serialized payload size.
+
+`preUtf8Bytes` is the exported JSON string's UTF-8 byte length, not RAM consumption or retained snapshot bytes. Zone breakdown per seat (hand/library/graveyard), exile counts, journal counts, and replay entry count/bytes were not recorded. `traceLength` is the number of preparation actions and must not substitute for journal/history size.
+
+The run evidence artifact `undo-memory-boundary-evidence` contains `census.reachedTurn`, `traceLength`, `objectCount`, `battlefieldCount`, `stackCount`, `preUtf8Bytes`, action counts, preparation policy, and replay-recording booleans. Recorded PRE bytes and structural counts are transcribed above; unrecorded zone and journal dimensions remain unmeasured. Census validates players, objects, battlefield, stack, waiting state, priority, phase, turn and RNG position. It does not assert equality of renewed interaction authority.
 
 The first restore clears replay recording, so cycle 1 and subsequent cycles are labeled separately. Do not interpret their allocation behavior as identical.
 
@@ -40,3 +56,5 @@ Each Node case uses a fresh process; each Chrome case a fresh module Worker. Cen
 Candidate gate inputs are total state/object and zone counts, retained snapshot count, serialized PRE byte size, and variable payload sizes. To stay within a measured region, a gate would need to bound the recorded structure and payload dimensions together, with the same build/database/runtime assumptions. Forty or eighty deck cards alone are insufficient. The host stores one Option snapshot without a byte cap, while serialization can clone state, create a Value, and allocate sorting scratch; a String-length cap cannot bound the peak.
 
 Unmeasured dimensions include larger or richer card/object payloads, counters/abilities, stack and pending-interaction payloads, longer histories/replay content, a full card database, and different builds or devices. Before selecting a fixed device budget, measure these dimensions and the relevant live/peak memory on the intended distribution and device. No safe MiB limit is established by this report.
+
+The dedicated workflow now filters push changes to `scripts/ci/undo-memory-*.mjs` and `.github/workflows/undo-memory-measure.yml`. Docs-only changes do not request measurement; driver and workflow changes remain triggers. Introducing the filter itself is a workflow change and therefore matches once.

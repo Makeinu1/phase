@@ -2,6 +2,9 @@ name: Fork bounded Undo memory measurement
 on:
   push:
     branches: [experiment/undo-memory-e10955dc]
+    paths:
+      - scripts/ci/undo-memory-*.mjs
+      - .github/workflows/undo-memory-measure.yml
 permissions:
   contents: read
 concurrency:
