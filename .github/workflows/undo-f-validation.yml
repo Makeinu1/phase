@@ -1,0 +1,293 @@
+name: Fork Undo F validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-undo-f-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  F_SOURCE_SHA: e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+  CARGO_BUILD_JOBS: '1'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  native-build:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      manifest: ${{ steps.manifest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: nightly-2026-04-19
+          components: rustfmt,clippy,rustc-codegen-cranelift-preview
+          target: wasm32-unknown-unknown
+          rust-src-dir: source
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Build the two related test archives once
+        working-directory: source
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/undo-f-native-target
+          F_EVIDENCE: ${{ github.workspace }}/native-evidence
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/native-payload"
+          rustc -Vv
+          cargo -V
+          cargo-nextest --version
+          python3 ../control/scripts/ci/undo-f-guard.py native-core-archive \
+            cargo nextest archive --locked --build-jobs 1 --cargo-verbose --profile ci \
+            --config profile.test.debug=0 --config profile.test.incremental=false \
+            --config 'profile.test.codegen-backend="cranelift"' \
+            --package phase-engine --test host_precast_undo_acceptance \
+            --archive-file "$GITHUB_WORKSPACE/native-payload/core.tar.zst"
+          python3 ../control/scripts/ci/undo-f-guard.py native-boundary-archive \
+            cargo nextest archive --locked --build-jobs 1 --cargo-verbose --profile ci \
+            --config profile.test.debug=0 --config profile.test.incremental=false \
+            --config 'profile.test.codegen-backend="cranelift"' \
+            --package engine-wasm --lib \
+            --archive-file "$GITHUB_WORKSPACE/native-payload/boundary.tar.zst"
+      - name: Pin native artifact contents
+        id: manifest
+        working-directory: source
+        run: |
+          SHA=$(python3 ../control/scripts/ci/undo-f-manifest.py create "$GITHUB_WORKSPACE/native-payload")
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: archive
+        with:
+          name: undo-f-native-archives
+          path: native-payload
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Record GitHub artifact digest
+        run: echo 'native archive digest=${{ steps.archive.outputs.artifact-digest }}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: undo-f-native-build-evidence
+          path: native-evidence
+          if-no-files-found: warn
+          retention-days: 1
+
+  native-test:
+    needs: native-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-nextest@0.9.146
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: undo-f-native-archives
+          path: native-payload
+      - name: Verify producer hashes and run this partition without compiling
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/native-test-evidence
+          MANIFEST_SHA: ${{ needs.native-build.outputs.manifest }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          python3 ../control/scripts/ci/undo-f-manifest.py verify "$GITHUB_WORKSPACE/native-payload" "$MANIFEST_SHA"
+          cargo-nextest nextest run --help > "$RUNNER_TEMP/undo-f-nextest-run-help.txt"
+          for OPTION in --archive-file --workspace-remap --extract-to --partition; do
+            grep -F -- "$OPTION" "$RUNNER_TEMP/undo-f-nextest-run-help.txt" > /dev/null
+          done
+          for KIND in core boundary; do
+            # nextest 0.9.146 canonicalizes this directory before extraction.
+            mkdir -p "$RUNNER_TEMP/undo-f-$KIND"
+            test -d "$RUNNER_TEMP/undo-f-$KIND" && test -w "$RUNNER_TEMP/undo-f-$KIND"
+            FILTER=()
+            if [ "$KIND" = boundary ]; then
+              FILTER=(-E 'test(host_precast_undo::tests::)')
+            fi
+            python3 ../control/scripts/ci/undo-f-guard.py "native-$KIND-shard-$SHARD" \
+              cargo-nextest nextest run --profile ci \
+              "${FILTER[@]}" \
+              --partition "count:$SHARD/2" \
+              --archive-file "$GITHUB_WORKSPACE/native-payload/$KIND.tar.zst" \
+              --workspace-remap "$GITHUB_WORKSPACE/source" \
+              --extract-to "$RUNNER_TEMP/undo-f-$KIND" \
+              --status-level all --final-status-level all
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: undo-f-native-shard-${{ matrix.shard }}-evidence
+          path: native-test-evidence
+          if-no-files-found: warn
+          retention-days: 1
+
+  wasm-build:
+    # Serialize compilation, but keep WASM evidence independent of native failures.
+    needs: native-build
+    if: always() && github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      manifest: ${{ steps.manifest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: nightly-2026-04-19
+          target: wasm32-unknown-unknown
+          components: rustfmt,clippy,rustc-codegen-cranelift-preview
+          rust-src-dir: source
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Generate only engine-wasm in an isolated target
+        working-directory: source
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/undo-f-wasm-target
+          F_EVIDENCE: ${{ github.workspace }}/wasm-build-evidence
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/wasm-payload"
+          wasm-bindgen --version
+          python3 ../control/scripts/ci/undo-f-guard.py wasm-engine-build \
+            cargo build --locked --jobs 1 --verbose --package engine-wasm \
+            --target wasm32-unknown-unknown --profile tool \
+            --config profile.tool.opt-level=0 --config profile.tool.debug=0 \
+            --config profile.tool.incremental=false --config 'profile.tool.lto="off"' \
+            --config profile.tool.codegen-units=16
+          python3 ../control/scripts/ci/undo-f-guard.py wasm-bindgen \
+            wasm-bindgen --target web --out-name engine_wasm \
+            --out-dir "$GITHUB_WORKSPACE/wasm-payload" \
+            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/tool/engine_wasm.wasm"
+          grep -F 'link-arg=stack-size=16777216' "$F_EVIDENCE/wasm-engine-build.log"
+          printf '%s\n' '{"type":"module"}' > "$GITHUB_WORKSPACE/wasm-payload/package.json"
+          python3 ../control/scripts/ci/undo-f-guard.py wasm-generated-bindings \
+            node ../control/scripts/ci/undo-f-bindings.mjs "$GITHUB_WORKSPACE/wasm-payload"
+      - name: Pin WASM artifact contents
+        id: manifest
+        working-directory: source
+        run: |
+          SHA=$(python3 ../control/scripts/ci/undo-f-manifest.py create "$GITHUB_WORKSPACE/wasm-payload")
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: archive
+        with:
+          name: undo-f-real-wasm
+          path: wasm-payload
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Record GitHub artifact digest
+        run: echo 'WASM artifact digest=${{ steps.archive.outputs.artifact-digest }}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: undo-f-wasm-build-evidence
+          path: wasm-build-evidence
+          if-no-files-found: warn
+          retention-days: 1
+
+  wasm-test:
+    needs: wasm-build
+    if: always() && needs.wasm-build.result == 'success' && github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: undo-f-real-wasm
+          path: wasm-payload
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Verify the producer and install frozen client dependencies
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+          MANIFEST_SHA: ${{ needs.wasm-build.outputs.manifest }}
+        run: |
+          python3 ../control/scripts/ci/undo-f-manifest.py verify "$GITHUB_WORKSPACE/wasm-payload" "$MANIFEST_SHA"
+          python3 ../control/scripts/ci/undo-f-guard.py client-dependencies \
+            pnpm --dir client install --frozen-lockfile
+          cp "$GITHUB_WORKSPACE/wasm-payload/engine_wasm.js" client/src/wasm/
+          cp "$GITHUB_WORKSPACE/wasm-payload/engine_wasm_bg.wasm" client/src/wasm/
+      - name: Existing real-WASM integration tests (happy-dom; no browser or RTC claim)
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py existing-real-wasm-tests \
+            pnpm --dir client exec vitest run --config vitest.integration.config.ts \
+            --pool=forks --isolate --coverage.enabled=false --reporter=verbose \
+            src/game/__tests__/wasmLegalActions.integration.test.ts \
+            src/data/__tests__/formatRegistry.integration.test.ts
+          printf '%s\n' 'New host PRE-cast Undo behavior: NOT RUN; browser: NOT RUN; RTC: NOT RUN.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: undo-f-wasm-test-evidence
+          path: wasm-test-evidence
+          if-no-files-found: warn
+          retention-days: 1

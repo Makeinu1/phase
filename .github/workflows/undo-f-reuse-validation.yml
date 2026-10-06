@@ -1,0 +1,454 @@
+name: Fork Undo F verified artifact consumers
+
+on:
+  push:
+    branches: [experiment/undo-f-actions-e10955dc]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-undo-f-consumers-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  F_SOURCE_SHA: e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+  F_PRODUCER_SHA: 387b7542a901d711cbef2868e686b29726c905f0
+  CARGO_BUILD_JOBS: '1'
+
+jobs:
+  native-test:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Cross-run artifact reads require this additional read permission.
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Verify the pinned native input without compiling
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/native-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py native-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py native \
+            "$GITHUB_WORKSPACE/native-payload" "$GITHUB_WORKSPACE/reused-inputs/native.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/native-payload" 21eda8d2e38a7b25a95297a773a68420895c8c60a4ce3e20786a1b4d3c53667b "$F_PRODUCER_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: matrix.shard == 1
+        with:
+          name: undo-f-pinned-native-input
+          path: reused-inputs
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Run this native partition without Cargo metadata or compilation
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/native-test-evidence
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cargo-nextest nextest run --help > "$RUNNER_TEMP/undo-f-nextest-run-help.txt"
+          for OPTION in --archive-file --workspace-remap --extract-to --partition; do
+            grep -F -- "$OPTION" "$RUNNER_TEMP/undo-f-nextest-run-help.txt" > /dev/null
+          done
+          for KIND in core boundary; do
+            mkdir -p "$RUNNER_TEMP/undo-f-$KIND"
+            test -d "$RUNNER_TEMP/undo-f-$KIND" && test -w "$RUNNER_TEMP/undo-f-$KIND"
+            FILTER=()
+            if [ "$KIND" = boundary ]; then
+              FILTER=(-E 'test(host_precast_undo::tests::)')
+            fi
+            python3 ../control/scripts/ci/undo-f-guard.py "native-$KIND-shard-$SHARD" \
+              cargo-nextest nextest run --profile ci "${FILTER[@]}" \
+              --partition "count:$SHARD/2" \
+              --archive-file "$GITHUB_WORKSPACE/native-payload/$KIND.tar.zst" \
+              --workspace-remap "$GITHUB_WORKSPACE/source" \
+              --extract-to "$RUNNER_TEMP/undo-f-$KIND" --status-level all --final-status-level all
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-reused-native-shard-${{ matrix.shard }}-evidence
+          path: native-test-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  wasm-test:
+    # No native dependency: failures in another lane cannot suppress this job.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Verify the pinned actual WASM input
+        id: wasm-input
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py wasm-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/wasm-payload" "$GITHUB_WORKSPACE/reused-inputs/wasm.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: undo-f-pinned-wasm-input
+          path: reused-inputs
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Inspect actual bindings and install frozen client dependencies
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py reused-bindings \
+            node ../control/scripts/ci/undo-f-bindings.mjs "$GITHUB_WORKSPACE/wasm-payload"
+          python3 ../control/scripts/ci/undo-f-guard.py client-dependencies \
+            pnpm --dir client install --frozen-lockfile
+          cp "$GITHUB_WORKSPACE/wasm-payload/engine_wasm.js" client/src/wasm/
+          cp "$GITHUB_WORKSPACE/wasm-payload/engine_wasm_bg.wasm" client/src/wasm/
+      - name: Existing real-WASM integration (not Undo behavior)
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py existing-real-wasm-tests \
+            pnpm --dir client exec vitest run --config vitest.integration.config.ts \
+            --pool=forks --isolate --coverage.enabled=false --reporter=verbose \
+            src/game/__tests__/wasmLegalActions.integration.test.ts \
+            src/data/__tests__/formatRegistry.integration.test.ts
+      - name: Actual WASM ordinary cast and host Undo restore boundaries (not UI or two-seat sync)
+        if: ${{ !cancelled() && steps.wasm-input.outcome == 'success' }}
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-undo-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py actual-wasm-restore \
+            node ../control/scripts/ci/undo-f-wasm-restore.mjs "$GITHUB_WORKSPACE/wasm-payload" \
+            crates/engine-wasm/src/fixtures/host-precast-card-data.json
+      - name: Chromium actual-engine module-worker capability (not app UI or RTC acceptance)
+        # Run after integration, even if its bindings/dependencies/tests failed.
+        # A browser failure cannot suppress the independent WASM test evidence.
+        if: ${{ !cancelled() && steps.wasm-input.outcome == 'success' }}
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/browser-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py browser-capability \
+            node ../control/scripts/ci/undo-f-browser.mjs "$GITHUB_WORKSPACE/wasm-payload" "$F_EVIDENCE"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-reused-wasm-and-browser-evidence
+          path: |
+            wasm-test-evidence
+            wasm-undo-evidence
+            browser-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  rtc-capability:
+    # QA source is independent from the fixed engine and from every other job.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 1ad5c90117d33a79ce83014bcafa1e1b5e2033f0
+          path: rtc-qa
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /client/qa/private-rtc-capability.html
+            /client/src/qa/harness/
+            /client/vite.privateRtcCapability.config.ts
+            /client/vitest.privateRtcCapability.config.ts
+            /client/package.json
+            /client/pnpm-lock.yaml
+            /scripts/qa_private_rtc_capability.py
+            /scripts/qa_private_rtc_capability_tests.py
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Build only the pinned A1/A2 harness and install its Python driver dependency
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/rtc-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-client-dependencies \
+            pnpm --dir "$GITHUB_WORKSPACE/rtc-qa/client" install --frozen-lockfile
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-python-environment \
+            python3 -m venv "$RUNNER_TEMP/rtc-python"
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-driver-dependency \
+            "$RUNNER_TEMP/rtc-python/bin/pip" install --disable-pip-version-check playwright==1.62.0
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-harness-build \
+            pnpm --dir "$GITHUB_WORKSPACE/rtc-qa/client" exec vite build --config vite.privateRtcCapability.config.ts
+      - name: Pin A1 source identity independently from the engine source
+        working-directory: rtc-qa
+        run: |
+          test "$(git rev-parse HEAD)" = 1ad5c90117d33a79ce83014bcafa1e1b5e2033f0
+          git diff --exit-code -- client/package.json client/pnpm-lock.yaml
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os
+          from pathlib import Path
+          driver_sha = hashlib.sha256(Path('scripts/qa_private_rtc_capability.py').read_bytes()).hexdigest()
+          tests_sha = hashlib.sha256(Path('scripts/qa_private_rtc_capability_tests.py').read_bytes()).hexdigest()
+          assert driver_sha == 'c3bd628e48656ff3f759be3afae42b3d56e50cccf8bce61ca5bf01aa0732dc84', 'pinned QA driver differs'
+          assert tests_sha == 'd3ce2a60e0f4c91589d1e712e9184ade9eaed865f5115c58bda34549fa7b0965', 'pinned QA tests differ'
+          spec = importlib.util.spec_from_file_location('rtc_driver', 'scripts/qa_private_rtc_capability.py')
+          driver = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(driver)
+          digest = hashlib.sha256()
+          for name in driver.SOURCE_INPUTS:
+              digest.update(name.encode() + b'\0' + (Path('client') / name).read_bytes() + b'\0')
+          assert digest.hexdigest() == '1867d85304aa0675ab57baba1bc0fdb118228348c19d530fe33ebc7b7f8c483d', 'pinned QA inputs differ'
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('RTC_A1_SOURCE_SHA256=' + digest.hexdigest() + '\n')
+          receipt = {'qa_source_sha': '1ad5c90117d33a79ce83014bcafa1e1b5e2033f0', 'qa_driver_sha256': driver_sha, 'qa_tests_sha256': tests_sha, 'a1_input_sha256': digest.hexdigest(), 'scope': 'independent native RTC capability; not Phase game sync'}
+          evidence = Path(os.environ['GITHUB_WORKSPACE']) / 'rtc-evidence'
+          evidence.mkdir(exist_ok=True)
+          (evidence / 'qa-source-identity.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print('QA source 1ad5c90117d33a79ce83014bcafa1e1b5e2033f0; A1 input SHA256=' + digest.hexdigest())
+          print('QA driver SHA256=' + driver_sha)
+          PY
+      - name: Actual native RTC A1/A2 capability (three fixed fresh browsers; not Phase two-seat game sync)
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/rtc-evidence
+        run: |
+          # Fixed before execution: three independent fresh browser runs, no retry.
+          FAILED=0
+          for ATTEMPT in 1 2 3; do
+            if python3 ../control/scripts/ci/undo-f-guard.py "rtc-native-capability-$ATTEMPT" \
+              "$RUNNER_TEMP/rtc-python/bin/python" "$GITHUB_WORKSPACE/rtc-qa/scripts/qa_private_rtc_capability.py" \
+              --client-root "$GITHUB_WORKSPACE/rtc-qa/client" \
+              --build-dir "$GITHUB_WORKSPACE/rtc-qa/client/dist-private-rtc-capability" \
+              --output-dir "$F_EVIDENCE/runtime-$ATTEMPT" \
+              --expected-source-sha256 "$RTC_A1_SOURCE_SHA256" \
+              --expected-source-head 1ad5c90117d33a79ce83014bcafa1e1b5e2033f0 \
+              --browser-path /usr/bin/google-chrome; then
+              echo "RTC fresh browser $ATTEMPT: PASS"
+            else
+              FAILED=1
+              echo "RTC fresh browser $ATTEMPT: FAIL (preserved; continuing fixed plan)"
+            fi
+          done
+          exit "$FAILED"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-independent-rtc-capability-evidence
+          path: rtc-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  single-host-ui:
+    # No dependency on RTC/native/WASM job outcomes; immutable runtime reused.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 74dd4d39198abf9f52dd50c4e0037e00e283d6c1
+          path: frontend
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Verify the same compiled WASM input without building an engine
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/single-host-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py ui-wasm-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/ui-wasm-payload" "$GITHUB_WORKSPACE/ui-reused-inputs/wasm.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/ui-wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+      - name: Install only the pinned frontend's frozen dependencies
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/single-host-ui-evidence
+        run: |
+          test "$(git -C ../frontend rev-parse HEAD)" = 74dd4d39198abf9f52dd50c4e0037e00e283d6c1
+          python3 ../control/scripts/ci/undo-f-guard.py ui-client-dependencies \
+            pnpm --dir ../frontend/client install --frozen-lockfile
+      - name: Single host consent, disabled Undo and real private Worker close
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/single-host-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py single-host-ui \
+            node ../control/scripts/ci/undo-f-single-host-ui.mjs \
+            "$GITHUB_WORKSPACE/frontend/client" "$GITHUB_WORKSPACE/ui-wasm-payload" \
+            crates/engine-wasm/src/fixtures/host-precast-card-data.json "$F_EVIDENCE"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-single-host-ui-evidence
+          path: single-host-ui-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  two-seat-ui:
+    # Full App, two real contexts, real loopback PeerJS/native RTC. Independent
+    # from RTC capability, native, WASM and single-host-negative job outcomes.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 74dd4d39198abf9f52dd50c4e0037e00e283d6c1
+          path: frontend
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Verify the same compiled WASM input without building an engine
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py pair-wasm-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/pair-wasm-payload" "$GITHUB_WORKSPACE/pair-reused-inputs/wasm.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/pair-wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+      - name: Verify the exact newly generated draft input without rebuilding
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py pair-draft-input \
+            python3 ../control/scripts/ci/undo-f-draft-artifact.py draft \
+            "$GITHUB_WORKSPACE/pair-draft-payload" "$GITHUB_WORKSPACE/pair-reused-inputs/draft.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/pair-draft-payload" 6a0043113fd25b7f2a0499ac570aabee51ea9e0ba74523309cc3f4e6fbb805a0 eac6c9be9b1e0f1b9406506017c195f1107b6437
+      - name: Install pinned frontend dependencies and an ephemeral official loopback PeerServer
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          test "$(git -C ../frontend rev-parse HEAD)" = 74dd4d39198abf9f52dd50c4e0037e00e283d6c1
+          python3 ../control/scripts/ci/undo-f-guard.py pair-client-dependencies \
+            pnpm --dir ../frontend/client install --frozen-lockfile
+          mkdir "$RUNNER_TEMP/pair-peer-server"
+          printf '%s\n' '{"name":"undo-f-loopback-signaling","private":true}' > "$RUNNER_TEMP/pair-peer-server/package.json"
+          python3 ../control/scripts/ci/undo-f-guard.py pair-signaling-dependency \
+            npm --prefix "$RUNNER_TEMP/pair-peer-server" install --save-exact --ignore-scripts --no-audit --no-fund peer@1.0.2
+      - name: Real two-seat full App host cast, pointer Undo, exact ACK barrier and next legal cast
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py two-seat-ui \
+            node ../control/scripts/ci/undo-f-two-seat-ui.mjs \
+            "$GITHUB_WORKSPACE/frontend/client" "$GITHUB_WORKSPACE/pair-wasm-payload" \
+            "$GITHUB_WORKSPACE/pair-draft-payload" crates/engine-wasm/src/fixtures/host-precast-card-data.json \
+            "$RUNNER_TEMP/pair-peer-server" "$F_EVIDENCE"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-two-seat-ui-evidence
+          path: two-seat-ui-evidence
+          if-no-files-found: warn
+          retention-days: 7
