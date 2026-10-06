@@ -105,6 +105,13 @@ export interface ManualResolutionPortScope extends ManualResolutionSourceReferen
  * unpublished native action has matching fields.
  */
 export interface ManualResolutionCommandPort {
+  /**
+   * Read-only recovery snapshot from this authenticated timeline. Return the
+   * identical immutable original request while delivery is pending/unknown,
+   * including for another source. UI remounts must not erase that evidence;
+   * a new authenticated timeline uses a separate receipt session.
+   */
+  getUnresolvedManualResolutionRequest(): ManualResolutionRequest | null;
   submitManualResolutionCommand(
     request: ManualResolutionRequest,
   ): Promise<ManualResolutionResult>;

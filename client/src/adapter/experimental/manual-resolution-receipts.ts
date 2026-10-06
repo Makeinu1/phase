@@ -129,8 +129,8 @@ export function createManualResolutionReceiptSession({
       : unknown(attempt.request, "receipt-mismatch");
     return attempt.result;
   };
-  const unresolved = () => [...attempts.values()].some((byId) =>
-    [...byId.values()].some((attempt) => !attempt.result || attempt.result.status === "indeterminate"));
+  const unresolved = () => [...attempts.values()].flatMap((byId) => [...byId.values()])
+    .find((attempt) => !attempt.result || attempt.result.status === "indeterminate");
   const record = (attempt: Attempt) => {
     const generation = attempt.request.binding.adapterGeneration;
     let byId = attempts.get(generation);
@@ -145,6 +145,7 @@ export function createManualResolutionReceiptSession({
     bindBoundary: (boundary) => (scope: ManualResolutionPortScope) => {
       const capturedScope = Object.freeze({ ...scope });
       return {
+        getUnresolvedManualResolutionRequest: () => unresolved()?.request ?? null,
         submitManualResolutionCommand: (input) => {
           const request = freezeRequest(input);
           const originalAttempt = requestAttempts.get(input);

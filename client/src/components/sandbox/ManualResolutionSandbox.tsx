@@ -168,6 +168,17 @@ function ManualResolutionSandboxSession({
   }, [source.stackEntryId, source.sourceObjectId]);
 
   useLayoutEffect(() => {
+    if (activeAttemptRef.current !== null) return;
+    const retainedRequest = commandPort.getUnresolvedManualResolutionRequest();
+    if (retainedRequest === null) return;
+    // Recover the session's exact request, rather than reconstructing it from
+    // the newly displayed source/binding or treating a remount as a restore.
+    updateActiveAttempt({ request: retainedRequest, phase: "indeterminate" });
+    setError(uncertainMessage("The command context changed before delivery was confirmed."));
+    setAnnouncement("Delivery remains unknown. Check status before retrying.");
+  }, [commandPort, updateActiveAttempt]);
+
+  useLayoutEffect(() => {
     const portChanged = previousCommandPortRef.current !== commandPort;
     const adapterGenerationChanged =
       previousAdapterGenerationRef.current !== commandBinding.adapterGeneration;
@@ -274,11 +285,15 @@ function ManualResolutionSandboxSession({
     focusSafely();
   }
 
-  function completeCommand(kind: PendingCommand): void {
+  function completeCommand(kind: PendingCommand, request: ManualResolutionRequest): void {
     invalidateReconciliation();
     updateActiveAttempt(null);
     setError(null);
-    if (kind === "finish") {
+    // Confirming an earlier source's Finish only clears its uncertainty. It
+    // must not finish or move focus away from the currently displayed source.
+    if (kind === "finish" &&
+      request.command.stackEntryId === source.stackEntryId &&
+      request.command.sourceObjectId === source.sourceObjectId) {
       runFinishEffects();
       return;
     }
@@ -293,7 +308,7 @@ function ManualResolutionSandboxSession({
     }
 
     if (result.status === "completed") {
-      completeCommand(kind);
+      completeCommand(kind, request);
     } else if (result.status === "rejected") {
       invalidateReconciliation();
       updateActiveAttempt(null);
@@ -365,7 +380,7 @@ function ManualResolutionSandboxSession({
     }
 
     if (result.status === "completed") {
-      completeCommand(kind);
+      completeCommand(kind, request);
     } else if (result.status === "not-applied") {
       invalidateReconciliation();
       updateActiveAttempt(null);
