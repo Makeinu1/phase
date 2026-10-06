@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 
 const [client, wasm, draft, fixture, serverPackages, evidence] = process.argv.slice(2).map(x => path.resolve(x));
-const frontendSha = "91e761eec1a2fa6251cd4aa9b7728c6175ca9f42";
+const frontendSha = "ea16547c3694999c6b991cfbcbcd8180a0d6fb1a";
 const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const hostForm = "document.querySelector('button[aria-label=Format]')?.closest('form')";
@@ -46,7 +46,8 @@ const status=[...rail.querySelectorAll('[role=status]')].filter(visible).map(hit
 const actions=[...rail.querySelectorAll('[data-action-button-panel]')].filter(visible).map(hit).filter(x=>x.inViewport);
 const actionControls=[...rail.querySelectorAll('[data-action-button-panel] button')].filter(n=>visible(n)&&!n.disabled).map(hit);
 const board=rail.closest('.contain-paint');
-const stackPanels=[...document.querySelectorAll('[data-flex-zone="stackPanel"]')].filter(visible).slice(0,2).map(n=>{const z=getComputedStyle(n).zIndex;return {bounds:bounds(n),zIndex:/^-?\\d+$/.test(z)?Number(z):null,pointerEvents:getComputedStyle(n).pointerEvents,headerControls:[...n.querySelectorAll('.h-9 button')].filter(b=>visible(b)&&!b.disabled).slice(0,4).map(hit)};});
+const exposed=n=>{const r=n.getBoundingClientRect();for(const [fx,fy] of [[0.5,0.5],[0.5,0.1],[0.1,0.5],[0.9,0.5],[0.5,0.9]]){const x=r.x+r.width*fx,y=r.y+r.height*fy;if(x>=0&&y>=0&&x<innerWidth&&y<innerHeight){const h=document.elementFromPoint(x,y);if(n.contains(h)&&!h?.closest('button'))return{x,y};}}return null;};
+const stackPanels=[...document.querySelectorAll('[data-flex-zone="stackPanel"]')].filter(visible).slice(0,2).map(n=>{const z=getComputedStyle(n).zIndex;return {bounds:bounds(n),zIndex:/^-?\\d+$/.test(z)?Number(z):null,pointerEvents:getComputedStyle(n).pointerEvents,headerControls:[...n.querySelectorAll('.h-9 button')].filter(b=>visible(b)&&!b.disabled).slice(0,4).map(hit),entries:[...n.querySelectorAll('[data-stack-entry]')].filter(visible).slice(0,4).map(e=>({bounds:bounds(e),exposedPoint:exposed(e)}))};});
 return {viewport:{width:innerWidth,height:innerHeight},railBounds:bounds(rail),railPointerEvents:getComputedStyle(rail).pointerEvents,
 boardBounds:board?bounds(board):null,stackPanels,
 columns:columns.map(n=>({bounds:bounds(n),visible:visible(n),pointerEvents:getComputedStyle(n).pointerEvents})),
@@ -625,6 +626,8 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
     // The layout panel's center is diagnostic; actual enabled buttons own input.
     assert(area.actions.length>0 && area.actions.every(x=>x.pointerEvents === "auto"), "action panel lost pointer input");
     assert(area.actionControls.length>0 && area.actionControls.every(x=>x.inViewport && x.pointerEvents === "auto" && x.hittable), "visible action button lost pointer input");
+    assert(area.stackPanels.length===1 && area.stackPanels.every(s=>s.headerControls.length>0 && s.headerControls.every(x=>x.inViewport && x.hittable)), "stack header button lost pointer input");
+    assert(area.stackPanels.every(s=>s.entries.length>0 && s.entries.some(e=>e.exposedPoint)), "stack entry has no exposed pointer target");
   }
   const gap = await host.evaluate(railGap); assert(gap, "action rail empty-space witness missing");
   assert(await host.evaluate(`!document.querySelector('[data-flex-zone="actionRail"]').contains(document.elementFromPoint(${gap.x},${gap.y}))`), "empty action rail area does not pass through");
