@@ -25,7 +25,7 @@ let serial = 0;
 const pending = new Map();
 const cdp = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
   const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Error("CDP timeout")); }, 15000);
-  pending.set(id, { resolve, reject, timer });
+  pending.set(id, { resolve, reject, timer, method });
   socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
 });
 async function stop(child) {
@@ -116,7 +116,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   socket.addEventListener("message", ({ data }) => {
     const m = JSON.parse(data), p = pending.get(m.id); if (!p) return;
     pending.delete(m.id); clearTimeout(p.timer);
-    if (m.error) p.reject(Error("CDP command failed")); else p.resolve(m.result);
+    if (m.error) p.reject(Object.assign(Error("CDP command failed"), { qaCdpMethod: p.method, qaCdpErrorCode: m.error.code })); else p.resolve(m.result);
   });
   await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
   for (const role of ["host", "guest"]) {
@@ -179,15 +179,20 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   }
   result.bothRealConsentChecked = true;
   result.stagesPassed.push("both-real-consent");
-  stage = "host-app-setup";
+  stage = "host-open-form";
   await host.click(host.button("Host Game"));
+  stage = "host-format-control";
   await host.wait("document.querySelector('button[aria-label=Format]')");
   await host.click("document.querySelector('button[aria-label=Format]')");
+  stage = "host-format-selection";
   await host.wait("[...document.querySelectorAll('[role=option]')].some(n=>n.textContent.includes('Limited'))");
   await host.click("[...document.querySelectorAll('[role=option]')].find(n=>n.textContent.includes('Limited'))");
+  stage = "host-p2p-selection";
   await host.click(host.button("You host (P2P)"));
+  stage = "host-submit-room";
   await host.wait(`(()=>{const b=${host.button("Host Game")};return b&&!b.disabled;})()`, 90);
   await host.click(host.button("Host Game"));
+  stage = "host-continue-without-lobby";
   await host.wait(`Boolean(${host.button("Continue without lobby")})`);
   await host.click(host.button("Continue without lobby"));
   category = "communication"; stage = "loopback-signaling";
@@ -275,6 +280,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
 } catch (cause) {
   result.pass = false; result.failureCategory = category;
   result.failure = cause instanceof assert.AssertionError ? cause.message : cause.qaDeadline ? "stage deadline" : "driver operation failed";
+  if (cause.qaCdpMethod) result.cdpFailure = { method: cause.qaCdpMethod, code: cause.qaCdpErrorCode };
   result.lastObservation = {};
   for (const [role, page] of Object.entries(pages)) {
     try { result.lastObservation[role] = await page.evaluate("window.__twoSeatQa?.status() ?? null"); } catch {}
