@@ -48,3 +48,12 @@ The parent verified [run 37407473256](https://github.com/Makeinu1/phase/actions/
 | Sampled engine-wasm working-set maximum | 11,991,519,232 bytes, below 13 GiB |
 
 This receipt supports native behavior at that exact candidate head. The engine-wasm results are native boundary tests, not execution of compiled WASM: compiled-WASM and real-browser validation of this capacity candidate remain **NOT RUN**. The sampled CI working set is not live Undo heap, a guaranteed instantaneous peak, or a target-device safety budget. The earlier e10955dc measurement artifact does not validate this new code. The prior resource-stop record remains applicable to its different full-lib venue.
+
+
+### Next stage: fixed-source real WASM boundary validation
+
+The independent producer will build candidate source **`f48a0d6ee0b143e4ec15b482249a70c932f7bde5`** once with nightly-2026-04-19, locked dependencies, LLVM opt0, LTO off, codegen-units 16 and the existing 16 MiB stack setting. Standard free Ubuntu jobs retain the 13 GiB working-set, 4 GiB free-disk and finite command/job guards. This stage creates a new artifact; it does not reuse the earlier e10955dc artifact.
+
+Consumers will verify the new same-run manifest digest, source/tree, lock/input hashes, producer/control/run identities, fixed build settings and individual artifact file sizes/hashes. Artifact ID and GitHub artifact digest are recorded alongside the manifest SHA-256. Node and one standard Chrome module Worker will execute the same functional assertions: baseline cast **Armed → restore Consumed**, then a legally prepared **520-object PRE** whose cast continues exactly once while Undo becomes Invalidated without retaining a receipt. No state injection or browser security-flag bypass is used.
+
+Real-WASM results are currently **NOT RUN**. Initialization or legal PRE preparation failure is a preparation failure, not a successful capacity refusal. App UI, two-seat synchronization, mobile browsers and live-heap/reclamation measurements remain unperformed; this stage does not prove a safe heap budget.
