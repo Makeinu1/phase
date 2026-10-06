@@ -1,4 +1,4 @@
-name: Fork Undo ordinary representative checkpoint probes
+name: Fork Undo ordinary resolved continuation probes
 
 on:
   push:
@@ -18,7 +18,7 @@ env:
 
 jobs:
   ordinary-calibration:
-    name: Ordinary cadence representative Priority probes
+    name: Ordinary cast resolution and draw continuations
     if: github.repository == 'Makeinu1/phase'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -59,7 +59,7 @@ jobs:
           cp "$GITHUB_WORKSPACE/retained-inputs/wasm.provenance.json" "$GITHUB_WORKSPACE/history-evidence/provenance/"
           cp "$GITHUB_WORKSPACE/wasm-payload/manifest.json" "$GITHUB_WORKSPACE/history-evidence/provenance/wasm-manifest.json"
           cp ../control/scripts/fixtures/undo-history/official-history-cards-b0.provenance.json "$GITHUB_WORKSPACE/history-evidence/provenance/"
-      - name: Three turn pairs with bounded existing land and cast probes under unchanged runtime watchdog
+      - name: Three existing casts through resolution and draw under unchanged runtime watchdog
         if: ${{ !cancelled() && steps.input.outcome == 'success' }}
         working-directory: source
         run: |
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: undo-history-ordinary-representative-evidence
+          name: undo-history-ordinary-continuation-evidence
           path: history-evidence
           if-no-files-found: warn
           retention-days: 7

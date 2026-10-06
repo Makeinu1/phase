@@ -603,15 +603,49 @@ function ordinaryExecute(choice) {
   return events;
 }
 function ordinaryProbePositions(eligible) {
-  const lands = [], casts = [];
+  const casts = [];
   eligible.forEach((root, position) => {
-    if (root.sample.kind === 'land') lands.push(position);
     if (root.sample.kind === 'main-cast') casts.push(position);
   });
-  // This unchanged three-turn-pair fixture already produced three casts. Bound
-  // this diagnostic selection; this is not a product history retention limit.
-  check(lands.length >= 2 && casts.length === 3, 'ordinary-bounded-existing-land-and-cast-probes');
-  return [...new Set([lands[0], lands.at(-1), ...casts])].sort((a, b) => a - b);
+  // Probe only the three existing casts; previously proven land roots need no
+  // repeat. The finite fixture bound is not a product history retention limit.
+  check(casts.length === 3, 'ordinary-three-existing-cast-continuations');
+  return casts;
+}
+function ordinaryRecordContinuation(root, choice, trace, events, postRaw, post, waitingType) {
+  const continuation = root.continuation;
+  check(continuation.steps.length < 16, 'ordinary-bounded-existing-cast-continuation');
+  continuation.steps.push({ choice, trace, waitingType });
+  const objectId = root.choice.action.data.object_id;
+  continuation.resolvedCount += events.filter(event => event.type === 'StackResolved' && event.data.object_id === objectId).length;
+  continuation.drawCount += events.filter(event => event.type === 'CardDrawn' && event.data.player_id === root.choice.actor).length;
+  const isOpt = root.sample.publicCastName === 'Opt';
+  const destination = isOpt ? 'Graveyard' : 'Battlefield';
+  if (post.waiting_for.type !== 'Priority' || post.objects[objectId]?.zone !== destination
+    || post.stack.some(entry => entry.id === objectId) || continuation.resolvedCount === 0) return false;
+  check(continuation.resolvedCount === 1, 'ordinary-original-spell-resolved-once');
+  check(isOpt ? continuation.drawCount === 1
+    && continuation.steps.filter(step => step.waitingType === 'ScryChoice' && step.choice.action.type === 'SelectCards').length === 1
+    : continuation.drawCount === 0, 'ordinary-real-opt-scry-draw-or-creature-resolution');
+  check(continuation.steps.slice(1).every(step => step.choice.action.type !== 'CastSpell'), 'ordinary-no-unrelated-cast-in-continuation');
+  continuation.postRaw = postRaw;
+  return true;
+}
+function ordinaryReplayDecision(step) {
+  let current = state();
+  check(current.waiting_for.type === step.waitingType, 'ordinary-continuation-same-real-prompt-type');
+  if (current.waiting_for.type === 'Priority') {
+    check(current.waiting_for.data.player === step.choice.actor, 'ordinary-continuation-current-priority-actor');
+    const actions = legal(step.choice.actor); current = state();
+    check(current.waiting_for.type === 'Priority' && current.waiting_for.data.player === step.choice.actor
+      && actions.some(action => isDeepStrictEqual(action, step.choice.action)), 'ordinary-continuation-fresh-legal-action');
+  } else {
+    const issued = ordinaryPrompt(current, step.choice.context);
+    check(issued.actor === step.choice.actor && isDeepStrictEqual(issued.action, step.choice.action), 'ordinary-continuation-real-issued-prompt-choice');
+  }
+  const trace = []; traceCurrent = trace;
+  ordinaryExecute(step.choice); traceCurrent = null;
+  check(isDeepStrictEqual(step.trace, trace), 'ordinary-continuation-exact-actor-action-and-all-events');
 }
 function ordinary() {
   const setupTiming = {}; profileCurrent = setupTiming;
@@ -624,7 +658,7 @@ function ordinary() {
     canonicalInitialPreSha256: canonicalDigest(initialPre), beforeFirstSemanticOperation: true,
     setupMs: performance.now() - setupStart, setupTiming,
     initialRestore: 'NOT RUN: original prompt may be MulliganDecision; no manufactured PassPriority' });
-  const roots = [], hashes = new Set(), used = new Set(), timing = {}, eventsSeen = {};
+  const roots = [], pendingContinuations = [], hashes = new Set(), used = new Set(), timing = {}, eventsSeen = {};
   let current = initial, completedTurns = 0, lastTurn = initial.turn_number, firstNaturalTurn = null, postWindowPromptActions = 0, stopReason;
   let lastActivePlayer = initial.active_player;
   const completedTurnsBySeat = [0, 0];
@@ -658,7 +692,7 @@ function ordinary() {
       check(current.waiting_for.type === 'Priority' && current.waiting_for.data.player === actor, 'ordinary-post-query-priority-actor-unchanged');
       choice = ordinaryPriority(current, actions, used);
     } else choice = ordinaryPrompt(current);
-    const trace = []; traceCurrent = choice.kind ? trace : null;
+    const trace = []; traceCurrent = choice.kind || pendingContinuations.length ? trace : null;
     let pre, captureMs, saveMs, digest, eligibility, snapshotUtf8Bytes;
     const rootStart = performance.now();
     if (choice.kind) {
@@ -676,7 +710,7 @@ function ordinary() {
     for (const event of events) eventsSeen[event.type] = (eventsSeen[event.type] ?? 0) + 1;
     if (choice.markUsed) used.add(choice.markUsed);
     traceCurrent = null;
-    if (choice.kind) {
+    if (choice.kind || pendingContinuations.length) {
       // One parsed post observation for adjacent completion checks, with no
       // intervening engine call. Original bytes, never parsed state, are stored.
       const postRaw = rawState(), post = parseJSON(postRaw).state;
@@ -687,16 +721,28 @@ function ordinary() {
       // A successfully cast spell is now public; never log uncast hand names.
       const publicCastName = choice.action.type === 'CastSpell' ? post.objects[choice.action.data.object_id]?.name : undefined;
       if (choice.action.type === 'CastSpell') check(typeof publicCastName === 'string', 'ordinary-public-cast-name-after-real-cast');
-      const sample = { n: roots.length + 1, kind: choice.kind, actionType: choice.action.type, actor: choice.actor, turn: current.turn_number,
-        ...(publicCastName === undefined ? {} : { publicCastName }),
-        completedRealRoot: true, snapshotUtf8Bytes, captureMs, saveMs, canonicalPreSha256: digest,
-        declarationActionCount: trace.length, normalTraceSha256: sha(stringifyJSON(trace)), restoreEligibility: eligibility,
-        operationAndValidationMs: performance.now() - rootStart - saveMs };
-      roots.push({ pre, postRaw, trace, choice, sample });
-      appendFileSync(path.join(output, 'ordinary-root-samples.jsonl'), JSON.stringify(sample) + '\n');
+      for (let i = pendingContinuations.length - 1; i >= 0; i--) {
+        if (ordinaryRecordContinuation(pendingContinuations[i], choice, trace, events, postRaw, post, current.waiting_for.type)) pendingContinuations.splice(i, 1);
+      }
+      if (choice.kind) {
+        const sample = { n: roots.length + 1, kind: choice.kind, actionType: choice.action.type, actor: choice.actor, turn: current.turn_number,
+          ...(publicCastName === undefined ? {} : { publicCastName }),
+          completedRealRoot: true, snapshotUtf8Bytes, captureMs, saveMs, canonicalPreSha256: digest,
+          declarationActionCount: trace.length, normalTraceSha256: sha(stringifyJSON(trace)), restoreEligibility: eligibility,
+          operationAndValidationMs: performance.now() - rootStart - saveMs };
+        const root = { pre, postRaw, trace, choice, sample };
+        roots.push(root);
+        appendFileSync(path.join(output, 'ordinary-root-samples.jsonl'), JSON.stringify(sample) + '\n');
+        if (choice.kind === 'main-cast') {
+          root.continuation = { steps: [], resolvedCount: 0, drawCount: 0 };
+          check(!ordinaryRecordContinuation(root, choice, trace, events, postRaw, post, current.waiting_for.type), 'ordinary-real-cast-precedes-resolution');
+          pendingContinuations.push(root);
+        }
+      }
     }
   }
   check(stopReason, 'ordinary-bounded-natural-three-pairs-or-end');
+  check(pendingContinuations.length === 0, 'ordinary-all-three-cast-continuations-completed-in-existing-window');
   profileCurrent = null;
   const eligible = roots.filter(root => root.sample.restoreEligibility === 'eligible Priority');
   const totalBytes = roots.reduce((sum, root) => sum + root.sample.snapshotUtf8Bytes, 0);
@@ -726,28 +772,40 @@ function ordinary() {
       const root = eligible[position]; stage = 'ordinary-restore-root-' + root.sample.n;
       const probeStart = performance.now(), restoreMs = restore(root.pre), probeMs = performance.now() - probeStart;
       const continuationStart = performance.now();
-      const actions = legal(root.choice.actor);
-      check(actions.some(action => isDeepStrictEqual(action, root.choice.action)), 'ordinary-restored-original-action-is-fresh-engine-legal');
-      const trace = []; traceCurrent = trace;
-      ordinaryExecute(root.choice); traceCurrent = null;
-      check(isDeepStrictEqual(root.trace, trace), 'ordinary-restored-exact-normal-root-trace');
-      equalWithVerifiedRekey(root.postRaw, rawState(), 'ordinary-restored-complete-post-with-one-exact-rekey');
+      check(root.continuation?.postRaw, 'ordinary-existing-completed-resolution-proof');
+      for (let i = 0; i < root.continuation.steps.length; i++) {
+        ordinaryReplayDecision(root.continuation.steps[i]);
+        const replayPost = rawState();
+        if (i === 0) equalWithVerifiedRekey(root.postRaw, replayPost, 'ordinary-restored-complete-cast-post-with-one-exact-rekey');
+        if (i === root.continuation.steps.length - 1) {
+          equalWithVerifiedRekey(root.continuation.postRaw, replayPost, 'ordinary-restored-complete-resolved-post-with-one-exact-rekey');
+          const expected = lossless(root.continuation.postRaw).state, actual = lossless(replayPost).state;
+          check(isDeepStrictEqual({ seed: expected.rng_seed, wordPos: expected.rng_word_pos },
+            { seed: actual.rng_seed, wordPos: actual.rng_word_pos }), 'ordinary-resolved-exact-rng-seed-and-word-position');
+        }
+      }
       const continuationMs = performance.now() - continuationStart;
       const reinstallStart = performance.now(); restore(currentRaw);
       samples.push({ eligiblePosition: position, operationIndex: root.sample.n, kind: root.sample.kind,
         actionType: root.sample.actionType, actor: root.sample.actor, turn: root.sample.turn,
         ...(root.sample.publicCastName === undefined ? {} : { publicCastName: root.sample.publicCastName }),
+        continuationDecisionCount: root.continuation.steps.length, continuationActionCount: root.continuation.steps.reduce((count, step) => count + step.trace.length, 0),
+        actualSameObjectResolutionEvents: root.continuation.resolvedCount, actualControllerDrawEvents: root.continuation.drawCount,
+        actualScryChoiceActions: root.continuation.steps.filter(step => step.waitingType === 'ScryChoice' && step.choice.action.type === 'SelectCards').length,
+        continuationTraceSha256: sha(stringifyJSON(root.continuation.steps.flatMap(step => step.trace))),
+        canonicalResolvedPostSha256: canonicalDigest(root.continuation.postRaw),
+        exactResolvedStateAndRngWithVerifiedRekey: true,
         restoreMs, probeMs, continuationMs,
         currentReinstallProbeMs: performance.now() - reinstallStart });
     }
     profileCurrent = null;
-    check(samples.length === 5 && restoreAttempt === 30, 'ordinary-five-complete-probes-and-thirty-checked-installs');
+    check(samples.length === 3 && restoreAttempt === 18, 'ordinary-three-complete-continuations-and-eighteen-checked-installs');
     receipt('ordinary-restore', { pass: true, eligiblePriorityRoots: eligible.length, samples, checkedInstallCount: restoreAttempt,
-      selection: 'first/last eligible land plus all three existing eligible main-casts, exactly five probes in this unchanged three-turn-pair fixture; non-Priority excluded',
+      selection: 'three existing eligible main-casts through actual resolution; issued non-Priority prompts may be normally answered during replay, but no non-Priority PRE is restored',
       suiteMs: performance.now() - suiteStart, probeTiming, authorityContract: 'unchanged exact private epoch rotation/full remaining equality/new never-used namespace/actual stale refusal and fresh-vs-normal transition',
-      rootContinuationProof: 'fresh legal action, exact actor/action/all event trace and complete post envelope with one precisely verified rekey' });
+      rootContinuationProof: 'fresh legal Priority actions and actual issued prompt choices through same-object resolution; full actor/action/all event trace, cast post and resolved post including private hands/library and exact RNG seed/offset with one precisely verified rekey; Opt includes actual scry/draw' });
   }
-  const releaseStart = performance.now(); roots.length = 0; eligible.length = 0; hashes.clear(); global.gc();
+  const releaseStart = performance.now(); roots.length = 0; eligible.length = 0; pendingContinuations.length = 0; hashes.clear(); global.gc();
   receipt('ordinary', { pass: true, completedTurnPairs: Math.floor(completedTurns / 2), stopReason,
     releaseMs: performance.now() - releaseStart, memory: memory(), initialAndNonPriorityRestore: 'NOT PASSED',
     fullGameToNaturalEnd: stopReason === 'earlier-natural-game-end' ? 'earlier natural end' : 'NOT RUN: three-turn-pair calibration only',
