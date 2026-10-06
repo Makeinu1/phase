@@ -40,42 +40,46 @@ try {
     check(outcome.status === "applied" && outcome.result && !outcome.result.disposition, "action-applied");
     return outcome.result;
   };
-  for (const actor of [0,1]) submit(actor, { type: "SetPriorityPassingMode", data: { mode: "FullControl" } });
-  stage = "normal-game-actions";
-  let cast;
-  for (let step = 0; step < 500 && !cast; step++) {
-    const current = state();
-    const waiting = current.waiting_for;
-    progress = { step, turn: current.turn_number, phase: current.phase, waiting: waiting.type };
-    if (waiting.type === "MulliganDecision") {
-      submit(waiting.data.pending[0].player, { type: "MulliganDecision", data: { choice: { type: "Keep" } } });
-    } else if (waiting.type === "DeclareAttackers") {
-      submit(waiting.data.player, { type: "DeclareAttackers", data: { attacks: [] } });
-    } else if (waiting.type === "DeclareBlockers") {
-      submit(waiting.data.player, { type: "DeclareBlockers", data: { assignments: [] } });
-    } else if (waiting.type === "DiscardToHandSize") {
-      submit(waiting.data.player, { type: "SelectCards", data: { cards: waiting.data.cards.slice(0, waiting.data.count) } });
-    } else {
-      check(waiting.type === "Priority", "normal-priority-required");
-      const actor = waiting.data.player;
-      const actions = legal(actor);
-      const lands = current.battlefield.filter(id => current.objects[id].controller === 0 && current.objects[id].name === "Forest");
-      const land = actions.find(action => action.type === "PlayLand");
-      if (actor === 0 && lands.length < 2 && land) { submit(actor, land); continue; }
-      if (actor === 0 && lands.length === 2 && current.stack.length === 0) {
-        cast = actions.find(action => action.type === "CastSpell" && current.objects[action.data.object_id].name === "Grizzly Bears");
-        if (cast) break;
+  function reachOrdinaryCast(setupStage) {
+    stage = setupStage;
+    for (const actor of [0,1]) submit(actor, { type: "SetPriorityPassingMode", data: { mode: "FullControl" } });
+    let cast;
+    for (let step = 0; step < 500 && !cast; step++) {
+      const current = state();
+      const waiting = current.waiting_for;
+      progress = { step, turn: current.turn_number, phase: current.phase, waiting: waiting.type };
+      if (waiting.type === "MulliganDecision") {
+        submit(waiting.data.pending[0].player, { type: "MulliganDecision", data: { choice: { type: "Keep" } } });
+      } else if (waiting.type === "DeclareAttackers") {
+        submit(waiting.data.player, { type: "DeclareAttackers", data: { attacks: [] } });
+      } else if (waiting.type === "DeclareBlockers") {
+        submit(waiting.data.player, { type: "DeclareBlockers", data: { assignments: [] } });
+      } else if (waiting.type === "DiscardToHandSize") {
+        submit(waiting.data.player, { type: "SelectCards", data: { cards: waiting.data.cards.slice(0, waiting.data.count) } });
+      } else {
+        check(waiting.type === "Priority", "normal-priority-required");
+        const actor = waiting.data.player;
+        const actions = legal(actor);
+        const lands = current.battlefield.filter(id => current.objects[id].controller === 0 && current.objects[id].name === "Forest");
+        const land = actions.find(action => action.type === "PlayLand");
+        if (actor === 0 && lands.length < 2 && land) { submit(actor, land); continue; }
+        if (actor === 0 && lands.length === 2 && current.stack.length === 0) {
+          cast = actions.find(action => action.type === "CastSpell" && current.objects[action.data.object_id].name === "Grizzly Bears");
+          if (cast) break;
+        }
+        submit(actor, { type: "PassPriority" });
       }
-      submit(actor, { type: "PassPriority" });
     }
+    check(cast, "ordinary-spell-reached-without-debug-or-state-injection");
+    const mana = legal(0).find(action => action.type === "TapLandForMana");
+    check(mana, "semantic-mana-action");
+    submit(0, mana);
+    const pre = state();
+    check(pre.players[0].mana_pool.mana.length === 1 && pre.stack.length === 0, "prefloating-mana-reach");
+    check(pre.waiting_for.type === "Priority" && pre.waiting_for.data.player === 0, "setup-caster-priority");
+    return { cast, pre };
   }
-  check(cast, "ordinary-spell-reached-without-debug-or-state-injection");
-  const mana = legal(0).find(action => action.type === "TapLandForMana");
-  check(mana, "semantic-mana-action");
-  submit(0, mana);
-  const pre = state();
-  check(pre.players[0].mana_pool.mana.length === 1 && pre.stack.length === 0, "prefloating-mana-reach");
-  check(pre.waiting_for.type === "Priority" && pre.waiting_for.data.player === 0, "setup-caster-priority");
+  const { cast, pre } = reachOrdinaryCast("normal-game-actions");
   console.log(JSON.stringify({ pass: true, stage: "normal-game-setup", setup: "real engine legal actions; prefloating mana; no debug/state injection" }));
   const binding = engine.host_precast_undo_status().binding;
   engine.enable_host_precast_undo(binding);
@@ -109,6 +113,7 @@ try {
   const recast = engine.host_precast_undo_status();
   check(recast.phase === "Armed" && recast.receipt !== armed.receipt, "fresh-recast-receipt");
   refusal(binding, armed.receipt);
+  check(isDeepStrictEqual(engine.host_precast_undo_status(), recast), "old-receipt-preserves-fresh-armed-checkpoint");
   stage = "legal-pass-invalidates";
   submit(0, { type: "PassPriority" });
   check(engine.host_precast_undo_status().phase === "Invalidated", "pass-invalidates-before-guest-action");
@@ -116,12 +121,24 @@ try {
   stage = "stale-host-binding";
   engine.set_multiplayer_mode(false); engine.clear_game_state();
   const next = engine.initialize_multiplayer_host_game(decks, 0xF32002, format, null, 2, 0);
-  check(!next.error && engine.host_precast_undo_status().binding !== binding, "fresh-host-binding");
-  refusal(binding, recast.receipt);
+  check(!next.error, "fresh-host-init");
+  const nextBinding = engine.host_precast_undo_status().binding;
+  check(nextBinding !== binding, "fresh-host-binding");
+  const { cast: nextCast } = reachOrdinaryCast("fresh-host-game-actions");
+  engine.enable_host_precast_undo(nextBinding);
+  submit(0, nextCast);
+  const nextArmed = engine.host_precast_undo_status();
+  check(nextArmed.enabled && nextArmed.phase === "Armed" && nextArmed.receipt && nextArmed.binding === nextBinding, "fresh-host-valid-checkpoint");
+  stage = "stale-host-binding";
+  // Keep the fresh receipt valid: only the binding belongs to the previous host.
+  refusal(binding, nextArmed.receipt);
+  check(isDeepStrictEqual(engine.host_precast_undo_status(), nextArmed), "stale-binding-preserves-fresh-armed-checkpoint");
+  check(engine.restore_host_precast_undo(nextBinding, nextArmed.receipt).phase === "Consumed", "fresh-binding-receipt-control-restores");
   console.log(JSON.stringify({ pass: true, sourceSha: "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92",
     scope: "real WASM host API; ordinary fixture decks via game actions; no debug/state injection",
-    checks: ["prefloating-mana", "normal-cast-checkpoint-restore", "wrong-binding-preserves", "one-use", "recast-old-receipt", "legal-pass-invalidates", "stale-host-binding"],
+    checks: ["prefloating-mana", "normal-cast-checkpoint-restore", "wrong-binding-preserves", "one-use", "old-receipt-preserves-fresh-armed-checkpoint", "legal-pass-invalidates", "stale-binding-preserves-fresh-armed-checkpoint", "fresh-binding-receipt-control-restores"],
     runtimeRevision: "not exposed by public WASM API; native regression covers monotonic revision",
+    rngWitness: "fixture seed/position equality only; no random draw or rewind guarantee",
     ui: "NOT RUN", twoSeatSync: "NOT RUN", memoryReclamation: "NOT RUN" }));
 } catch {
   // Never serialize assertion values, hidden hands/libraries, bindings or receipts.

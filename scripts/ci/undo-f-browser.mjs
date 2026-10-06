@@ -113,11 +113,15 @@ try {
     `browser engine/worker probe failed: ${JSON.stringify(observed)}`);
   const result = { browser: version.product, ...observed, scope: "verified real engine in a local module Worker",
     undoRestore: "NOT RUN", appUiViteDevGate: "NOT RUN", twoSeatRtc: "NOT RUN", iphoneSafari: "NOT RUN" };
-  await writeFile(path.join(evidence, "browser-capability.json"), JSON.stringify(result, null, 2) + "\n");
+  await writeFile(path.join(evidence, "chromium-worker-capability.json"), JSON.stringify(result, null, 2) + "\n");
   console.log(JSON.stringify(result));
   await call("Browser.close").catch(() => {});
 } catch (error) {
   failure = String(error);
+  await writeFile(path.join(evidence, "chromium-worker-capability.json"), JSON.stringify({
+    pass: false, scope: "verified real engine in a local module Worker", failure,
+    undoRestore: "NOT RUN", appUiViteDevGate: "NOT RUN", twoSeatRtc: "NOT RUN", iphoneSafari: "NOT RUN",
+  }, null, 2) + "\n");
   throw error;
 } finally {
   for (const request of pending.values()) clearTimeout(request.timer);
