@@ -42,6 +42,10 @@ const sessionOrdinals = new WeakMap<object, number>();
 const sessionConnections = new WeakMap<object, object>();
 const sessionCreations = new WeakMap<object, number>();
 let observationOrdinal = 0;
+type OrdinaryStepAction = "MulliganDecision" | "DeclareAttackers" | "DeclareBlockers" | "SelectCards" | "PlayLand" | "PassPriority";
+let ordinaryStepOrdinal = 0;
+let ordinaryStep: {ordinal:number;startedAtUnixMs:number;phase:"entered"|"dispatch"|"completed"|"threw";
+  actionKind:OrdinaryStepAction|null;dispatchAtUnixMs?:number;finishedAtUnixMs?:number} | null = null;
 function ordinalFor(map: WeakMap<object, number>, value: unknown) {
   if (!value || typeof value !== "object") return null;
   if (!map.has(value)) map.set(value, ++observationOrdinal);
@@ -265,10 +269,14 @@ const qa = {
       signalingOpened, channelsOpened, nativeChannels, safeErrors: [...safeErrors], blocked: blocked(), agreed: useSandboxUndoConsentStore.getState().agreed,
       fullControl: useUiStore.getState().fullControl, fullControlApplied: s?.priority_passing_modes?.[getPlayerId()] === "FullControl",
       lastStateRevision, stackCount: s?.stack.length ?? 0, dispatchIdle: isDispatchIdle(),
-      privateProjectionChecks, privateProjectionOk, wire: [...wire] };
+      privateProjectionChecks, privateProjectionOk, wire: [...wire], ordinaryStep:ordinaryStep?{...ordinaryStep}:null };
   },
   roomCode() { return useMultiplayerStore.getState().hostGameCode; },
   async step() {
+    const witness: NonNullable<typeof ordinaryStep> = {ordinal:++ordinaryStepOrdinal,startedAtUnixMs:Date.now(),phase:"entered",actionKind:null};
+    ordinaryStep=witness;
+    const dispatchWitness=(kind:OrdinaryStepAction) => {witness.phase="dispatch";witness.actionKind=kind;witness.dispatchAtUnixMs=Date.now();};
+    try {
     if (!isDispatchIdle()) return "busy";
     const s = useGameStore.getState().gameState;
     if (!s || blocked()) return "waiting";
@@ -277,23 +285,25 @@ const qa = {
     const seat = getPlayerId();
     if (w.type === "MulliganDecision") {
       if (!w.data.pending.some(x => x.player === seat)) return "waiting";
-      await dispatchAction({ type: "MulliganDecision", data: { choice: { type: "Keep" } } }); return "keep";
+      dispatchWitness("MulliganDecision"); await dispatchAction({ type: "MulliganDecision", data: { choice: { type: "Keep" } } }); return "keep";
     }
     if (w.type === "DeclareAttackers" && w.data.player === seat) {
-      await dispatchAction({ type: "DeclareAttackers", data: { attacks: [] } }); return "attack-none";
+      dispatchWitness("DeclareAttackers"); await dispatchAction({ type: "DeclareAttackers", data: { attacks: [] } }); return "attack-none";
     }
     if (w.type === "DeclareBlockers" && w.data.player === seat) {
-      await dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } }); return "block-none";
+      dispatchWitness("DeclareBlockers"); await dispatchAction({ type: "DeclareBlockers", data: { assignments: [] } }); return "block-none";
     }
     if (w.type === "DiscardToHandSize" && w.data.player === seat) {
-      await dispatchAction({ type: "SelectCards", data: { cards: w.data.cards.slice(0, w.data.count) } }); return "cleanup";
+      dispatchWitness("SelectCards"); await dispatchAction({ type: "SelectCards", data: { cards: w.data.cards.slice(0, w.data.count) } }); return "cleanup";
     }
     if (w.type !== "Priority" || w.data.player !== seat) return "waiting";
     const lands = s.battlefield.filter(id => s.objects[id].controller === 0 && s.objects[id].name === "Forest");
     const land = actions().find(a => a.type === "PlayLand");
-    if (seat === 0 && lands.length < 2 && land) { await dispatchAction(land); return "land"; }
+    if (seat === 0 && lands.length < 2 && land) { dispatchWitness("PlayLand"); await dispatchAction(land); return "land"; }
     if (seat === 0 && lands.length === 2 && s.stack.length === 0 && ordinaryCast()) return "ready-to-cast";
-    await dispatchAction({ type: "PassPriority" }); return "pass";
+    dispatchWitness("PassPriority"); await dispatchAction({ type: "PassPriority" }); return "pass";
+    } catch (error) { witness.phase="threw"; throw error; }
+    finally { if(witness.phase!=="threw")witness.phase="completed";witness.finishedAtUnixMs=Date.now(); }
   },
   async prepareCast() {
     const mana = actions().find(a => a.type === "TapLandForMana");

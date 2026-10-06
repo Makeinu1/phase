@@ -114,7 +114,7 @@ let viteLog = "", chromeErr = "";
 let serial = 0;
 const pending = new Map();
 const cdp = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
-  const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Error("CDP timeout")); }, 15000);
+  const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Object.assign(Error("CDP timeout"), {qaCdpTimeout:true,qaCdpMethod:method})); }, 15000);
   pending.set(id, { resolve, reject, timer, method });
   socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
 });
@@ -465,11 +465,25 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   result.realTwoSeatAppConnected = true;
   result.stagesPassed.push("real-two-seat-pairing");
   category = "setup"; stage = "ordinary-app-actions";
+  result.ordinaryStepUi = {current:null,recent:[],callsStarted:0,callsFinished:0};
+  const observeStep = async (role,page,iteration) => {
+    const entry={role,iteration,startedAtUnixMs:Date.now(),finishedAtUnixMs:null,outcome:"pending"};
+    result.ordinaryStepUi.current=entry; result.ordinaryStepUi.callsStarted++;
+    try {
+      const outcome=await page.evaluate("window.__twoSeatQa.step()");
+      entry.outcome=["busy","waiting","keep","attack-none","block-none","cleanup","land","ready-to-cast","pass"].includes(outcome)?outcome:"other";
+      return outcome;
+    } catch (error) { entry.outcome="driver-error"; throw error; }
+    finally {
+      entry.finishedAtUnixMs=Date.now(); result.ordinaryStepUi.callsFinished++;
+      result.ordinaryStepUi.recent.push({...entry}); if(result.ordinaryStepUi.recent.length>8)result.ordinaryStepUi.recent.shift();
+    }
+  };
   let reached = false, steps = 0;
   for (; steps < 500; steps++) {
-    const h = await host.evaluate("window.__twoSeatQa.step()");
+    const h = await observeStep("host",host,steps);
     if (h === "ready-to-cast") { reached = true; break; }
-    await guest.evaluate("window.__twoSeatQa.step()"); await pause(100);
+    await observeStep("guest",guest,steps); await pause(100);
   }
   assert(reached, "ordinary host cast not reached"); result.setupSteps = steps;
   assert(await host.evaluate("window.__twoSeatQa.prepareCast()"), "pre-floating semantic mana setup failed");
@@ -568,8 +582,11 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   await cdp("Browser.close").catch(() => {});
 } catch (cause) {
   result.pass = false; result.failureCategory = category;
+  result.driverFailureAtUnixMs=Date.now();
   result.failure = cause instanceof assert.AssertionError ? cause.message : cause.qaDeadline ? "stage deadline" : "driver operation failed";
-  if (cause.qaCdpMethod) result.cdpFailure = { method: cause.qaCdpMethod, code: cause.qaCdpErrorCode };
+  if (cause.qaCdpMethod) result.cdpFailure = {kind:cause.qaCdpTimeout?"timeout":"response-error",
+    method:["Runtime.evaluate","Input.dispatchMouseEvent","Input.dispatchKeyEvent","Page.navigate","Page.captureScreenshot","Page.enable","Page.addScriptToEvaluateOnNewDocument","Network.enable","Network.setBlockedURLs","Emulation.setDeviceMetricsOverride","Target.createBrowserContext","Target.createTarget","Target.attachToTarget","Browser.close"].includes(cause.qaCdpMethod)?cause.qaCdpMethod:"other",
+    code:Number.isInteger(cause.qaCdpErrorCode)?cause.qaCdpErrorCode:null};
   result.lastObservation = {};
   result.lifecycleTimeline = {};
   for (const [role, page] of Object.entries(pages)) {
@@ -601,6 +618,8 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
     result.failureCode = "REAL_DRAFT_INPUT_MISSING";
   } else if (viteLog.includes("optimized dependencies changed. reloading")) {
     result.failureCategory = "setup"; result.failureCode = "DEV_DEPENDENCY_RELOAD";
+  } else if (cause.qaCdpTimeout) {
+    result.failureCode = "CDP_OPERATION_TIMEOUT";
   } else if (cause.message === "app control not pointer-hittable") {
     result.failureCategory = "setup"; result.failureCode = "APP_CONTROL_NOT_POINTER_HITTABLE";
   } else if (cause.message === "app hand target not pointer-ready") {
