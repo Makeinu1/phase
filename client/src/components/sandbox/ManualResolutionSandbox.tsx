@@ -93,24 +93,35 @@ function uncertainMessage(reason?: string): string {
 }
 
 /**
- * Source refs fence the stateful session. A replacement context-bound port for
- * the same source inherits uncertainty until it can authoritatively reconcile
- * it. `episodeId` only resets local selection/amount input.
+ * The receipt session identity and source refs fence local state. Replacing a
+ * port within that same authenticated timeline preserves its uncertainty.
+ * `episodeId` only resets local selection/amount input.
  */
 export function ManualResolutionSandbox(props: ManualResolutionSandboxProps) {
-  const { confirmedRestoreEpoch, onSelectedTargetChange, source } = props;
-  const previousRestoreEpochRef = useRef(confirmedRestoreEpoch);
+  const { commandPort, confirmedRestoreEpoch, onSelectedTargetChange, source } = props;
+  const { receiptSessionIdentity } = commandPort;
+  const [sessionFence, setSessionFence] = useState(() => ({ receiptSessionIdentity, revision: 0 }));
+  // Reset during render so the old child never commits the new session's port.
+  // This revision only keys React state; the port's actual session identity is
+  // the authority for the comparison, not a UI-invented authentication key.
+  if (sessionFence.receiptSessionIdentity !== receiptSessionIdentity) {
+    setSessionFence({ receiptSessionIdentity, revision: sessionFence.revision + 1 });
+  }
+  const previousContextRef = useRef({ confirmedRestoreEpoch, receiptSessionIdentity });
   const lifecycleKey = JSON.stringify([
     source.stackEntryId,
     source.sourceObjectId,
     confirmedRestoreEpoch,
+    sessionFence.revision,
   ]);
 
   useLayoutEffect(() => {
-    if (previousRestoreEpochRef.current === confirmedRestoreEpoch) return;
-    previousRestoreEpochRef.current = confirmedRestoreEpoch;
+    const previous = previousContextRef.current;
+    if (previous.confirmedRestoreEpoch === confirmedRestoreEpoch &&
+      previous.receiptSessionIdentity === receiptSessionIdentity) return;
+    previousContextRef.current = { confirmedRestoreEpoch, receiptSessionIdentity };
     onSelectedTargetChange(null);
-  }, [confirmedRestoreEpoch, onSelectedTargetChange]);
+  }, [confirmedRestoreEpoch, onSelectedTargetChange, receiptSessionIdentity]);
 
   return <ManualResolutionSandboxSession key={lifecycleKey} {...props} />;
 }
@@ -166,6 +177,17 @@ function ManualResolutionSandboxSession({
       reconciliationPendingRef.current = false;
     };
   }, [source.stackEntryId, source.sourceObjectId]);
+
+  useLayoutEffect(() => {
+    if (activeAttemptRef.current !== null) return;
+    const retainedRequest = commandPort.getUnresolvedManualResolutionRequest();
+    if (retainedRequest === null) return;
+    // Recover the session's exact request, rather than reconstructing it from
+    // the newly displayed source/binding or treating a remount as a restore.
+    updateActiveAttempt({ request: retainedRequest, phase: "indeterminate" });
+    setError(uncertainMessage("The command context changed before delivery was confirmed."));
+    setAnnouncement("Delivery remains unknown. Check status before retrying.");
+  }, [commandPort, updateActiveAttempt]);
 
   useLayoutEffect(() => {
     const portChanged = previousCommandPortRef.current !== commandPort;
@@ -274,11 +296,15 @@ function ManualResolutionSandboxSession({
     focusSafely();
   }
 
-  function completeCommand(kind: PendingCommand): void {
+  function completeCommand(kind: PendingCommand, request: ManualResolutionRequest): void {
     invalidateReconciliation();
     updateActiveAttempt(null);
     setError(null);
-    if (kind === "finish") {
+    // Confirming an earlier source's Finish only clears its uncertainty. It
+    // must not finish or move focus away from the currently displayed source.
+    if (kind === "finish" &&
+      request.command.stackEntryId === source.stackEntryId &&
+      request.command.sourceObjectId === source.sourceObjectId) {
       runFinishEffects();
       return;
     }
@@ -293,7 +319,7 @@ function ManualResolutionSandboxSession({
     }
 
     if (result.status === "completed") {
-      completeCommand(kind);
+      completeCommand(kind, request);
     } else if (result.status === "rejected") {
       invalidateReconciliation();
       updateActiveAttempt(null);
@@ -365,7 +391,7 @@ function ManualResolutionSandboxSession({
     }
 
     if (result.status === "completed") {
-      completeCommand(kind);
+      completeCommand(kind, request);
     } else if (result.status === "not-applied") {
       invalidateReconciliation();
       updateActiveAttempt(null);
