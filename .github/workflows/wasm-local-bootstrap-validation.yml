@@ -2351,14 +2351,19 @@ jobs:
             stage = 'nextest-version'; classification = 'version-mismatch'
             result = subprocess.run(['cargo-nextest', 'nextest', '--version'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             nextest_query['exit_code'] = result.returncode
-            nextest_stdout = result.stdout.decode().replace('\r\n', '\n').replace('\r', '\n').strip()
-            public_version = re.fullmatch(r'(?:cargo-nextest|cargo) (?:0|[1-9][0-9]{0,9})(?:[.](?:0|[1-9][0-9]{0,9})){2}(?: \([a-f0-9]{7,40} ([0-9]{4}-[0-9]{2}-[0-9]{2})\))?', nextest_stdout) if len(nextest_stdout) <= 128 else None
-            if public_version and public_version[1]:
-                try: datetime.date.fromisoformat(public_version[1])
+            nextest_stdout = result.stdout.decode()
+            public_version = re.fullmatch(
+                r'(?P<header>cargo-nextest (?P<release>(?:0|[1-9][0-9]{0,9})(?:[.](?:0|[1-9][0-9]{0,9})){2}) \((?P<short_commit>[a-f0-9]{7,40}) (?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\))\n'
+                r'release: (?P=release)\ncommit-hash: (?P<commit>[a-f0-9]{40})\n'
+                r'commit-date: (?P=date)\nhost: x86_64-unknown-linux-gnu\n?',
+                nextest_stdout) if len(nextest_stdout) <= 256 else None
+            if public_version:
+                try: datetime.date.fromisoformat(public_version['date'])
                 except ValueError: public_version = None
+            if public_version and not public_version['commit'].startswith(public_version['short_commit']): public_version = None
             if public_version: nextest_query['public_version'] = nextest_stdout
             result.check_returncode()
-            assert re.fullmatch(r'cargo-nextest 0\.9\.146(?: \([^\n]+\))?', nextest_stdout)
+            assert public_version and re.fullmatch(r'cargo-nextest 0\.9\.146(?: \([^\n]+\))?', public_version['header'])
             value = {'toolchain': 'nightly-2026-04-19', 'rustc': rustc, 'cargo': cargo, 'nextest': '0.9.146',
                 'codegen_backend': 'cranelift', 'cargo_profile': 'test', 'nextest_profile': 'ci', 'debug': 0,
                 'incremental': False, 'opt_level': 0, 'split_debuginfo': 'unpacked', 'codegen_units': 256,
