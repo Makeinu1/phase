@@ -68,7 +68,7 @@ try {
   await copyFile(fixture, path.join(client, "public/qa-host-card-data.json"));
   await writeFile(path.join(client, "vite.two-seat.config.ts"), `import base from './vite.config';import {defineConfig} from 'vite';
 export default defineConfig(async env=>{const c=typeof base==='function'?await base(env):base;return {...c,
-optimizeDeps:{...c.optimizeDeps,entries:[]},plugins:[...c.plugins,{name:'ci-app-bootstrap',transformIndexHtml(html){return html.replace('/src/main.tsx','/src/qa-two-seat.ts');}}]};});`);
+optimizeDeps:{...c.optimizeDeps,entries:['index.html'],include:[...(c.optimizeDeps?.include??[]),'idb']},plugins:[...c.plugins,{name:'ci-app-bootstrap',transformIndexHtml(html){return html.replace('/src/main.tsx','/src/qa-two-seat.ts');}}]};});`);
   const lock = JSON.parse(await readFile(path.join(serverPackages, "package-lock.json")));
   const pkg = lock.packages["node_modules/peer"];
   assert(pkg.version === "1.0.2" && pkg.integrity === "sha512-ZObVEhAaoskd3KuSxr5DJLM8QuqQW4w3i0MqrI8H7Bzz8DjRC3DjUg2XtQQGfdc36+8Xk+wIPT/tL5wE+KnIqg==", "PeerServer package pin differs");
@@ -80,10 +80,18 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   server.stdout.on("data", b => { if (String(b).includes("loopback-ready")) serverReady = true; });
   for (let i = 0; i < 100 && !serverReady && server.exitCode === null; i++) await pause(100);
   assert(serverReady, "loopback signaling server startup failed");
+  const viteEnv = { ...process.env, VITE_PHASE_SANDBOX: "1", CARD_DATA_URL: "/qa-host-card-data.json", TELEMETRY_URL: "", SUPABASE_URL: "", SUPABASE_ANON_KEY: "",
+    OFFICIAL_MULTIPLAYER_SERVER_URL: "ws://127.0.0.1:9/ws", DEFAULT_MULTIPLAYER_SERVER_URL: "ws://127.0.0.1:9/ws", TURN_CREDENTIALS_URL: "http://127.0.0.1:9/turn-credentials" };
+  stage = "vite-dependency-preparation";
+  // Complete the ordinary DEV prebundle before the real UI/consent lifecycle.
+  const optimized = execFileSync(process.execPath, [path.join(client, "node_modules/vite/bin/vite.js"), "optimize", "--config", "vite.two-seat.config.ts", "--force"], {
+    cwd: client, env: viteEnv, encoding: "utf8", timeout: 120000, stdio: ["ignore", "pipe", "pipe"],
+  });
+  await writeFile(path.join(evidence, "two-seat-vite-dependency-preparation.log"), optimized);
+  result.dependenciesPreparedBeforeUi = true;
   stage = "vite-start";
   vite = spawn(process.execPath, [path.join(client, "node_modules/vite/bin/vite.js"), "--config", "vite.two-seat.config.ts", "--host", "127.0.0.1", "--port", "5188", "--strictPort"], {
-    cwd: client, env: { ...process.env, VITE_PHASE_SANDBOX: "1", CARD_DATA_URL: "/qa-host-card-data.json", TELEMETRY_URL: "", SUPABASE_URL: "", SUPABASE_ANON_KEY: "",
-      OFFICIAL_MULTIPLAYER_SERVER_URL: "ws://127.0.0.1:9/ws", DEFAULT_MULTIPLAYER_SERVER_URL: "ws://127.0.0.1:9/ws", TURN_CREDENTIALS_URL: "http://127.0.0.1:9/turn-credentials" }, stdio: ["ignore", "pipe", "pipe"],
+    cwd: client, env: viteEnv, stdio: ["ignore", "pipe", "pipe"],
   });
   for (const stream of [vite.stdout, vite.stderr]) stream.on("data", b => { viteLog = (viteLog + b).slice(-12000); });
   let ready = false;
@@ -135,8 +143,8 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
       }
     };
     const click = async expression => {
-      const r = await evaluate(`(()=>{const n=${expression};if(!n||n.disabled)return null;n.scrollIntoView({block:'center'});const r=n.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);
-      assert(r, "app control unavailable"); await point(r.x, r.y);
+      const r = await evaluate(`(()=>{const n=${expression};if(!n||n.disabled)return null;n.scrollIntoView({block:'center'});const r=n.getBoundingClientRect();const x=r.x+r.width/2,y=r.y+r.height/2;return n.contains(document.elementFromPoint(x,y))?{x,y}:null;})()`);
+      assert(r, "app control not pointer-hittable"); await point(r.x, r.y);
     };
     const button = text => `[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)})`;
     const cropControl = async (expression, name) => {
@@ -154,6 +162,14 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     await page.wait("window.__twoSeatQa && document.getElementById('root')?.childElementCount>0 && [...document.querySelectorAll('input[type=checkbox]')].some(n=>n.closest('label')?.textContent.includes('I agree that the host'))", 90);
   }
   result.stagesPassed.push("full-app-startup");
+  stage = "app-direct-code-selection";
+  for (const page of [host, guest]) {
+    // The actual unreachable-lobby modal otherwise covers the consent input.
+    await page.wait(`Boolean(${page.button("Use direct code")})`);
+    await page.click(page.button("Use direct code"));
+    await page.wait(`!(${page.button("Use direct code")})`);
+  }
+  result.stagesPassed.push("both-real-direct-code-choice");
   stage = "full-app-consent";
   for (const page of [host, guest]) {
     await page.wait("window.__twoSeatQa && [...document.querySelectorAll('input[type=checkbox]')].some(n=>n.closest('label')?.textContent.includes('I agree that the host'))", 90);
@@ -251,6 +267,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   await host.wait("window.__twoSeatQa.status().stackCount===1"); await guest.wait("window.__twoSeatQa.status().stackCount===1");
   const finalHost = await host.evaluate("window.__twoSeatQa.status()"), finalGuest = await guest.evaluate("window.__twoSeatQa.status()");
   assert(finalHost.safeErrors.length === 0 && finalGuest.safeErrors.length === 0, "seat observation or transport errors present before success");
+  assert(!viteLog.includes("optimized dependencies changed. reloading"), "DEV dependency reload invalidated the UI lifecycle");
   result.stagesPassed.push("next-legal-pointer-cast");
   result.nextLegalCast = true; result.pass = true; stage = "complete";
   git("diff", "--exit-code");
@@ -262,6 +279,10 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   for (const [role, page] of Object.entries(pages)) {
     try { result.lastObservation[role] = await page.evaluate("window.__twoSeatQa?.status() ?? null"); } catch {}
   }
+  result.publicUiChecks = {};
+  for (const [role, page] of Object.entries(pages)) {
+    try { result.publicUiChecks[role] = await page.evaluate(`(()=>{const c=[...document.querySelectorAll('input[type=checkbox]')].find(n=>n.closest('label')?.textContent.includes('I agree that the host'));return {rootMounted:Boolean(document.getElementById('root')?.childElementCount),consentRendered:Boolean(c),consentChecked:Boolean(c?.checked),directCodePrompt:[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Use direct code'),hostSetupRendered:Boolean(document.querySelector('button[aria-label=Format]')),joinInputRendered:Boolean(document.querySelector('input[placeholder="Enter code or CODE@IP:PORT"]'))};})()`); } catch {}
+  }
   const safeErrors = Object.values(result.lastObservation).flatMap(x => x?.safeErrors ?? []);
   if (safeErrors.includes("wire-observer-failed")) {
     result.failureCategory = "observation"; result.failureCode = "WIRE_OBSERVATION_INCOMPLETE";
@@ -269,6 +290,10 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     result.failureCategory = "communication"; result.failureCode = "REAL_TRANSPORT_ERROR";
   } else if (viteLog.includes('Failed to resolve import "@wasm/draft"')) {
     result.failureCode = "REAL_DRAFT_INPUT_MISSING";
+  } else if (viteLog.includes("optimized dependencies changed. reloading")) {
+    result.failureCategory = "setup"; result.failureCode = "DEV_DEPENDENCY_RELOAD";
+  } else if (cause.message === "app control not pointer-hittable") {
+    result.failureCategory = "setup"; result.failureCode = "APP_CONTROL_NOT_POINTER_HITTABLE";
   } else {
     result.failureCode = category.toUpperCase() + (cause.qaDeadline ? "_STAGE_DEADLINE" : "_ASSERTION_OR_DRIVER_FAILURE");
   }
