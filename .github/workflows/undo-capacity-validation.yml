@@ -1,0 +1,70 @@
+name: Fork Undo capacity validation
+
+on:
+  push:
+    branches: [experiment/undo-capacity-limits]
+    paths:
+      - crates/engine/src/game/host_precast_undo.rs
+      - crates/engine/src/game/host_precast_undo_tests.rs
+      - .github/workflows/undo-capacity-validation.yml
+      - scripts/ci/undo-capacity-guard.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-undo-capacity-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: never
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_TARGET_DIR: ${{ runner.temp }}/undo-capacity-target
+  CAPACITY_EVIDENCE: ${{ runner.temp }}/undo-capacity-evidence
+
+jobs:
+  native:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: nightly-2026-04-19
+          components: rustfmt,rustc-codegen-cranelift-preview
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Formatting and parser Gate A
+        run: |
+          rustfmt --edition 2021 --config skip_children=true --check \
+            crates/engine/src/game/host_precast_undo.rs \
+            crates/engine/src/game/host_precast_undo_tests.rs
+          bash scripts/check-parser-combinators.sh e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+      - name: Bounded native lib regressions
+        run: |
+          for PACKAGE in phase-engine engine-wasm; do
+            python3 scripts/ci/undo-capacity-guard.py "native-$PACKAGE" \
+              cargo nextest run --locked --build-jobs 1 --profile ci \
+              --config profile.test.opt-level=0 --config profile.test.debug=0 \
+              --config profile.test.incremental=false \
+              --config 'profile.test.codegen-backend="cranelift"' \
+              --package "$PACKAGE" --lib -E 'test(host_precast_undo::tests::)' \
+              --status-level all --final-status-level all
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: undo-capacity-native-evidence
+          path: ${{ runner.temp }}/undo-capacity-evidence
+          if-no-files-found: warn
+          retention-days: 7

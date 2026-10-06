@@ -19,6 +19,112 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::ActionRejection;
 
+// Initial operational limits, not measured heap or target-device safety budgets.
+// Entries count retained structure; arbitrary strings/ability payloads remain uncounted.
+#[derive(Clone, Copy)]
+struct UndoCapacityLimits {
+    objects: usize,
+    zone_items: usize,
+    deck_pool_items: usize,
+    history_lki_items: usize,
+    journal_items: usize,
+    checkpoint_bytes: usize,
+}
+
+const UNDO_CAPACITY_LIMITS: UndoCapacityLimits = UndoCapacityLimits {
+    objects: 512,
+    zone_items: 2048,
+    deck_pool_items: 2048,
+    history_lki_items: 4096,
+    journal_items: 4096,
+    checkpoint_bytes: 1024 * 1024,
+};
+
+fn checked_item_sum(items: impl IntoIterator<Item = usize>) -> Option<usize> {
+    items.into_iter().try_fold(0usize, usize::checked_add)
+}
+
+impl UndoCapacityLimits {
+    fn admits_structure(self, state: &GameState) -> bool {
+        let zones = checked_item_sum(
+            [
+                state.battlefield.len(),
+                state.stack.len(),
+                state.exile.len(),
+                state.command_zone.len(),
+            ]
+            .into_iter()
+            .chain(state.players.iter().flat_map(|player| {
+                [player.hand.len(), player.library.len(), player.graveyard.len()]
+            })),
+        );
+        // All thirteen registered/current vectors count entries, not card quantities.
+        let pools = checked_item_sum(state.deck_pools.iter().flat_map(|pool| {
+            [
+                pool.registered_main.len(),
+                pool.registered_sideboard.len(),
+                pool.current_main.len(),
+                pool.current_sideboard.len(),
+                pool.registered_companion.len(),
+                pool.current_companion.len(),
+                pool.registered_commander.len(),
+                pool.current_commander.len(),
+                pool.registered_signature_spell.len(),
+                pool.current_signature_spell.len(),
+                pool.registered_planar_deck.len(),
+                pool.registered_scheme_deck.len(),
+                pool.current_scheme_deck.len(),
+            ]
+        }));
+        let history = checked_item_sum(
+            [
+                state.zone_changes_this_turn.len(),
+                state.player_actions_this_turn.len(),
+                state.lki_cache.len(),
+                state.lki_copiable_values.len(),
+            ]
+            .into_iter()
+            .chain(
+                state
+                    .spells_cast_this_game_by_player
+                    .values()
+                    .map(|items| items.len()),
+            )
+            .chain(
+                state
+                    .spells_cast_this_turn_by_player
+                    .values()
+                    .map(|items| items.len()),
+            )
+            .chain(state.lki_by_incarnation.values().map(|items| items.len()))
+            .chain(state.departed_stack_spells.values().map(|items| items.len()))
+            .chain(state.linked_exile_lki.values().map(|items| items.len())),
+        );
+        let journal = &state.resolved_rules_journal;
+        let journal = checked_item_sum([
+            journal.entries().len(),
+            journal.nodes().len(),
+            journal.produced_mana().len(),
+            journal.spent_mana().len(),
+        ]);
+        state.objects.len() <= self.objects
+            && zones.is_some_and(|count| count <= self.zone_items)
+            && pools.is_some_and(|count| count <= self.deck_pool_items)
+            && history.is_some_and(|count| count <= self.history_lki_items)
+            && journal.is_some_and(|count| count <= self.journal_items)
+    }
+
+    fn admits_json(self, json: &str) -> bool {
+        json.len() <= self.checkpoint_bytes
+    }
+}
+
+fn capture_pre(state: &GameState) -> Result<String, serde_json::Error> {
+    let mut pre = state.clone();
+    pre.capture_rng_word_pos();
+    serde_json::to_string(&TrustedGameStateEnvelope::capture(pre))
+}
+
 /// Live bindings are owned by the host runtime and never rewound with PRE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostUndoBinding {
@@ -86,7 +192,18 @@ impl HostPrecastUndo {
         actor: PlayerId,
         action: GameAction,
     ) -> Result<ActionResult, ActionRejection> {
-        self.before_action(state, binding, actor, actor, &action);
+        self.submit_action_with_capture(state, binding, actor, action, capture_pre)
+    }
+
+    fn submit_action_with_capture(
+        &mut self,
+        state: &mut GameState,
+        binding: HostUndoBinding,
+        actor: PlayerId,
+        action: GameAction,
+        capture: impl FnOnce(&GameState) -> Result<String, serde_json::Error>,
+    ) -> Result<ActionResult, ActionRejection> {
+        self.before_action_with_capture(state, binding, actor, actor, &action, capture);
         let result = super::engine::apply_with_rejection(state, actor, action);
         self.after_action(state, &result);
         result
@@ -125,6 +242,18 @@ impl HostPrecastUndo {
         owner: PlayerId,
         action: &GameAction,
     ) {
+        self.before_action_with_capture(state, binding, actor, owner, action, capture_pre);
+    }
+
+    fn before_action_with_capture(
+        &mut self,
+        state: &GameState,
+        binding: HostUndoBinding,
+        actor: PlayerId,
+        owner: PlayerId,
+        action: &GameAction,
+        capture: impl FnOnce(&GameState) -> Result<String, serde_json::Error>,
+    ) {
         if self.phase == HostUndoPhase::Pending
             && self.case.as_ref().is_some_and(|case| {
                 case.binding == binding
@@ -162,6 +291,7 @@ impl HostPrecastUndo {
         };
         if actor != owner
             || !targets.is_empty()
+            || !UNDO_CAPACITY_LIMITS.admits_structure(state)
             || !eligible_pre(state, actor, *object_id, *card_id)
         {
             return;
@@ -169,11 +299,13 @@ impl HostPrecastUndo {
         let Some(receipt) = self.next_receipt.checked_add(1) else {
             return;
         };
-        let mut pre = state.clone();
-        pre.capture_rng_word_pos();
-        let Ok(pre_json) = serde_json::to_string(&TrustedGameStateEnvelope::capture(pre)) else {
+        let Ok(pre_json) = capture(state) else {
             return;
         };
+        // This bounds retained JSON only, not serializer clone/Value/sort scratch peaks.
+        if !UNDO_CAPACITY_LIMITS.admits_json(&pre_json) {
+            return;
+        }
         self.next_receipt = receipt;
         self.case = Some(Case {
             receipt,
