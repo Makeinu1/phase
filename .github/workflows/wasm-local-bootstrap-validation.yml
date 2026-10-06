@@ -2264,60 +2264,123 @@ jobs:
         python3 scripts/ci/manual-integration-guard.py native-off-rust-tools python3 - 2>/dev/null <<'OFF_TOOLS'
         import datetime, hashlib, json, os, re, subprocess, tomllib
         from pathlib import Path
+        stage = 'profile-environment'; classification = 'profile-mismatch'
         try:
             assert {key: value for key, value in os.environ.items() if key.startswith('CARGO_PROFILE_')} == {'CARGO_PROFILE_DEV_DEBUG': '0'}
-            assert os.environ['CARGO_BUILD_JOBS'] == '1' and os.environ['CARGO_INCREMENTAL'] == '0'
+            stage = 'build-jobs'; classification = 'profile-mismatch'
+            assert os.environ['CARGO_BUILD_JOBS'] == '1'
+            stage = 'incremental'; classification = 'profile-mismatch'
+            assert os.environ['CARGO_INCREMENTAL'] == '0'
+            stage = 'stack'; classification = 'profile-mismatch'
             assert os.environ['RUST_MIN_STACK'] == '16777216'
+            stage = 'target-directory'; classification = 'profile-mismatch'
             assert os.environ['CARGO_TARGET_DIR'] == str(Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-target')
             forbidden = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',
                 'RUSTC', 'RUSTDOC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTDOC',
                 'CARGO_BUILD_RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_RUSTFLAGS', 'CARGO_BUILD_RUSTDOCFLAGS',
                 'CARGO_BUILD_TARGET', 'CARGO_BUILD_INCREMENTAL', 'CARGO_BUILD_TARGET_DIR', 'ENGINE_WASM_URL'}
-            assert not forbidden & set(os.environ) and not any(key.startswith('CARGO_TARGET_') and key != 'CARGO_TARGET_DIR' for key in os.environ)
+            stage = 'compiler-environment'; classification = 'compiler-override'
+            assert not forbidden & set(os.environ)
+            stage = 'target-environment'; classification = 'target-override'
+            assert not any(key.startswith('CARGO_TARGET_') and key != 'CARGO_TARGET_DIR' for key in os.environ)
+            stage = 'source-config-path'; classification = 'filesystem-error'
             source = Path('.').resolve(); fixed_config = (source / '.cargo/config.toml').resolve()
+            stage = 'source-legacy-config'; classification = 'config-shadow'
             assert not (source / '.cargo/config').exists() and not (source / '.cargo/config').is_symlink()
+            stage = 'cargo-home-path'; classification = 'filesystem-error'
             cargo_home = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
             if not cargo_home.is_absolute(): cargo_home = source / cargo_home
             loaded = set()
             for directory in [source / '.cargo', *(parent / '.cargo' for parent in source.parents), cargo_home]:
+                stage = 'loaded-config-path'; classification = 'filesystem-error'
                 legacy, modern = directory / 'config', directory / 'config.toml'
                 selected = legacy if legacy.exists() or legacy.is_symlink() else modern
                 if selected.exists() or selected.is_symlink():
+                    stage = 'loaded-config-file'; classification = 'config-not-file'
                     assert selected.is_file(); loaded.add(selected.resolve())
+            stage = 'fixed-config-presence'; classification = 'fixed-config-missing'
             assert fixed_config in loaded
             for selected in loaded - {fixed_config}:
+                stage = 'loaded-config-parse'; classification = 'config-parse-failed'
                 config = tomllib.loads(selected.read_text())
+                stage = 'config-sections'; classification = 'config-override'
                 assert not {'profile', 'include', 'target', 'paths', 'source', 'unstable'} & set(config)
                 build, environment = config.get('build', {}), config.get('env', {})
-                assert isinstance(build, dict) and isinstance(environment, dict)
+                stage = 'config-build-type'; classification = 'config-type-invalid'
+                assert isinstance(build, dict)
+                stage = 'config-env-type'; classification = 'config-type-invalid'
+                assert isinstance(environment, dict)
+                stage = 'config-build-overrides'; classification = 'config-override'
                 assert not {'rustc', 'rustdoc', 'rustc-wrapper', 'rustc-workspace-wrapper', 'rustflags', 'rustdocflags', 'target', 'jobs', 'incremental', 'target-dir'} & set(build)
+                stage = 'config-env-overrides'; classification = 'config-override'
                 assert not any(key.startswith('CARGO_PROFILE_') or key.startswith('CARGO_TARGET_') or key in forbidden | {
                     'RUST_MIN_STACK', 'CARGO_BUILD_JOBS', 'CARGO_INCREMENTAL'} for key in environment)
             def read(argv):
                 return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True).strip()
+            stage = 'active-toolchain'; classification = 'toolchain-mismatch'
             assert read(['rustup', 'show', 'active-toolchain']).split()[0] == 'nightly-2026-04-19-x86_64-unknown-linux-gnu'
+            stage = 'rustc-version'; classification = 'version-mismatch'
             verbose = read(['rustc', '-Vv'])
+            stage = 'rustc-identity'; classification = 'version-mismatch'
             assert verbose == read(['rustup', 'run', 'nightly-2026-04-19', 'rustc', '-Vv'])
+            stage = 'rustc-parse'; classification = 'value-parse-failed'
             rustc = dict(line.split(': ', 1) for line in verbose.splitlines()[1:])
+            stage = 'rustc-fields'; classification = 'version-format-invalid'
             assert set(rustc) == {'binary', 'commit-hash', 'commit-date', 'host', 'release', 'LLVM version'}
-            assert rustc['binary'] == 'rustc' and rustc['host'] == 'x86_64-unknown-linux-gnu'
+            stage = 'rustc-binary'; classification = 'version-mismatch'
+            assert rustc['binary'] == 'rustc'
+            stage = 'rustc-host'; classification = 'host-mismatch'
+            assert rustc['host'] == 'x86_64-unknown-linux-gnu'
+            stage = 'rustc-release'; classification = 'version-format-invalid'
             assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+-nightly', rustc['release'])
+            stage = 'rustc-commit'; classification = 'version-format-invalid'
             assert re.fullmatch('[a-f0-9]{40}', rustc['commit-hash'])
+            stage = 'rustc-date'; classification = 'version-date-mismatch'
             assert datetime.date.fromisoformat(rustc['commit-date']) <= datetime.date(2026, 4, 19)
+            stage = 'rustc-llvm'; classification = 'version-format-invalid'
             assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+', rustc['LLVM version'])
+            stage = 'cargo-version'; classification = 'version-mismatch'
             cargo = read(['cargo', '-V'])
+            stage = 'cargo-identity'; classification = 'version-mismatch'
             assert cargo == read(['rustup', 'run', 'nightly-2026-04-19', 'cargo', '-V'])
+            stage = 'cargo-format'; classification = 'version-format-invalid'
             assert re.fullmatch(r'cargo [0-9]+[.][0-9]+[.][0-9]+-nightly \([a-f0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)', cargo)
-            assert 'rustc-codegen-cranelift-preview-x86_64-unknown-linux-gnu' in read(['rustup', 'component', 'list', '--installed']).splitlines()
+            stage = 'cranelift-component'; classification = 'component-missing-or-host-mismatch'
+            assert 'rustc-codegen-cranelift-x86_64-unknown-linux-gnu' in read(['rustup', 'component', 'list', '--installed']).splitlines()
+            stage = 'nextest-version'; classification = 'version-mismatch'
             assert re.fullmatch(r'cargo-nextest 0\.9\.146(?: \([^\n]+\))?', read(['cargo-nextest', '--version']))
             value = {'toolchain': 'nightly-2026-04-19', 'rustc': rustc, 'cargo': cargo, 'nextest': '0.9.146',
                 'codegen_backend': 'cranelift', 'cargo_profile': 'test', 'nextest_profile': 'ci', 'debug': 0,
                 'incremental': False, 'opt_level': 0, 'split_debuginfo': 'unpacked', 'codegen_units': 256,
                 'features': [], 'jobs': 1, 'stack_bytes': 16777216, 'profile_environment': {'CARGO_PROFILE_DEV_DEBUG': '0'}}
+            stage = 'tool-manifest-write'; classification = 'filesystem-error'
             (Path(os.environ['MANUAL_EVIDENCE']) / 'tool-manifest.json').write_text(json.dumps(value) + '\n')
             print('{"native_off_tools_admitted":true}')
-        except Exception:
-            print('{"error":"native-off-tools-refused"}')
+        except Exception as error:
+            command_stage = stage in {'active-toolchain', 'rustc-version', 'rustc-identity', 'cargo-version',
+                'cargo-identity', 'cranelift-component', 'nextest-version'}
+            if isinstance(error, PermissionError): classification = 'command-permission-denied' if command_stage else 'path-permission-denied'
+            elif isinstance(error, FileNotFoundError): classification = 'command-missing' if command_stage else 'path-missing'
+            elif isinstance(error, subprocess.CalledProcessError): classification = 'command-nonzero'
+            elif isinstance(error, tomllib.TOMLDecodeError): classification = 'config-parse-failed'
+            elif isinstance(error, UnicodeError): classification = 'text-decode-failed'
+            elif isinstance(error, KeyError): classification = 'required-key-missing'
+            elif isinstance(error, IndexError): classification = 'tool-output-empty'
+            elif isinstance(error, ValueError): classification = 'value-parse-failed'
+            elif isinstance(error, TypeError): classification = 'value-type-invalid'
+            elif isinstance(error, OSError): classification = 'command-os-error' if command_stage else 'filesystem-error'
+            elif not isinstance(error, AssertionError): classification = 'unexpected-error'
+            value = {'native_off_tools_admitted': False, 'error': 'native-off-tools-refused',
+                'stage': stage, 'classification': classification}
+            saved = False; persistence = None
+            try:
+                (Path(os.environ['MANUAL_EVIDENCE']) / 'tool-manifest.json').write_text(json.dumps(value) + '\n')
+                saved = True
+            except PermissionError: persistence = 'path-permission-denied'
+            except FileNotFoundError: persistence = 'path-missing'
+            except OSError: persistence = 'filesystem-error'
+            except Exception: persistence = 'persistence-failed'
+            print(json.dumps({**value, 'tool_manifest_saved': saved, 'persistence_classification': persistence}))
             raise SystemExit(1)
         OFF_TOOLS
     - name: Build exactly one OFF native archive
@@ -2359,7 +2422,10 @@ jobs:
             digest = None
             if present and min(workspace_free, temp_free) >= 4 * 1024**3:
                 with archive.open('rb') as stream: digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-            ready = bool(present and digest and source and tools and receipts['native-off-archive'] and
+            ready = bool(present and digest and source and tools and tools.get('error') is None and
+                tools.get('native_off_tools_admitted', True) is True and receipts['native-off-rust-tools'] and
+                receipts['native-off-rust-tools']['exit_code'] == receipts['native-off-rust-tools']['effective_exit'] == 0 and
+                receipts['native-off-rust-tools']['stop_reason'] is None and receipts['native-off-archive'] and
                 receipts['native-off-archive']['exit_code'] == receipts['native-off-archive']['effective_exit'] == 0 and
                 receipts['native-off-archive']['stop_reason'] is None)
             value = {'diagnostic_only': True, 'product_green': False, 'source': source, 'tools': tools,
