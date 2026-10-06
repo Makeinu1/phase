@@ -14,6 +14,7 @@ const sourceSha = 'e10955dc5977f1ba7c65cb1518cb8f4b1679fe92';
 const authorityFields = ['interaction_session_id', 'interaction_generation', 'next_interaction_serial', 'active_interaction_slots'];
 let stage = 'input', failedCheck, progress, lastActionType, lastOutcomeStatus, mismatchPaths;
 let engine, wasmModule, stepCount = 0;
+let restoreAttempt = 0;
 const sha = raw => createHash('sha256').update(raw).digest('hex');
 const check = (value, code) => { if (!value) { failedCheck = code; throw Error(code); } };
 const receipt = (name, value) => {
@@ -66,7 +67,49 @@ function differentPaths(a, b) {
   // Only fixed schema sections may reach a failure receipt. Dynamic object IDs,
   // array locations, journal keys and all differing values stay private.
   const found = [];
-  for (const key of ['players', 'objects', 'battlefield', 'stack', 'waiting_for', 'rng_seed', 'rng_word_pos', 'phase', 'turn_number', 'transient_continuous_effects', 'debug_mode', 'debug_permitted']) {
+  for (const key of [
+    "turn_number", "active_player", "phase", "players", "priority_player", "turn_decision_controller", "turn_decision_control_timestamp", "active_full_turn_control",
+    "active_combat_phase_control", "active_library_searches", "active_search_decision_controls", "objects", "next_object_id", "next_delayed_trigger_token", "next_delayed_trigger_instance", "next_resolution_cast_offer_id",
+    "next_logical_zone_change_group_id", "next_pip_id", "resolved_rules_journal", "active_payment_pins", "active_rules_execution_node", "active_casting_permission_index", "active_paid_resolution_offer_tail", "active_spend_only_on_x_count",
+    "battlefield", "stack", "stack_paid_facts", "exile", "command_zone", "rng_seed", "rng_word_pos", "rng",
+    "combat", "waiting_for", "game_end", "next_resolve_all_consent_epoch", "viewer_projection", "resolve_all_consent_run", "stack_resolution_session", "interaction_session_id",
+    "interaction_generation", "next_interaction_serial", "active_interaction_slots", "has_pending_cast", "allows_cancel_cast", "lands_played_this_turn", "max_lands_per_turn", "priority_pass_count",
+    "pending_replacement", "pending_combat_lifelink", "liminal_entries", "pending_liminal_entry_resume", "entering_aura_authority", "replacement_may_cost_paused", "post_replacement_token_choice_applied", "post_replacement_token_substitution_count",
+    "deferred_entry_events", "pending_token_battlefield_entry", "layers_dirty", "static_gate_truth", "trigger_index", "replacement_index", "static_source_index", "static_mode_presence",
+    "loop_detect_ring", "loop_answer_journal", "precast_shortcut_runtime", "life_safety_probe", "next_timestamp", "public_state_dirty", "state_revision", "transient_continuous_effects",
+    "next_continuous_effect_id", "next_end_effect_group_id", "attribution", "remote_type_layer_recipients", "day_night", "spells_cast_this_turn", "spells_cast_last_turn", "cancelled_casts",
+    "pending_activations", "pending_trigger", "pending_trigger_firing", "pending_trigger_event_batch", "pending_trigger_entry", "deferred_triggers", "pending_trigger_order", "consumed_before_priority_trigger_events",
+    "exile_links", "paradigm_primed", "delayed_triggers", "tracked_object_sets", "next_tracked_set_id", "chain_tracked_set_id", "return_result_frames", "active_return_result_occurrence",
+    "next_return_result_occurrence_id", "resolving_modal_instruction", "tracked_set_member_causes", "tracked_set_participants", "commander_cast_count", "commander_cast_owners", "commander_declined_zone_return", "objects_that_dealt_damage",
+    "extra_turns", "extra_turn_sequence_anchor", "turns_to_skip", "steps_to_skip", "combat_phase_skip_next_turn", "scheduled_turn_controls", "extra_phases", "extra_phase_resume",
+    "next_extra_phase_id", "last_added_phase_ids", "turn_direction", "current_combat_attacker_restriction", "current_combat_attacker_restriction_source", "seat_order", "format_config", "eliminated_players",
+    "commander_damage", "priority_passes", "auto_pass", "phase_stops", "priority_passing_modes", "lands_tapped_for_mana", "prepaid_mulligan_bottoms", "debug_mode",
+    "debug_permitted", "debug_infinite_mana", "unbounded_resources", "unbounded_loop_enablers", "unbounded_loop_pile", "unbounded_counter_targets", "pending_unbounded_materialization", "pending_materialization_count",
+    "unimplemented_oracle_ids", "pending_trigger_abandons", "loop_detection", "match_config", "match_phase", "match_score", "match_forfeit_result", "game_number",
+    "current_starting_player", "next_game_chooser", "deck_pools", "outside_game_cards_brought_in", "sideboard_submitted", "triggers_fired_this_turn", "trigger_fire_counts_this_turn", "triggers_fired_this_turn_per_opponent",
+    "triggers_fired_this_game", "activated_abilities_this_turn", "activated_abilities_this_game", "crew_activated_this_turn", "crew_resolved_this_turn", "loyalty_abilities_activated_this_turn", "extra_loyalty_activations_this_turn", "exerted_this_turn",
+    "object_tap_count_this_turn", "object_counter_placement_count_this_turn", "pending_attack_trigger_events", "ability_resolutions_this_turn", "graveyard_cast_permissions_used", "graveyard_cast_permissions_used_per_type", "pending_permanent_type_slot", "hand_cast_free_permissions_used",
+    "alt_cost_grant_permissions_used", "abilities_activated_this_turn_by_player", "exile_play_permissions_used", "exile_play_single_use_consumed", "exile_cast_permissions_used", "top_of_library_cast_permissions_used", "cards_exiled_with_source_this_turn", "first_card_drawn_this_turn",
+    "cards_drawn_this_turn", "pending_miracle_offers", "pending_paradigm_remaining_offers", "spells_cast_this_game", "spells_cast_this_game_by_player", "spells_cast_this_turn_by_player", "lands_played_this_turn_by_player", "players_who_searched_library_this_turn",
+    "player_actions_this_turn", "players_attacked_this_step", "players_attacked_this_turn", "attacking_creatures_this_turn", "attacked_defenders_this_turn", "attacked_defenders_last_turn", "creature_attacked_defenders_this_turn", "creature_blocked_attackers_this_turn",
+    "steps_started_this_turn", "creatures_attacked_this_turn", "attacker_declarations_this_turn", "creatures_blocked_this_turn", "players_who_created_token_this_turn", "created_tokens_this_turn", "counter_added_this_turn", "players_who_discarded_card_this_turn",
+    "cards_discarded_this_turn_by_player", "players_who_sacrificed_artifact_this_turn", "sacrificed_permanents_this_turn", "zone_changes_this_turn", "batched_zone_change_trigger_fired", "battlefield_entries_this_turn", "damage_dealt_this_turn", "creatures_exploited_this_turn",
+    "assassin_or_commander_dealt_combat_damage_this_turn", "creature_types_dealt_combat_damage_this_turn", "mana_spent_on_spells_this_turn", "pending_spell_cost_reductions", "pending_next_spell_modifiers", "pending_etb_counters", "modal_modes_chosen_this_turn", "modal_modes_chosen_this_game",
+    "revealed_cards", "public_revealed_cards", "stack_bound_reveals", "product_knowledge_state", "resolution_stack", "payment_transaction", "payment_transaction_replay", "payment_transaction_just_handled",
+    "resolving_continuation_attach_host", "resolving_player_scope_linked_exile", "merged_card_component_route", "resolution_coin_flip", "pending_player_scope_sacrifice_choice", "pending_player_scope_unless_payment", "pending_discard_batch", "pending_exile_from_top_until",
+    "pending_mass_library_order_choice", "pending_scoped_library_search", "pending_library_search_delivery", "completed_hidden_search_audiences", "pending_search_found_batch", "pending_die_roll_instruction", "may_trigger_auto_choices", "replacement_auto_choices",
+    "replacement_auto_choice_tail", "decision_templates", "priority_yields", "pending_begin_game_abilities", "resolving_begin_game_abilities", "last_named_choice", "chosen_counter_kind_this_resolution", "chosen_color_this_resolution",
+    "placed_sticker_this_resolution", "last_chosen_damage_source", "all_creature_types", "all_card_names", "card_face_registry", "meld_pair_registry", "card_db", "booster_shelf",
+    "booster_pack_pool", "log_player_names", "last_created_token_ids", "last_revealed_ids", "last_parent_target_missing_reason", "private_look_ids", "private_look_player", "last_zone_changed_ids",
+    "exile_rider_countered_ids", "last_vote_ballots", "player_actions_this_way", "last_effect_amount", "last_effect_excess_amount", "die_result_this_resolution", "last_effect_count", "last_effect_counts_by_player",
+    "clause_minimum_snapshot", "exiled_from_hand_this_resolution", "monarch", "city_blessing", "enduring_story", "epic_effects", "restrictions", "pending_damage_replacements",
+    "pending_step_end_mana_handlers", "pending_phase_transition_progress", "deferred_step_trigger_resume", "pending_team_draw_step", "pending_untap_declines", "current_trigger_event", "current_trigger_match_count", "resolving_stack_entry",
+    "resolving_trigger_firing", "pending_resolution_completion", "announced_source_x", "turn_up_paid_cost_source", "resolution_source_relatch", "last_loop_action_sequence", "current_trigger_events", "last_discover_value",
+    "stack_trigger_event_batches", "stack_trigger_firings", "lki_cache", "lki_copiable_values", "lki_by_incarnation", "departed_stack_spells", "linked_exile_lki", "cost_payment_failed_flag",
+    "pending_taps_for_mana_overrides", "current_triggered_mana_override", "pending_cost_move_resume", "pending_deferred_life_cost_resume", "pending_triggered_mana_resume", "pending_trigger_construction_priority_recipient", "active_accepted_triggered_mana_node", "mana_subresolution_depth",
+    "trigger_construction_finisher_ran_this_action", "pending_discard_for_cost", "pending_cast", "ring_level", "ring_bearer", "dungeon_progress", "planar_deck", "planar_controller",
+    "planar_die_actions_this_turn", "scheme_deck", "archenemy", "initiative", "combat_prevention_tally", "resolution_frames", "resolution_state_version"
+  ]) {
     if (!isDeepStrictEqual(a.state?.[key], b.state?.[key])) found.push('state.' + key);
   }
   if (found.length === 0) found.push('other-authoritative-envelope-section');
@@ -108,6 +151,19 @@ function restore(raw, { stale, actor } = {}) {
   engine.restore_game_state(raw);
   const elapsed = performance.now() - start;
   const restored = rawState();
+  const expectedEnvelope = canonical(raw), restoredEnvelope = canonical(restored);
+  const expectedRuntime = expectedEnvelope.precast_shortcut_runtime, restoredRuntime = restoredEnvelope.precast_shortcut_runtime;
+  const numberToken = token => { check(typeof token === 'string' && token.startsWith('@number:'), 'exact-private-runtime-epoch-token'); return BigInt(token.slice(8)); };
+  const rotatedEpoch = (numberToken(expectedRuntime.next_epoch) + 1n) & ((1n << 64n) - 1n);
+  receipt('restore-diagnostic-' + (++restoreAttempt), {
+    diagnosticOnly: true, comparisonExclusionsUnchanged: authorityFields,
+    fullStateModuloFourInteractionCarriersEqual: isDeepStrictEqual(expectedEnvelope.state, restoredEnvelope.state),
+    privatePrecastRuntimeEqual: isDeepStrictEqual(expectedRuntime, restoredRuntime),
+    privatePrecastFieldEquality: Object.fromEntries(['next_epoch', 'offer', 'suppressed_cast', 'must_diverge', 'materializing'].map(key => [key, isDeepStrictEqual(expectedRuntime[key], restoredRuntime[key])])),
+    privatePrecastEpochMatchesDocumentedRotation: numberToken(restoredRuntime.next_epoch) === (rotatedEpoch === 0n ? 1n : rotatedEpoch),
+    fixedMismatchingStateSections: differentPaths({ state: expectedEnvelope.state }, { state: restoredEnvelope.state }),
+    otherEnvelopeSectionsEqual: isDeepStrictEqual(Object.fromEntries(Object.entries(expectedEnvelope).filter(([key]) => !['state', 'precast_shortcut_runtime'].includes(key))), Object.fromEntries(Object.entries(restoredEnvelope).filter(([key]) => !['state', 'precast_shortcut_runtime'].includes(key))))
+  });
   equalRaw(raw, restored, 'entire-trusted-envelope-equality');
   check(state().interaction_session_id && state().interaction_session_id !== oldSession, 'fresh-interaction-namespace');
   if (stale) {
