@@ -1653,7 +1653,7 @@ jobs:
             '--archive-file', str(Path(os.environ['RUNNER_TEMP']) / f'bootstrap-native-archives/{artifact}.tar.zst'),
             '--workspace-remap', str(Path.cwd()), '--extract-to', str(Path(os.environ['RUNNER_TEMP']) / f'bootstrap-native-{artifact}'),
             '-E', 'test(ordinary_initializer_preservation_tests) | test(experimental_local_bootstrap_tests) | test(engine_claim_guard_tests)',
-            '--status-level', 'all', '--final-status-level', 'all'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            '--show-progress', 'none', '--status-level', 'all', '--final-status-level', 'none'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', result.stdout)
         ordinary = ['ordinary_initializer_preservation_tests::defaults_are_installed_with_trusted_seed_and_redacted_viewer', 'ordinary_initializer_preservation_tests::configured_deck_install_and_all_preparation_refusals_preserve_local_resident', 'ordinary_initializer_preservation_tests::host_preparation_refusals_never_install_or_claim', 'ordinary_initializer_preservation_tests::occupied_refusals_are_typed_and_preserve_both_directions', 'ordinary_initializer_preservation_tests::successful_ordinary_install_invalidates_previous_authority_and_cache', 'engine_claim_guard_tests::a_multiplayer_host_is_refused_when_the_engine_already_holds_a_game', 'engine_claim_guard_tests::a_multiplayer_host_may_claim_an_empty_engine', 'engine_claim_guard_tests::a_local_game_is_refused_while_a_multiplayer_host_owns_the_engine', 'engine_claim_guard_tests::a_local_game_may_still_replace_another_local_game', 'engine_claim_guard_tests::only_a_multiplayer_host_claims_the_engine']
         experimental = ['experimental_local_bootstrap_tests::admission_is_explicit_and_verification_never_mints', 'experimental_local_bootstrap_tests::failed_bootstrap_preserves_ordinary_and_experimental_residents', 'experimental_local_bootstrap_tests::verifier_checks_actual_resident_seat_session_and_posture', 'experimental_local_bootstrap_tests::checked_restore_failure_preserves_and_success_revokes', 'experimental_local_bootstrap_tests::ordinary_supersession_clear_and_host_cannot_admit', 'experimental_local_bootstrap_tests::private_binding_is_absent_from_save_viewer_and_replay']
@@ -1871,11 +1871,10 @@ jobs:
                 replayRecordedOnce:(.replayRecordedOnce | boolean), recordedActionCount:(if .recordedActionCount == 1 then 1 else null end)}
               elif .name == "experimental_availability" then .evidence | {
                 initialize_experimental_local_game:(.initialize_experimental_local_game | boolean), experimental_local_actor:(.experimental_local_actor | boolean)}
-              else .evidence | with_entries(select(.key | IN("explicitAdmission","ordinaryNeverAdmits","oldResidentPreserved","verifierReadOnly","adapterStrict","rawWorkerStrict","wasmBoundaryStrict","priorOwnerPreserved","failedRestorePreserved","checkedRestoreRevoked","ordinaryRevoked","postureRevoked","hostRefused","resetRevoked","privateWireClean","manualMutationClosed","laterExportsAbsent","mainThreadRefused","fallbackOrdinaryAction","fallbackExperimentalRefused","refusalPreserved","verifierNull","ordinaryWorkerLoaded"))) | map_values(boolean) end)}]}' > "$MANUAL_EVIDENCE/product-terminal.json"
+              else (.evidence // {}) | with_entries(select(.key | IN("explicitAdmission","ordinaryNeverAdmits","oldResidentPreserved","verifierReadOnly","adapterStrict","rawWorkerStrict","wasmBoundaryStrict","priorOwnerPreserved","failedRestorePreserved","checkedRestoreRevoked","ordinaryRevoked","postureRevoked","hostRefused","resetRevoked","privateWireClean","manualMutationClosed","laterExportsAbsent","mainThreadRefused","fallbackOrdinaryAction","fallbackExperimentalRefused","refusalPreserved","verifierNull","ordinaryWorkerLoaded"))) | map_values(boolean) end)}]}' > "$MANUAL_EVIDENCE/product-terminal.json"
         jq -c '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
           (if (.evidence | type) == "array" then (.evidence | length) else null end)}]}' \
           "$MANUAL_EVIDENCE/product-terminal.json"
-        jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null
         python3 - <<'SAVE'
         import json, os
         from pathlib import Path
@@ -1884,6 +1883,7 @@ jobs:
         value[os.environ['BOOTSTRAP_CANDIDATE_ARTIFACT']] = json.loads((root / 'product-terminal.json').read_text())
         path.write_text(json.dumps(value) + '\n')
         SAVE
+        jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null
         BROWSER
     - name: Run actual candidate off page
       working-directory: candidate-source
@@ -2007,11 +2007,10 @@ jobs:
                 replayRecordedOnce:(.replayRecordedOnce | boolean), recordedActionCount:(if .recordedActionCount == 1 then 1 else null end)}
               elif .name == "experimental_availability" then .evidence | {
                 initialize_experimental_local_game:(.initialize_experimental_local_game | boolean), experimental_local_actor:(.experimental_local_actor | boolean)}
-              else .evidence | with_entries(select(.key | IN("explicitAdmission","ordinaryNeverAdmits","oldResidentPreserved","verifierReadOnly","adapterStrict","rawWorkerStrict","wasmBoundaryStrict","priorOwnerPreserved","failedRestorePreserved","checkedRestoreRevoked","ordinaryRevoked","postureRevoked","hostRefused","resetRevoked","privateWireClean","manualMutationClosed","laterExportsAbsent","mainThreadRefused","fallbackOrdinaryAction","fallbackExperimentalRefused","refusalPreserved","verifierNull","ordinaryWorkerLoaded"))) | map_values(boolean) end)}]}' > "$MANUAL_EVIDENCE/product-terminal.json"
+              else (.evidence // {}) | with_entries(select(.key | IN("explicitAdmission","ordinaryNeverAdmits","oldResidentPreserved","verifierReadOnly","adapterStrict","rawWorkerStrict","wasmBoundaryStrict","priorOwnerPreserved","failedRestorePreserved","checkedRestoreRevoked","ordinaryRevoked","postureRevoked","hostRefused","resetRevoked","privateWireClean","manualMutationClosed","laterExportsAbsent","mainThreadRefused","fallbackOrdinaryAction","fallbackExperimentalRefused","refusalPreserved","verifierNull","ordinaryWorkerLoaded"))) | map_values(boolean) end)}]}' > "$MANUAL_EVIDENCE/product-terminal.json"
         jq -c '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
           (if (.evidence | type) == "array" then (.evidence | length) else null end)}]}' \
           "$MANUAL_EVIDENCE/product-terminal.json"
-        jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null
         python3 - <<'SAVE'
         import json, os
         from pathlib import Path
@@ -2020,6 +2019,7 @@ jobs:
         value[os.environ['BOOTSTRAP_CANDIDATE_ARTIFACT']] = json.loads((root / 'product-terminal.json').read_text())
         path.write_text(json.dumps(value) + '\n')
         SAVE
+        jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null
         BROWSER
     - name: Check immutable source after candidate execution
       if: always()
