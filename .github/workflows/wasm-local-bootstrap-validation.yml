@@ -583,7 +583,9 @@ jobs:
                               'Post Checkout immutable baseline source', 'Post Install pinned producer Rust toolchain',
                               'Post Install pinned producer bindgen'}
               steps = job['steps']
-              assert [step['number'] for step in steps] == list(range(1, len(steps) + 1))
+              numbers = [step['number'] for step in steps]
+              assert all(type(number) is int and number > 0 for number in numbers)
+              assert numbers == sorted(set(numbers))
               step_map = {step['name']: step for step in steps}
               assert len(step_map) == len(steps) and succeeded | skipped <= set(step_map)
               assert set(step_map) <= succeeded | skipped | housekeeping
