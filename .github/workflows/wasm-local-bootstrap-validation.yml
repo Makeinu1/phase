@@ -2789,9 +2789,17 @@ jobs:
                     if len(value['causes']) == 4: break
             return value
         diagnostic = {'runner_exit_code': None, 'collector_exit_code': None, 'runner_returned': False,
-            'launch_classification': None, 'error_projection': project(b''), 'product_green': False}
+            'launch_classification': None, 'error_projection': project(b''), 'product_green': False,
+            'setup_context': {'stage': 'collector-admission',
+                'archive_relative_path': 'bootstrap-native-archives/off.tar.zst', 'extract_relative_path': 'bootstrap-native-off',
+                'runner_temp_is_directory': None, 'destination_existed_before': None, 'destination_exists_after': None,
+                'cwd_matches_candidate_source': None}}
         original_run = subprocess.run; calls = 0; saved = False
         try:
+            runner_temp = Path(os.environ['RUNNER_TEMP']); destination = runner_temp / 'bootstrap-native-off'
+            context = diagnostic['setup_context']
+            context.update(runner_temp_is_directory=runner_temp.is_dir(), destination_existed_before=destination.exists(),
+                cwd_matches_candidate_source=Path.cwd() == Path(os.environ['GITHUB_WORKSPACE']) / 'candidate-source')
             native = (Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-off-collector.py').read_text()
             assert hashlib.sha256(native.encode()).hexdigest() == 'cbbd22b60f2f4b6630748bb277fe75c89d4df68ef1edc96e76fe008db0a223e4'
             tree = ast.parse(native)
@@ -2811,6 +2819,10 @@ jobs:
                 encoding = 'utf-8' if sys.flags.utf8_mode else locale.getencoding()
                 output = result.stdout.decode(encoding).replace('\r\n', '\n').replace('\r', '\n')
                 return subprocess.CompletedProcess(result.args, result.returncode, output, result.stderr)
+            context['stage'] = 'extract-destination-creation'
+            try: destination.mkdir()
+            finally: context['destination_exists_after'] = destination.exists()
+            context['stage'] = 'collector-execution'
             subprocess.run = observe
             exec(compile(native, '<original-native-off-collector>', 'exec'), {})
         except SystemExit as error:
