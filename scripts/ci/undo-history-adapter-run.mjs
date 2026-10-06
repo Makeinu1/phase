@@ -79,6 +79,7 @@ const profile = await mkdtemp(path.join(process.env.RUNNER_TEMP, 'history-adapte
 const args = ['--headless', '--disable-gpu', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run', '--no-default-browser-check', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'];
 const chrome = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
 let stderr = '', socket, serial = 0, pageSession, targetWorker, failure, spawnError, stage = 'browser-startup';
+let moduleDiagnosticsActive = false, bootstrapEngineWorkerSeen = false;
 const pending = new Map(), heaps = [], moduleErrors = [];
 chrome.stderr.on('data', b => { stderr = (stderr + b).slice(-6000); });
 chrome.on('error', error => { spawnError = String(error); });
@@ -111,11 +112,14 @@ try {
   socket.addEventListener('message', ({ data }) => {
     const msg = JSON.parse(data), request = pending.get(msg.id);
     if (request) { pending.delete(msg.id); clearTimeout(request.timer); if (msg.error) request.reject(Error(msg.error.message)); else request.resolve(msg.result); }
-    if (msg.method === 'Target.attachedToTarget' && msg.params.targetInfo.type === 'worker' && msg.params.targetInfo.url.includes('engine-worker')) targetWorker = msg.params.sessionId;
+    if (msg.method === 'Target.attachedToTarget' && msg.params.targetInfo.type === 'worker' && msg.params.targetInfo.url.includes('engine-worker')) {
+      targetWorker = msg.params.sessionId;
+      if (moduleDiagnosticsActive) bootstrapEngineWorkerSeen = true;
+    }
     if (msg.method === 'Target.detachedFromTarget' && msg.params.sessionId === targetWorker) targetWorker = null;
-    if (msg.sessionId === pageSession && msg.method === 'Runtime.exceptionThrown') moduleErrors.push({ type: 'exception', message: String(msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text).slice(0, 300) });
-    if (msg.sessionId === pageSession && msg.method === 'Network.loadingFailed' && ['Script', 'Document'].includes(msg.params.type)) moduleErrors.push({ type: 'network', message: String(msg.params.errorText).slice(0, 200) });
-    if (msg.sessionId === pageSession && msg.method === 'Network.responseReceived' && ['Script', 'Document'].includes(msg.params.type) && msg.params.response.status >= 400) {
+    if (moduleDiagnosticsActive && msg.sessionId === pageSession && msg.method === 'Runtime.exceptionThrown') moduleErrors.push({ type: 'exception', message: String(msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text).slice(0, 300) });
+    if (moduleDiagnosticsActive && msg.sessionId === pageSession && msg.method === 'Network.loadingFailed' && ['Script', 'Document'].includes(msg.params.type)) moduleErrors.push({ type: 'network', message: String(msg.params.errorText).slice(0, 200) });
+    if (moduleDiagnosticsActive && msg.sessionId === pageSession && msg.method === 'Network.responseReceived' && ['Script', 'Document'].includes(msg.params.type) && msg.params.response.status >= 400) {
       const url = new URL(msg.params.response.url);
       if (url.hostname === '127.0.0.1') moduleErrors.push({ type: 'http', path: url.pathname, status: msg.params.response.status });
     }
@@ -143,16 +147,18 @@ try {
     syntheticMemoryCheck: { pages: 1, expectedBytes: 65536, referenceDeletionAttempted: true }, listedRegions, mainHeap }, null, 2) + '\n');
   if (!browserOnly) {
   stage = 'QA-module-load';
+  moduleDiagnosticsActive = true;
   await call('Runtime.enable', {}, pageSession);
   await call('Network.enable', {}, pageSession);
   await call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
   await call('Page.navigate', { url: `http://127.0.0.1:${vite.httpServer.address().port}/` }, pageSession);
   let ready = false;
   for (let n = 0; n < 120 && !ready; n++) { ready = await evaluate('typeof globalThis.__qaStart === "function"'); if (!ready) await pause(250); }
-  await writeFile(path.join(evidence, 'qa-module-selfcheck.json'), JSON.stringify({ pass: ready && moduleErrors.length === 0 && !targetWorker,
-    candidateSha: process.env.GITHUB_SHA, mode, ready, moduleErrors, phaseEngineStarted: false,
-    engineWorkerAttached: Boolean(targetWorker), draftBindingUnmodified: true, draftBindingSha256: digest(draftGlue) }, null, 2) + '\n');
-  assert(ready && moduleErrors.length === 0 && !targetWorker, 'QA module dependency selfcheck failed before campaign');
+  moduleDiagnosticsActive = false;
+  await writeFile(path.join(evidence, 'qa-module-selfcheck.json'), JSON.stringify({ pass: ready && moduleErrors.length === 0 && !bootstrapEngineWorkerSeen,
+    candidateSha: process.env.GITHUB_SHA, mode, ready, moduleErrors, phaseEngineStarted: bootstrapEngineWorkerSeen ? 'unknown' : false,
+    engineWorkerEverAttached: bootstrapEngineWorkerSeen, draftBindingUnmodified: true, draftBindingSha256: digest(draftGlue) }, null, 2) + '\n');
+  assert(ready && moduleErrors.length === 0 && !bootstrapEngineWorkerSeen, 'QA module dependency selfcheck failed before campaign');
   if (moduleOnly) console.log(JSON.stringify({ pass: true, stage, phaseEngineStarted: false }));
   else {
   await evaluate('globalThis.__qaStart(); true');
