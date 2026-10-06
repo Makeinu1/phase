@@ -168,5 +168,6 @@ export const nodeCases = [...cases,
  {caseId:"short80-on",cards:80,minTurn:1,repeats:32,undo:true},
  {caseId:"short160-off",cards:160,minTurn:1,repeats:1,undo:false},
  {caseId:"short160-on",cards:160,minTurn:1,repeats:32,undo:true},
- {caseId:"long40-off",cards:40,minTurn:20,repeats:1,undo:false}
+ {caseId:"long40-off",cards:40,minTurn:20,repeats:1,undo:false},
+ {caseId:"long40-on",cards:40,minTurn:20,repeats:32,undo:true}
 ];
