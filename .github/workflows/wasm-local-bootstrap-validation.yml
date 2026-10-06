@@ -221,7 +221,7 @@ jobs:
               assert fixed_config in loaded_configs
               for selected in loaded_configs - {fixed_config}:
                   config = tomllib.loads(selected.read_text(encoding='utf-8'))
-                  assert not {'profile', 'include', 'target'} & set(config)
+                  assert not {'profile', 'include', 'target', 'paths', 'source', 'unstable'} & set(config)
                   build = config.get('build', {})
                   environment = config.get('env', {})
                   assert isinstance(build, dict) and isinstance(environment, dict)
@@ -411,7 +411,7 @@ jobs:
               assert fixed_config in loaded_configs
               for selected in loaded_configs - {fixed_config}:
                   config = tomllib.loads(selected.read_text(encoding='utf-8'))
-                  assert not {'profile', 'include', 'target'} & set(config)
+                  assert not {'profile', 'include', 'target', 'paths', 'source', 'unstable'} & set(config)
                   build = config.get('build', {})
                   environment = config.get('env', {})
                   assert isinstance(build, dict) and isinstance(environment, dict)
