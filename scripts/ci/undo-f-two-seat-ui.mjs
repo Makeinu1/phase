@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 
 const [client, wasm, draft, fixture, serverPackages, evidence] = process.argv.slice(2).map(x => path.resolve(x));
-const frontendSha = "a8c4cee4033e275335fb7053f2a837e5d38c558e";
+const frontendSha = "74dd4d39198abf9f52dd50c4e0037e00e283d6c1";
 const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const hostForm = "document.querySelector('button[aria-label=Format]')?.closest('form')";
@@ -623,6 +623,7 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   result.actionRailHitAreaSamples = [];
   for (const [width,height] of [[1440,1000],[390,844],[844,390],[1440,1000]]) {
     const area = await observeRail(host,width,height); result.actionRailHitAreas.push(area);
+    assert(area?.boardScroll && area.boardScroll.top===0 && area.boardScroll.left===0 && area.windowScroll.x===0 && area.windowScroll.y===0, "board viewport unexpectedly scrolled fixed controls");
     assert(area && area.railPointerEvents === "none" && area.columns.length === 2 && area.columns.every(x=>x.pointerEvents === "none"), "action rail empty layout area captures pointers");
     assert(area.surfacePointerEvents.length>0 && area.surfacePointerEvents.every(x=>x === "auto"), "action rail content surfaces lost pointer input");
     assert(area.controls.length>0 && area.controls.every(x=>x.pointerEvents === "auto" && x.hittable), "visible Full Control target lost pointer input");

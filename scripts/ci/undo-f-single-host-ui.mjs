@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 
 const [client, wasm, fixture, evidence] = process.argv.slice(2).map(value => path.resolve(value));
-const frontendSha = "a8c4cee4033e275335fb7053f2a837e5d38c558e";
+const frontendSha = "74dd4d39198abf9f52dd50c4e0037e00e283d6c1";
 const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const git = (...args) => execFileSync("git", ["-C", client, ...args], { encoding: "utf8" }).trim();
