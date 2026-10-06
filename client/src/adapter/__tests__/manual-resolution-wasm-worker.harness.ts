@@ -166,10 +166,13 @@ type RuntimeInitializer = (
 
 function workerEndpoint(client: EngineWorkerClient): Endpoint {
   const responses: RecordValue[] = [];
-  // Observe the real responses without replacing the client's promise handler.
-  // Capture records each reply before onmessage settles the awaited request.
+  // Register the observer before the original client handler so each reply is
+  // recorded before that handler settles the awaited request.
   const worker = (client as unknown as { worker: Worker }).worker;
+  const originalHandler = worker.onmessage;
+  worker.onmessage = null;
   worker.addEventListener("message", (event: MessageEvent<unknown>) => responses.push(record(event.data)), true);
+  worker.onmessage = originalHandler;
   return {
     name: "production-worker",
     reset: async () => { await client.resetGame(); await client.setMultiplayerMode(false); },
