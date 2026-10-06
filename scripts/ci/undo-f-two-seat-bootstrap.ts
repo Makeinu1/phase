@@ -206,8 +206,10 @@ const qa = {
   async drainObservations() { await Promise.all(observationQueues.map(drain => drain())); },
   status() {
     const g = useGameStore.getState(), s = g.gameState;
+    const w = s?.waiting_for;
     return { ready: Boolean(s && g.adapter), role, seat: getPlayerId(), route: location.pathname.startsWith("/game/") ? "game" : "setup",
-      contextGeneration, gameSessionGeneration: g.gameSessionGeneration,
+      contextGeneration, gameSessionGeneration: g.gameSessionGeneration, localCommitSeq: g.lastCommittedSeq,
+      waitingType: w?.type ?? null, mulliganPending: w?.type === "MulliganDecision" && w.data.pending.some(entry => entry.player === getPlayerId()),
       signalingOpened, channelsOpened, nativeChannels, safeErrors: [...safeErrors], blocked: blocked(), agreed: useSandboxUndoConsentStore.getState().agreed,
       fullControl: useUiStore.getState().fullControl, fullControlApplied: s?.priority_passing_modes?.[getPlayerId()] === "FullControl",
       lastStateRevision, stackCount: s?.stack.length ?? 0, dispatchIdle: isDispatchIdle(),

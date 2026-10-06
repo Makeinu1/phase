@@ -14,11 +14,18 @@ const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const hostForm = "document.querySelector('button[aria-label=Format]')?.closest('form')";
 const hostSubmit = `(${hostForm})?.querySelector('button[type=submit]')`;
 const fullControlCandidates = "[...document.querySelectorAll('button[aria-label=\"Full Control Off\"]')]";
-const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
-const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const role=n.getAttribute('role'),label=n.getAttribute('aria-label');return {tag:n.tagName,
+// Fixed source class tokens only: no raw class attribute, text, or dialog data.
+const publicNodeShape = `n=>{const role=n.getAttribute('role'),label=n.getAttribute('aria-label');return {tag:n.tagName,
 role:['dialog','button','status','presentation','alert','tooltip','listbox','option','menu','group','none'].includes(role)?role:role?'other':null,
-ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan'].includes(label)?label:label?'other':null,ariaHidden:n.getAttribute('aria-hidden')==='true'};});
+ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan'].includes(label)?label:label?'other':null,
+ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-50','z-30','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c))};}`;
+const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+const shape=(${publicNodeShape});const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return {...shape(n),ancestors};});
 return {disabled:b.disabled,clientRects:b.getClientRects().length,bounds:{x:r.x,y:r.y,width:r.width,height:r.height},hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y)),hits};})`;
+const publicGameControls = `(()=>{const shape=(${publicNodeShape});return {dialogCount:document.querySelectorAll('[role=dialog],dialog[open]').length,
+mulliganShells:[...document.querySelectorAll('div.fixed.inset-0.z-50.overflow-x-hidden.overflow-y-auto')].map(shape),
+keepButtons:[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='Keep Hand').map(b=>{const r=b.getBoundingClientRect();return {disabled:b.disabled,clientRects:b.getClientRects().length,hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};}),
+fullControl:${fullControlControls}};})()`;
 const hittableFullControl = `(${fullControlCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y));})`;
 // Only fixed public control names and validity flags leave the page. Never
 // serialize arbitrary text, input values, deck identity, or a DOM node.
@@ -287,8 +294,35 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   stage = "host-game-ready"; await host.wait("window.__twoSeatQa.status().ready", 90);
   stage = "guest-game-ready"; await guest.wait("window.__twoSeatQa.status().ready", 90);
   result.stagesPassed.push("both-real-game-states-ready");
+  category = "setup"; stage = "opening-hand-seat-assignment";
+  await host.wait("window.__twoSeatQa.status().seat===0");
+  await guest.wait("window.__twoSeatQa.status().seat===1");
+  // GamePage's real MulliganPanel covers the action rail until both players
+  // confirm. Follow its original Keep Hand buttons instead of reaching behind it.
+  result.openingHandConfirmed = {};
+  result.openingHandUi = {};
+  for (const [role, page] of Object.entries(pages)) {
+    stage = role + "-opening-hand-confirm";
+    await page.wait("window.__twoSeatQa.status().mulliganPending===true");
+    const beforeKeepSeq = await page.evaluate("window.__twoSeatQa.status().localCommitSeq");
+    assert(Number.isInteger(beforeKeepSeq), "opening hand commit sequence unavailable");
+    const keep = `[...document.querySelectorAll('button')].find(b=>{if(b.textContent.trim()!=='Keep Hand'||b.disabled)return false;const r=b.getBoundingClientRect();return r.width>0&&r.height>0&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})`;
+    await page.wait(keep);
+    result.openingHandUi[role] = await page.evaluate(publicGameControls);
+    await page.click(keep);
+    await page.wait(`(()=>{const s=window.__twoSeatQa.status();return s.ready&&s.mulliganPending===false&&s.localCommitSeq>${beforeKeepSeq};})()`);
+    result.openingHandConfirmed[role] = true;
+  }
+  stage = "both-opening-hands-committed";
+  await host.wait("window.__twoSeatQa.status().waitingType!=='MulliganDecision' && window.__twoSeatQa.status().dispatchIdle");
+  await guest.wait("window.__twoSeatQa.status().waitingType!=='MulliganDecision' && window.__twoSeatQa.status().dispatchIdle");
+  const noMulliganShell = "!document.querySelector('div.fixed.inset-0.z-50.overflow-x-hidden.overflow-y-auto')";
+  await host.wait(noMulliganShell); await guest.wait(noMulliganShell);
+  result.openingHandCompletedUi = { host: await host.evaluate(publicGameControls), guest: await guest.evaluate(publicGameControls) };
+  result.stagesPassed.push("both-real-pointer-keep-hands-committed");
   result.fullControlUi = {};
   for (const [role, page] of Object.entries(pages)) {
+    category = "setup";
     stage = role + "-native-channel-ready";
     await page.wait("window.__twoSeatQa.status().route==='game' && window.__twoSeatQa.status().nativeChannels");
     stage = role + "-full-control";
@@ -296,6 +330,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     await page.wait(hittableFullControl);
     result.fullControlUi[role].candidatesAtClick = await page.evaluate(fullControlControls);
     await page.click(hittableFullControl);
+    category = "product"; stage = role + "-full-control-apply";
     await page.wait("window.__twoSeatQa.status().fullControl && window.__twoSeatQa.status().fullControlApplied");
     assert(!(await page.evaluate("window.__twoSeatQa.status().agreed")), "consent was not consumed");
   }
@@ -365,6 +400,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   await markDriverTeardown();
   const closingHost = await host.evaluate("window.__twoSeatQa.status()"), closingGuest = await guest.evaluate("window.__twoSeatQa.status()");
   assert(closingHost.safeErrors.length === 0 && closingGuest.safeErrors.length === 0, "seat observation or transport errors present before driver teardown");
+  assert(closingHost.contextGeneration === 1 && closingGuest.contextGeneration === 1, "context reload invalidated the full App lifecycle");
   result.pass = true;
   await cdp("Browser.close").catch(() => {});
 } catch (cause) {
@@ -387,6 +423,10 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   result.publicFormChecks = {};
   for (const [role, page] of Object.entries(pages)) {
     try { result.publicFormChecks[role] = await page.evaluate(setupControls); } catch {}
+  }
+  result.publicGameControls = {};
+  for (const [role, page] of Object.entries(pages)) {
+    try { result.publicGameControls[role] = await page.evaluate(publicGameControls); } catch {}
   }
   const safeErrors = Object.values(result.lastObservation).flatMap(x => x?.safeErrors ?? []);
   if (safeErrors.some(x => ["wire-observer-failed", "lifecycle-observer-failed", "lifecycle-observer-overflow"].includes(x))) {
