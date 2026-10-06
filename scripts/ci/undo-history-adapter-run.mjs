@@ -81,12 +81,26 @@ if (!executable) {
 }
 const profile = await mkdtemp(path.join(process.env.RUNNER_TEMP, 'history-adapter-chrome-'));
 const args = ['--headless', '--disable-gpu', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run', '--no-default-browser-check', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'];
-const chrome = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-let stderr = '', socket, serial = 0, pageSession, targetWorker, failure, spawnError, stage = 'browser-startup';
+// A bounded version probe is separate from the unchanged browser launch wait.
+const probe = spawnSync(executable, ['--version'], { encoding: 'utf8', timeout: 5000, maxBuffer: 4096 });
+const versionProbe = { timeoutMs: 5000, exitCode: probe.status, signal: probe.signal, error: probe.error ? String(probe.error) : null,
+  stdout: probe.stdout?.slice(-1000) ?? '', stderr: probe.stderr?.slice(-1000) ?? '' };
+const launchStarted = performance.now();
+const chrome = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+let stderr = '', stdout = '', stderrBytes = 0, stdoutBytes = 0, chromeExit = null;
+let startupAttempts = 0, activePortFilePresent = false, activePortBytes = 0, activePortFormatValid = false;
+let startupState, failureState, browserClose;
+const cleanupSignals = [];
+let socket, serial = 0, pageSession, targetWorker, failure, spawnError, stage = 'browser-startup';
 let moduleDiagnosticsActive = false, bootstrapEngineWorkerSeen = false;
 const pending = new Map(), heaps = [], moduleErrors = [];
-chrome.stderr.on('data', b => { stderr = (stderr + b).slice(-6000); });
+chrome.stderr.on('data', b => { stderrBytes += b.length; stderr = (stderr + b).slice(-6000); });
+chrome.stdout.on('data', b => { stdoutBytes += b.length; stdout = (stdout + b).slice(-6000); });
 chrome.on('error', error => { spawnError = String(error); });
+chrome.on('exit', (code, signal) => { chromeExit = { code, signal, elapsedMs: performance.now() - launchStarted }; });
+const launchState = () => ({ elapsedMs: performance.now() - launchStarted, exitCode: chrome.exitCode, signal: chrome.signalCode,
+  exitEvent: chromeExit, spawnError: spawnError ?? null, startupAttempts, activePortFilePresent, activePortBytes, activePortFormatValid,
+  stdoutBytes, stderrBytes, stdoutTail: stdout, stderrTail: stderr });
 function call(method, params = {}, sessionId, timeout = 10000) {
   return new Promise((resolve, reject) => {
     const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Error(`CDP timeout: ${method}`)); }, timeout);
@@ -107,11 +121,15 @@ const rssSampler = setInterval(() => {
 try {
   let endpoint;
   for (let n = 0; n < 100 && !endpoint; n++) {
+    startupAttempts++;
     assert(!spawnError && chrome.exitCode === null && chrome.signalCode === null, 'Chromium launch exited; do not bypass sandbox');
-    const port = await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; });
-    const match = port.match(/^(\d+)\r?\n(\/devtools\/browser\/[A-Za-z0-9-]+)/); if (match) endpoint = `ws://127.0.0.1:${match[1]}${match[2]}`;
+    const port = await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8').catch(e => { if (e.code === 'ENOENT') return null; throw e; });
+    activePortFilePresent = port !== null; activePortBytes = port === null ? 0 : Buffer.byteLength(port);
+    const match = port?.match(/^(\d+)\r?\n(\/devtools\/browser\/[A-Za-z0-9-]+)/); activePortFormatValid = !!match;
+    if (match) endpoint = `ws://127.0.0.1:${match[1]}${match[2]}`;
     if (!endpoint) await pause(100);
   }
+  startupState = launchState();
   assert(endpoint, 'Chromium local CDP unavailable'); socket = new WebSocket(endpoint);
   socket.addEventListener('message', ({ data }) => {
     const msg = JSON.parse(data), request = pending.get(msg.id);
@@ -244,9 +262,11 @@ try {
   assert(result.pass, 'real adapter campaign failed; preserve evidence');
   }
   } else console.log(JSON.stringify({ pass: true, stage: 'browser-CDP-capability', phaseEngineStarted: false }));
-  await call('Browser.close').catch(() => {});
+  browserClose = { requestedAtMs: performance.now() - launchStarted, result: 'requested' };
+  await call('Browser.close').then(() => { browserClose.result = 'acknowledged'; }, error => { browserClose.result = 'error'; browserClose.error = String(error); });
 } catch (e) {
   failure = String(e);
+  failureState = launchState();
   if (stage === 'browser-startup' || stage === 'browser-CDP-capability') {
     await writeFile(path.join(evidence, 'browser-selfcheck.json'), JSON.stringify({ pass: false,
       candidateSha: process.env.GITHUB_SHA, stage, failure, phaseEngineStarted: false, sandboxDisableFlags: false }, null, 2) + '\n');
@@ -255,6 +275,16 @@ try {
 } finally {
   clearInterval(rssSampler); for (const request of pending.values()) clearTimeout(request.timer);
   socket?.close(); await vite?.close();
-  if (chrome.exitCode === null) { chrome.kill('SIGTERM'); for (let n = 0; n < 50 && chrome.exitCode === null; n++) await pause(100); if (chrome.exitCode === null) chrome.kill('SIGKILL'); }
+  const beforeSignalCleanup = launchState();
+  if (chrome.exitCode === null) {
+    cleanupSignals.push({ signal: 'SIGTERM', sent: chrome.kill('SIGTERM') });
+    for (let n = 0; n < 50 && chrome.exitCode === null; n++) await pause(100);
+    if (chrome.exitCode === null) cleanupSignals.push({ signal: 'SIGKILL', sent: chrome.kill('SIGKILL') });
+  }
+  await writeFile(path.join(evidence, 'chrome-launch.json'), JSON.stringify({ candidateSha: process.env.GITHUB_SHA, mode, executable,
+    executablePath: await realpath(executable), args, versionProbe, polling: { maximumAttempts: 100, pauseMs: 100, unchanged: true },
+    outputTailMaximumCharacters: 6000, startupState: startupState ?? null, failureState: failureState ?? null,
+    browserClose: browserClose ?? null, beforeSignalCleanup, cleanupSignals, afterSignalCleanup: launchState(), failure: failure ?? null, sandboxDisableFlags: false,
+    note: 'Startup/failure observations precede cleanup; successful runs request normal CDP Browser.close before signal cleanup; endpoint content is not stored' }, null, 2) + '\n');
   await writeFile(path.join(evidence, 'runtime-provenance.json'), JSON.stringify({ candidateSha: process.env.GITHUB_SHA, executable, executablePath: await realpath(executable), args, mode, stage, runtimeIsolation: true, noRustBuild: true, sourceAndCandidateCheckoutsNotModified: true, failure, peakChromeTreeRssBytes }, null, 2) + '\n');
 }
