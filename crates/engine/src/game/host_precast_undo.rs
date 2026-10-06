@@ -9,8 +9,8 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOccurrence, CastingVariant, GameState, PriorityPassingMode, StackPaidSnapshot,
-    TrustedGameStateEnvelope, WaitingFor,
+    ActionResult, CastOccurrence, CastingVariant, GameState, PriorityPassingMode,
+    StackPaidSnapshot, TrustedGameStateEnvelope, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::interaction::InteractionSubmission;
@@ -55,7 +55,11 @@ impl UndoCapacityLimits {
             ]
             .into_iter()
             .chain(state.players.iter().flat_map(|player| {
-                [player.hand.len(), player.library.len(), player.graveyard.len()]
+                [
+                    player.hand.len(),
+                    player.library.len(),
+                    player.graveyard.len(),
+                ]
             })),
         );
         // All thirteen registered/current vectors count entries, not card quantities.
@@ -97,7 +101,12 @@ impl UndoCapacityLimits {
                     .map(|items| items.len()),
             )
             .chain(state.lki_by_incarnation.values().map(|items| items.len()))
-            .chain(state.departed_stack_spells.values().map(|items| items.len()))
+            .chain(
+                state
+                    .departed_stack_spells
+                    .values()
+                    .map(|items| items.len()),
+            )
             .chain(state.linked_exile_lki.values().map(|items| items.len())),
         );
         let journal = &state.resolved_rules_journal;

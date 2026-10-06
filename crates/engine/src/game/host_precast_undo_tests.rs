@@ -138,7 +138,10 @@ fn capacity_each_structural_category_has_inclusive_boundary() {
         + journal.nodes().len()
         + journal.produced_mana().len()
         + journal.spent_mana().len();
-    assert!(journal_count > 0, "real fixture tap records journal structure");
+    assert!(
+        journal_count > 0,
+        "real fixture tap records journal structure"
+    );
     let history_count = state.zone_changes_this_turn.len()
         + state.player_actions_this_turn.len()
         + state
@@ -151,7 +154,10 @@ fn capacity_each_structural_category_has_inclusive_boundary() {
             .values()
             .map(|v| v.len())
             .sum::<usize>();
-    assert!(history_count > 0, "real fixture records actions/zone history");
+    assert!(
+        history_count > 0,
+        "real fixture records actions/zone history"
+    );
     for (category, count) in [
         state.objects.len(),
         zone_count,
