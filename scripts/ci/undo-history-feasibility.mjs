@@ -15,6 +15,7 @@ const authorityFields = ['interaction_session_id', 'interaction_generation', 'ne
 let stage = 'input', failedCheck, progress, lastActionType, lastOutcomeStatus, mismatchPaths;
 let engine, wasmModule, stepCount = 0;
 let restoreAttempt = 0;
+const observedInteractionNamespaces = new Set();
 const sha = raw => createHash('sha256').update(raw).digest('hex');
 const check = (value, code) => { if (!value) { failedCheck = code; throw Error(code); } };
 const receipt = (name, value) => {
@@ -117,10 +118,29 @@ function differentPaths(a, b) {
 }
 const rawState = () => engine.export_game_state_json();
 const state = () => JSON.parse(rawState()).state; // Internal observations only.
-function equalRaw(expected, actual, code) {
+function equalWithVerifiedRekey(expected, actual, code) {
   const a = canonical(expected), b = canonical(actual);
-  mismatchPaths = differentPaths(a, b);
+  const before = a.precast_shortcut_runtime, after = b.precast_shortcut_runtime;
+  check(before && after && [before, after].every(runtime => runtime.offer === null
+    && runtime.must_diverge === null && runtime.materializing === false), 'idle-private-precast-authority-only');
+  const epoch = token => {
+    check(typeof token === 'string' && /^@number:(?:0|[1-9][0-9]*)$/.test(token), 'exact-private-u64-epoch');
+    const value = BigInt(token.slice(8)); check(value <= (1n << 64n) - 1n, 'private-epoch-within-u64'); return value;
+  };
+  const rotated = (epoch(before.next_epoch) + 1n) & ((1n << 64n) - 1n);
+  check(epoch(after.next_epoch) === (rotated === 0n ? 1n : rotated), 'exact-saved-epoch-positive-rotation');
+  // The precise authority relation was checked above. Change only the comparison
+  // copy, never the original PRE bytes or the engine's installed state.
+  const rekeyedExpected = { ...a, precast_shortcut_runtime: { ...before, next_epoch: after.next_epoch } };
+  mismatchPaths = differentPaths(rekeyedExpected, b);
   check(mismatchPaths.length === 0, code); mismatchPaths = undefined;
+}
+function recordFreshNamespace(saved, live, fresh) {
+  check([saved, live, fresh].every(value => typeof value === 'string'
+    && /^@string:wasm-[0-9a-f]{16}$/.test(value)), 'engine-authored-interaction-namespace');
+  observedInteractionNamespaces.add(saved); observedInteractionNamespaces.add(live);
+  check(!observedInteractionNamespaces.has(fresh), 'fresh-interaction-namespace-never-reused');
+  observedInteractionNamespaces.add(fresh);
 }
 function legal(actor) {
   const result = engine.get_legal_actions_for_viewer_js(actor);
@@ -145,8 +165,11 @@ function oldCapability(actor, actionCode) {
   }
   check(false, 'real-issued-exact-interaction-capability');
 }
-function restore(raw, { stale, actor } = {}) {
-  const oldSession = state().interaction_session_id;
+function installChecked(raw, { stale, actor } = {}) {
+  const before = rawState(), liveState = lossless(before).state;
+  actor ??= JSON.parse(before).state.waiting_for.data?.player;
+  check(Number.isInteger(actor), 'restore-old-capability-actor');
+  stale ??= oldCapability(actor, 'passPriority');
   const start = performance.now();
   engine.restore_game_state(raw);
   const elapsed = performance.now() - start;
@@ -164,25 +187,32 @@ function restore(raw, { stale, actor } = {}) {
     fixedMismatchingStateSections: differentPaths({ state: expectedEnvelope.state }, { state: restoredEnvelope.state }),
     otherEnvelopeSectionsEqual: isDeepStrictEqual(Object.fromEntries(Object.entries(expectedEnvelope).filter(([key]) => !['state', 'precast_shortcut_runtime'].includes(key))), Object.fromEntries(Object.entries(restoredEnvelope).filter(([key]) => !['state', 'precast_shortcut_runtime'].includes(key))))
   });
-  equalRaw(raw, restored, 'entire-trusted-envelope-equality');
-  check(state().interaction_session_id && state().interaction_session_id !== oldSession, 'fresh-interaction-namespace');
-  if (stale) {
-    const before = rawState();
-    const outcome = engine.submit_interaction_js(actor, stale);
-    check(outcome?.status === 'rejected' && outcome.rejection?.code === 'stale_interaction', 'old-issued-capability-rejected-as-stale');
-    check(isDeepStrictEqual(lossless(before), lossless(rawState())), 'stale-capability-preserves-exact-state');
-    const currentActor = state().waiting_for.data.player;
-    const fresh = oldCapability(currentActor, 'passPriority'), beforeFresh = rawState();
-    const accepted = engine.submit_interaction_js(currentActor, fresh);
-    check(accepted?.status === 'applied' && accepted.result && !accepted.result.disposition, 'fresh-real-capability-applied');
-    const afterFresh = rawState();
-    // Control the exact semantic transition with the existing normal action path.
-    // Diagnostic reinstalls/actions are not retained history points or product Redo.
-    engine.restore_game_state(beforeFresh); equalRaw(beforeFresh, rawState(), 'fresh-capability-control-pre');
-    submit(currentActor, { type: 'PassPriority' });
-    equalRaw(afterFresh, rawState(), 'fresh-capability-equals-normal-legal-transition');
-    engine.restore_game_state(raw); equalRaw(raw, rawState(), 'diagnostic-target-reinstalled');
-  }
+  equalWithVerifiedRekey(raw, restored, 'trusted-gameplay-and-private-state-exact-after-verified-rekey');
+  recordFreshNamespace(lossless(raw).state.interaction_session_id, liveState.interaction_session_id,
+    lossless(restored).state.interaction_session_id);
+  const outcome = engine.submit_interaction_js(actor, stale);
+  check(outcome?.status === 'rejected' && outcome.rejection?.code === 'stale_interaction', 'old-issued-capability-rejected-as-stale');
+  check(isDeepStrictEqual(lossless(restored), lossless(rawState())), 'stale-capability-preserves-exact-state');
+  receipt('restore-authority-' + restoreAttempt, { pass: true, verifiedExactSavedEpochRotation: true,
+    nonreusedInteractionNamespace: true, observedNamespaceCount: observedInteractionNamespaces.size,
+    staleIssuedCapabilityRejectedWithExactStatePreserved: true,
+    numericalEpochGlobalMonotonicityAndNonreuse: 'NOT PROVIDED: saved-snapshot-relative counter; new interaction namespace checked separately',
+    activePrecastOfferAuthority: 'NOT RUN: idle private runtime only' });
+  return elapsed;
+}
+function restore(raw, options = {}) {
+  const elapsed = installChecked(raw, options);
+  const currentActor = state().waiting_for.data.player;
+  const fresh = oldCapability(currentActor, 'passPriority'), beforeFresh = rawState();
+  const accepted = engine.submit_interaction_js(currentActor, fresh);
+  check(accepted?.status === 'applied' && accepted.result && !accepted.result.disposition, 'fresh-real-capability-applied');
+  const afterFresh = rawState();
+  // Every diagnostic reinstall checks fresh authority and real stale rejection.
+  // These controls are not retained history points or product Redo.
+  installChecked(beforeFresh, { stale: fresh, actor: currentActor });
+  submit(currentActor, { type: 'PassPriority' });
+  equalWithVerifiedRekey(afterFresh, rawState(), 'fresh-capability-equals-normal-legal-transition-with-one-rekey');
+  installChecked(raw);
   oldCapability(state().waiting_for.data.player, 'passPriority');
   return elapsed;
 }
@@ -301,15 +331,15 @@ function multistack() {
 function rng() {
   init([...copies(12, 'Forest'), ...copies(12, 'Island'), ...copies(8, 'Opt'), ...copies(8, 'Rampant Growth')], copies(40, 'Island'));
   spellReady(0, 'Opt', 3);
-  const beforeOpt = rawState();
+  const oldOptCapability = oldCapability(0, 'passPriority'), beforeOpt = rawState();
   castNamed(0, 'Opt'); resolveAll(); const firstOpt = rawState();
   check(state().players[0].hand.length > JSON.parse(beforeOpt).state.players[0].hand.length - 1, 'actual-opt-draw');
-  restore(beforeOpt); castNamed(0, 'Opt'); resolveAll(); equalRaw(firstOpt, rawState(), 'same-opt-branch-exact-private-state');
+  restore(beforeOpt, { stale: oldOptCapability, actor: 0 }); castNamed(0, 'Opt'); resolveAll(); equalWithVerifiedRekey(firstOpt, rawState(), 'same-opt-branch-exact-private-state-with-one-rekey');
   spellReady(0, 'Rampant Growth', 3);
-  const beforeShuffle = rawState(); const beforePos = lossless(beforeShuffle).state.rng_word_pos;
+  const oldShuffleCapability = oldCapability(0, 'passPriority'), beforeShuffle = rawState(); const beforePos = lossless(beforeShuffle).state.rng_word_pos;
   castNamed(0, 'Rampant Growth'); resolveAll(); const firstShuffle = rawState();
   check(!isDeepStrictEqual(beforePos, lossless(firstShuffle).state.rng_word_pos), 'actual-shuffle-advances-rng');
-  restore(beforeShuffle); castNamed(0, 'Rampant Growth'); resolveAll(); equalRaw(firstShuffle, rawState(), 'same-shuffle-branch-exact-private-state-and-rng');
+  restore(beforeShuffle, { stale: oldShuffleCapability, actor: 0 }); castNamed(0, 'Rampant Growth'); resolveAll(); equalWithVerifiedRekey(firstShuffle, rawState(), 'same-shuffle-branch-exact-private-state-and-rng-with-one-rekey');
   receipt('rng', { pass: true, checks: ['real-scry-and-draw', 'same-opt-private-state', 'real-library-search-and-shuffle', 'rng-advanced', 'restored-seed-offset-same-shuffle-result'], viewerPrivacy: 'NOT RUN: no additional viewer publication', memory: memory() });
 }
 function abilityResponse() {
@@ -380,7 +410,9 @@ function history() {
         restoreSamples.push({ position, restoreMs: elapsed, continuationMs: performance.now() - continuationStart });
         restore(current); // Authentic diagnostic reinstall, not a product Redo/history point.
       }
-      receipt('restore-' + n, { pass: true, historyLength: n, restoreSamples, diagnosticCurrentReinstalls: 3, authorityFieldsExcludedOnly: authorityFields });
+      receipt('restore-' + n, { pass: true, historyLength: n, restoreSamples, diagnosticCurrentReinstalls: 3,
+        interactionCarrierFieldsExcluded: authorityFields, privateEpochRelation: 'exact saved u64 +1 modulo, minimum1; all remaining trusted fields exact',
+        authorityChecks: 'every actual install, including controls: new never-reused namespace and real stale-capability rejection' });
     }
   }
   retained.length = 0; hashes.clear(); global.gc();
