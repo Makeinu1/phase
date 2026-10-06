@@ -205,6 +205,27 @@ describe("unconnected trusted history transaction", () => {
     await expect(s.perform("op")).rejects.toThrow("locked");
   });
 
+  it("cannot discard a live-session recovery PRE while a timed-out mutation may still run", async () => {
+    const s = setup(); await s.perform("a");
+    vi.mocked(s.ports.submit).mockRejectedValueOnce(new Error("timeout: still running"));
+    await expect(s.perform("late")).rejects.toThrow("timeout");
+    const before = s.history.inspect();
+    expect(() => s.history.dispose()).toThrow("session still active");
+    expect(s.history.inspect()).toEqual(before);
+    expect(s.history.inspect().phase).toBe("recovery");
+    s.newSession();
+    s.history.dispose();
+    expect(s.history.inspect()).toMatchObject({ phase: "disposed", cursor: 0, retainedBytes: 0, entries: [] });
+  });
+
+  it("also requires session teardown before disposing idle history", async () => {
+    const s = setup(); await s.perform("a"); const before = s.history.inspect();
+    expect(() => s.history.dispose()).toThrow("session still active");
+    expect(s.history.inspect()).toEqual(before);
+    s.newSession(); s.history.dispose();
+    expect(s.history.inspect()).toMatchObject({ phase: "disposed", retainedBytes: 0 });
+  });
+
   it("competing submit/Undo cannot enter while capture or restore is in flight", async () => {
     const s = setup(); const capture = deferred<string>(); s.adapter.exportPersistenceState.mockReturnValueOnce(capture.promise);
     const result = s.perform("a"); await expect(s.history.undo()).rejects.toThrow("locked");
@@ -225,6 +246,22 @@ describe("unconnected trusted history transaction", () => {
     expect(s.history.inspect().entries[0].operation).toEqual({ rootId: "original", actor: 1 });
     expect(Object.isFrozen(s.history.inspect().entries[0].operation)).toBe(true);
     expect(Object.isFrozen(s.history.inspect().binding)).toBe(true);
+  });
+
+  it("retains only explicit metadata, without caller payload/state references", async () => {
+    const s = setup(); const payload = { secret: "not history authority" };
+    const binding = { ...s.binding, raw: "RAW", payload };
+    const history = new TrustedHistory(s.ports, binding);
+    const operation = { rootId: "op", actor: 0, raw: "RAW", payload };
+    await history.perform(operation);
+    const entry = history.inspect().entries[0];
+    expect(entry.operation).toEqual({ rootId: "op", actor: 0 });
+    expect(entry.parent).toEqual(s.binding);
+    expect(history.inspect().binding).toEqual({ ...s.binding, commitSeq: 2 });
+    vi.mocked(s.ports.commitRestore).mockImplementationOnce((snapshot, previous) => ({ ...previous,
+      branchId: "restored", generation: 2, commitSeq: snapshot.seq, raw: "RAW", payload }));
+    await history.undo();
+    expect(Object.keys(history.inspect().binding).sort()).toEqual(Object.keys(s.binding).sort());
   });
 
   it("unlocks an operation metadata getter failure before capture/submit", async () => {

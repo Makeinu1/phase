@@ -69,6 +69,11 @@ function sameBinding(a: HistoryBinding, b: HistoryBinding): boolean {
     && a.branchId === b.branchId && a.generation === b.generation && a.commitSeq === b.commitSeq;
 }
 
+function copyBinding(binding: HistoryBinding): Readonly<HistoryBinding> {
+  return Object.freeze({ gameId: binding.gameId, gameSessionGeneration: binding.gameSessionGeneration,
+    branchId: binding.branchId, generation: binding.generation, commitSeq: binding.commitSeq });
+}
+
 /**
  * Isolated in-memory prototype. No dispatch, store, agreement or P2P hookup.
  * Callers group casting/payment/choices into operation roots; this class does
@@ -87,7 +92,7 @@ export class TrustedHistory {
     if (testByteBudget !== undefined && (!Number.isSafeInteger(testByteBudget) || testByteBudget < 0)) {
       throw new Error("Invalid injected byte budget");
     }
-    this.binding = Object.freeze({ ...binding });
+    this.binding = copyBinding(binding);
   }
 
   inspect() {
@@ -119,7 +124,7 @@ export class TrustedHistory {
     let checkpoint: TrustedCheckpointString | null = null;
     let submitted = false;
     try {
-      const root = Object.freeze({ ...operation });
+      const root = Object.freeze({ rootId: operation.rootId, actor: operation.actor });
       if (!root.rootId || this.entries.some((entry) => entry.operation.rootId === root.rootId
         && entry.parent.branchId === parent.branchId)) throw new Error("Duplicate operation root");
       checkpoint = await captureTrustedCheckpointString(this.ports.adapter);
@@ -142,7 +147,7 @@ export class TrustedHistory {
       if (this.canceled || !this.ports.isCurrent(parent) || receipt.rootId !== root.rootId
         || !sameBinding(receipt.parent, parent) || !Number.isSafeInteger(receipt.commitSeq)
         || receipt.commitSeq <= parent.commitSeq) throw new Error("Stale or invalid acceptance");
-      const nextBinding = Object.freeze({ ...parent, commitSeq: receipt.commitSeq });
+      const nextBinding = copyBinding({ ...parent, commitSeq: receipt.commitSeq });
       candidate.acceptedCommitSeq = receipt.commitSeq;
       this.entries = nextEntries;
       this.cursor = nextEntries.length;
@@ -208,7 +213,7 @@ export class TrustedHistory {
         || !Number.isSafeInteger(fresh.commitSeq) || fresh.commitSeq !== snapshot.seq || fresh.commitSeq <= previous.commitSeq) {
         throw new Error("Restore commit did not invalidate old authority");
       }
-      this.binding = Object.freeze({ ...fresh });
+      this.binding = copyBinding(fresh);
       this.cursor = recovery.cursor;
       if (recovery.pending) releaseTrustedCheckpointString(recovery.checkpoint);
       this.pendingBytes = 0;
@@ -223,6 +228,7 @@ export class TrustedHistory {
   /** Only after the owning session is torn down; cannot dispose an in-flight engine operation. */
   dispose(): void {
     if (this.phase !== "idle" && this.phase !== "recovery") throw new Error("History locked");
+    if (this.ports.isSessionCurrent(this.binding)) throw new Error("Owning session still active");
     for (const entry of this.entries) releaseTrustedCheckpointString(entry.checkpoint);
     if (this.recovery?.pending) releaseTrustedCheckpointString(this.recovery.checkpoint);
     this.entries = [];
