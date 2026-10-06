@@ -23,8 +23,16 @@ try {
     opponent: { main_deck: Array(40).fill("Forest") } };
   const initial = engine.initialize_multiplayer_host_game(decks, 0xF32002, format, null, 2, 0);
   check(!initial.error && engine.is_multiplayer_mode(), "authoritative-host-init");
-  const state = () => { const value = engine.get_game_state()?.state; check(value?.players?.length === 2, "engine-state-envelope"); return value; };
-  const legal = actor => engine.get_legal_actions_for_viewer_js(actor).actions;
+  // Observation only: never feed exported JS state into any restore API.
+  // The trusted export retains hidden-zone and interaction witnesses in memory;
+  // client display projections deliberately redact those fields.
+  const state = () => { const value = JSON.parse(engine.export_game_state_json()).state; check(value?.players?.length === 2, "engine-state-envelope"); return value; };
+  const legal = actor => {
+    const result = engine.get_legal_actions_for_viewer_js(actor);
+    // The engine groups semantic mana actions here; flat actions omit them.
+    return [...result.actions, ...Object.values(result.legalActionsByObject ?? {}).flat()]
+      .map(action => ({ type: action.type, ...(action.data ? { data: action.data } : {}) }));
+  };
   const submit = (actor, action) => {
     lastActionType = action.type;
     const outcome = engine.submit_action(actor, action);
@@ -88,12 +96,12 @@ try {
   stage = "normal-restore";
   check(engine.restore_host_precast_undo(binding, armed.receipt).phase === "Consumed", "restore-consumed");
   const restored = state();
-  for (const field of ["players", "battlefield", "stack", "waiting_for", "priority_player", "phase", "rng_seed", "debug_mode", "debug_permitted"]) {
+  for (const field of ["players", "battlefield", "stack", "waiting_for", "priority_player", "phase", "rng_seed", "rng_word_pos", "debug_mode", "debug_permitted"]) {
     check(isDeepStrictEqual(restored[field], pre[field]), "restore-pre-field-" + field);
   }
   check(restored.objects[cast.data.object_id].zone === "Hand", "restore-spell-to-hand");
   for (const id of pre.battlefield) check(restored.objects[id].tapped === pre.objects[id].tapped, "restore-land-taps");
-  check(restored.state_revision === post.state_revision + 1 && restored.interaction_session_id !== post.interaction_session_id, "restore-fresh-authority");
+  check(restored.interaction_session_id && post.interaction_session_id && !isDeepStrictEqual(restored.interaction_session_id, post.interaction_session_id), "restore-fresh-interaction-authority");
   stage = "one-use-refusal";
   refusal(binding, armed.receipt);
   stage = "recast-old-receipt-refusal";
@@ -113,6 +121,7 @@ try {
   console.log(JSON.stringify({ pass: true, sourceSha: "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92",
     scope: "real WASM host API; ordinary fixture decks via game actions; no debug/state injection",
     checks: ["prefloating-mana", "normal-cast-checkpoint-restore", "wrong-binding-preserves", "one-use", "recast-old-receipt", "legal-pass-invalidates", "stale-host-binding"],
+    runtimeRevision: "not exposed by public WASM API; native regression covers monotonic revision",
     ui: "NOT RUN", twoSeatSync: "NOT RUN", memoryReclamation: "NOT RUN" }));
 } catch {
   // Never serialize assertion values, hidden hands/libraries, bindings or receipts.
