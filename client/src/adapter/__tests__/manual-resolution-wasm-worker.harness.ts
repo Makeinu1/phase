@@ -294,9 +294,10 @@ async function refusal(
     check((envelope.engine_occupied === true) === (kind === "engineOccupied"), "wasm-occupied-discriminator");
     check(classifyInitFailure(envelope)?.kind === kind, "wasm-refusal-classifier");
   } else {
-    check(outcome.error && outcome.response?.type === "error", "worker-refusal");
+    check(outcome.error instanceof Error, "worker-error-type");
     const reasonsMessage = outcome.error.message.replace(/^Deck validation failed: /, "");
     check(reason.test(reasonsMessage) || kind === "engineOccupied", "worker-refusal-class");
+    check(outcome.response?.type === "error", "worker-refusal");
     check((outcome.response.bracketViolation === true) === (kind === "bracketViolation"), "worker-bracket-discriminator");
     check((outcome.response.engineOccupied === true) === (kind === "engineOccupied"), "worker-occupied-discriminator");
     if (kind === "bracketViolation" || kind === "engineOccupied") {
