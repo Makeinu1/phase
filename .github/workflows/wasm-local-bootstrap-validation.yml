@@ -1,0 +1,318 @@
+name: Fork Local Worker bootstrap validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [experiment/manual-integration-actions]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  # Product source is admitted only after a measured qualifying baseline RED.
+  # The later product checkpoint must explicitly replace this fixed lane.
+  BOOTSTRAP_CHECKPOINT_MODE: baseline-red
+  BOOTSTRAP_BASE_SHA: 8fcd0f33451058f55b110e707d50497545763615
+  MANUAL_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+  MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-evidence
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '1'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  baseline-red:
+    if: >-
+      github.repository == 'Makeinu1/phase' &&
+      github.event.pull_request.head.repo.full_name == 'Makeinu1/phase' &&
+      github.event.pull_request.head.ref == 'experiment/manual-wasm-local-bootstrap'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate-source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.BOOTSTRAP_BASE_SHA }}
+          path: baseline-source
+          persist-credentials: false
+      - name: Require explicit baseline checkpoint and clean independent sources
+        working-directory: candidate-source
+        run: |
+          test "$BOOTSTRAP_CHECKPOINT_MODE" = baseline-red
+          mkdir -p "$MANUAL_EVIDENCE" "$RUNNER_TEMP/bootstrap-bindgen-baseline"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-wasm-target"
+          printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+          python3 scripts/ci/manual-integration-guard.py candidate-source-before true
+          cd ../baseline-source
+          MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
+            python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-source-before true
+          git rev-parse HEAD HEAD^{tree} > "$MANUAL_EVIDENCE/baseline-source.txt"
+          git -C ../candidate-source rev-parse HEAD HEAD^{tree} > "$MANUAL_EVIDENCE/candidate-source.txt"
+          sha256sum Cargo.lock client/pnpm-lock.yaml rust-toolchain.toml .cargo/config.toml \
+            > "$MANUAL_EVIDENCE/baseline-inputs.sha256"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: nightly-2026-04-19
+          target: wasm32-unknown-unknown
+          rust-src-dir: baseline-source
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.16.0
+      - name: Verify actual hosted tools without browser downloads
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py hosted-tools bash -euo pipefail <<'TOOLS'
+          command -v google-chrome curl jq
+          driver_binary=$(command -v chromedriver || true)
+          if [ -z "$driver_binary" ] && [ -n "${CHROMEWEBDRIVER:-}" ]; then
+            driver_binary="$CHROMEWEBDRIVER/chromedriver"
+          fi
+          test -n "$driver_binary"
+          test -x "$driver_binary"
+          printf 'BOOTSTRAP_CHROMEDRIVER=%s\n' "$driver_binary" >> "$GITHUB_ENV"
+          rustc -Vv
+          cargo -V
+          wasm-bindgen --version
+          test "$(wasm-bindgen --version)" = 'wasm-bindgen 0.2.121'
+          test "$(node --version)" = v22.16.0
+          test "$(pnpm --version)" = 9.15.9
+          google-chrome --version
+          "$driver_binary" --version
+          chrome_major=$(google-chrome --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          driver_major=$("$driver_binary" --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          test "$chrome_major" = "$driver_major"
+          test -z "${ENGINE_WASM_URL:-}"
+          TOOLS
+      - name: Install one frozen candidate client dependency tree
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py client-dependencies \
+            pnpm --dir client install --frozen-lockfile
+      - name: Check full candidate client types
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py client-types pnpm --dir client run type-check
+      - name: Lint full candidate client
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py client-lint pnpm --dir client run lint
+      - name: Check candidate protocol
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py client-protocol pnpm --dir client run protocol:check
+      - name: Compile immutable baseline engine WASM once, default off
+        working-directory: baseline-source
+        run: |
+          MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
+            python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-wasm-build \
+            cargo build --locked -p engine-wasm --target wasm32-unknown-unknown \
+            --profile wasm-dev --no-default-features
+      - name: Bind the baseline artifact outside both source trees
+        working-directory: baseline-source
+        run: |
+          MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
+            python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-bindgen \
+            wasm-bindgen --target web --out-name engine_wasm \
+            --out-dir "$RUNNER_TEMP/bootstrap-bindgen-baseline" \
+            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"
+      - name: Copy only ignored runtime glue and WASM to the candidate alias
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py baseline-runtime-copy bash -euo pipefail <<'COPY'
+          artifact="$RUNNER_TEMP/bootstrap-bindgen-baseline"
+          test ! -d "$artifact/snippets"
+          test -s "$artifact/engine_wasm.js"
+          test -s "$artifact/engine_wasm_bg.wasm"
+          git check-ignore client/src/wasm/engine_wasm.js client/src/wasm/engine_wasm_bg.wasm
+          cp "$artifact/engine_wasm.js" client/src/wasm/engine_wasm.js
+          cp "$artifact/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+          sha256sum "$artifact/engine_wasm.js" "$artifact/engine_wasm_bg.wasm" \
+            client/src/wasm/engine_wasm.js client/src/wasm/engine_wasm_bg.wasm \
+            client/src/wasm/engine_wasm.d.ts > "$MANUAL_EVIDENCE/baseline-artifacts.sha256"
+          cmp "$artifact/engine_wasm.js" client/src/wasm/engine_wasm.js
+          cmp "$artifact/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+          COPY
+      - name: Run existing affected adapter tests with one worker
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py client-adapter-tests \
+            pnpm --dir client exec vitest run --config vitest.config.ts \
+            --pool=forks --isolate --maxWorkers=1 --no-file-parallelism \
+            --coverage.enabled=false --reporter=verbose \
+            src/adapter/__tests__/engine-worker.test.ts \
+            src/adapter/__tests__/engine-worker-client.test.ts \
+            src/adapter/__tests__/wasm-adapter.test.ts
+      - name: Run actual baseline page and retain its terminal failure
+        id: baseline-browser
+        working-directory: candidate-source
+        run: |
+          # Existing hosted browser/driver inventory and direct documented W3C API:
+          # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
+          # https://developer.chrome.com/docs/chromedriver/get-started
+          # https://www.w3.org/TR/webdriver2/#execute-async-script
+          python3 scripts/ci/manual-integration-guard.py baseline-browser bash -euo pipefail <<'BROWSER'
+          session_id=''
+          vite_pid=''
+          driver_pid=''
+          cleanup() {
+            if [ -n "$session_id" ]; then
+              curl --silent --max-time 10 -X DELETE "http://127.0.0.1:9515/session/$session_id" \
+                > "$MANUAL_EVIDENCE/chromedriver-delete.json" || true
+            fi
+            if [ -n "$vite_pid" ]; then kill "$vite_pid" 2>/dev/null || true; fi
+            if [ -n "$driver_pid" ]; then kill "$driver_pid" 2>/dev/null || true; fi
+          }
+          trap cleanup EXIT
+          pnpm --dir client dev --host 127.0.0.1 --port 5173 --strictPort \
+            > "$MANUAL_EVIDENCE/vite.log" 2>&1 &
+          vite_pid=$!
+          "$BOOTSTRAP_CHROMEDRIVER" --port=9515 --verbose --log-path="$MANUAL_EVIDENCE/chromedriver.log" \
+            > "$MANUAL_EVIDENCE/chromedriver-stdout.log" 2>&1 &
+          driver_pid=$!
+          # One bounded startup interval and one preflight request; no polling or retry.
+          sleep 5
+          kill -0 "$vite_pid" "$driver_pid"
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:9515/status \
+            > "$MANUAL_EVIDENCE/chromedriver-status.json"
+          jq -e '.value.ready == true' "$MANUAL_EVIDENCE/chromedriver-status.json"
+          curl --fail --silent --show-error --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm.js \
+            > "$MANUAL_EVIDENCE/served-engine-glue.js"
+          curl --fail --silent --show-error --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm_bg.wasm \
+            > "$RUNNER_TEMP/served-engine-wasm-baseline.wasm"
+          cmp client/src/wasm/engine_wasm_bg.wasm "$RUNNER_TEMP/served-engine-wasm-baseline.wasm"
+          wasm_hash=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | cut -d ' ' -f 1)
+          glue_hash=$(sha256sum client/src/wasm/engine_wasm.js | cut -d ' ' -f 1)
+          served_glue_hash=$(sha256sum "$MANUAL_EVIDENCE/served-engine-glue.js" | cut -d ' ' -f 1)
+          baseline_tree=$(git -C ../baseline-source rev-parse HEAD^{tree})
+          candidate_tree=$(git rev-parse HEAD^{tree})
+          url="http://127.0.0.1:5173/manual-resolution-wasm-worker.html?artifact=baseline&baseline_sha=$BOOTSTRAP_BASE_SHA&candidate_sha=$MANUAL_EXPECTED_SOURCE_SHA&baseline_tree=$baseline_tree&candidate_tree=$candidate_tree&wasm_sha256=$wasm_hash&glue_sha256=$glue_hash&served_glue_sha256=$served_glue_hash"
+          jq -n --arg binary "$(command -v google-chrome)" '{capabilities:{alwaysMatch:{browserName:"chrome","goog:chromeOptions":{binary:$binary,args:["--headless=new","--no-sandbox","--disable-dev-shm-usage"]},"goog:loggingPrefs":{browser:"ALL",performance:"ALL"}}}}' \
+            > "$MANUAL_EVIDENCE/chromedriver-session-request.json"
+          curl --fail --silent --show-error --max-time 60 -H 'Content-Type: application/json' \
+            --data-binary @"$MANUAL_EVIDENCE/chromedriver-session-request.json" \
+            http://127.0.0.1:9515/session > "$MANUAL_EVIDENCE/chromedriver-session.json"
+          session_id=$(jq -er '.value.sessionId' "$MANUAL_EVIDENCE/chromedriver-session.json")
+          jq -n '{script:130000,pageLoad:60000,implicit:0}' > "$MANUAL_EVIDENCE/chromedriver-timeouts-request.json"
+          curl --fail --silent --show-error --max-time 10 -H 'Content-Type: application/json' \
+            --data-binary @"$MANUAL_EVIDENCE/chromedriver-timeouts-request.json" \
+            "http://127.0.0.1:9515/session/$session_id/timeouts" > "$MANUAL_EVIDENCE/chromedriver-timeouts.json"
+          jq -n --arg url "$url" '{url:$url}' > "$MANUAL_EVIDENCE/chromedriver-url-request.json"
+          curl --fail --silent --show-error --max-time 65 -H 'Content-Type: application/json' \
+            --data-binary @"$MANUAL_EVIDENCE/chromedriver-url-request.json" \
+            "http://127.0.0.1:9515/session/$session_id/url" > "$MANUAL_EVIDENCE/chromedriver-url.json"
+          jq -n '{script:"const done = arguments[arguments.length - 1]; window.manualWasmBootstrap.completionPromise.then(done);",args:[]}' \
+            > "$MANUAL_EVIDENCE/chromedriver-execute-request.json"
+          curl --fail --silent --show-error --max-time 140 -H 'Content-Type: application/json' \
+            --data-binary @"$MANUAL_EVIDENCE/chromedriver-execute-request.json" \
+            "http://127.0.0.1:9515/session/$session_id/execute/async" > "$MANUAL_EVIDENCE/baseline-terminal-raw.json"
+          jq '.value' "$MANUAL_EVIDENCE/baseline-terminal-raw.json" > "$MANUAL_EVIDENCE/baseline-terminal.json"
+          for log_type in browser performance; do
+            jq -n --arg type "$log_type" '{type:$type}' > "$MANUAL_EVIDENCE/chromedriver-log-request.json"
+            curl --fail --silent --show-error --max-time 10 -H 'Content-Type: application/json' \
+              --data-binary @"$MANUAL_EVIDENCE/chromedriver-log-request.json" \
+              "http://127.0.0.1:9515/session/$session_id/se/log" > "$MANUAL_EVIDENCE/chromedriver-$log_type.json"
+          done
+          jq '{status,reason,rows:[.rows[] | {name,status,error,controls:
+            (if (.evidence | type) == "array" then [.evidence[] | {name,status}] else null end)}]}' \
+            "$MANUAL_EVIDENCE/baseline-terminal.json"
+          jq -e '.status == "fail" and .reason == "expected-experimental-availability" and
+            (.rows | length == 4) and
+            ([.rows[] | select(.status == "fail") | .name] == ["experimental_availability"]) and
+            ([.rows[] | select(.status == "pending")] | length == 0)' "$MANUAL_EVIDENCE/baseline-terminal.json"
+          # Preserve the experimental assertion's actual nonzero outcome.
+          exit 1
+          BROWSER
+      - name: Independently check both source trees after execution
+        if: always()
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py candidate-source-after true
+          cd ../baseline-source
+          MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
+            python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-source-after true
+      - name: Adjudicate complete RED from retained evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ['MANUAL_EVIDENCE'])
+          root.mkdir(parents=True, exist_ok=True)
+          labels = ['candidate-source-before', 'baseline-source-before', 'hosted-tools',
+                    'baseline-wasm-build', 'baseline-bindgen', 'baseline-runtime-copy',
+                    'client-dependencies', 'client-types', 'client-lint', 'client-protocol',
+                    'client-adapter-tests', 'baseline-browser', 'candidate-source-after', 'baseline-source-after']
+          complete = True
+          records = {}
+          for label in labels:
+              path = root / (label + '.json')
+              item = json.loads(path.read_text()) if path.is_file() else None
+              records[label] = item
+              baseline = label.startswith('baseline-source-') or label in ['baseline-wasm-build', 'baseline-bindgen']
+              expected_sha = os.environ['BOOTSTRAP_BASE_SHA'] if baseline else os.environ['MANUAL_EXPECTED_SOURCE_SHA']
+              expected_exit = 1 if label == 'baseline-browser' else 0
+              complete &= bool(item and item['source_sha'] == expected_sha and
+                               item['exit_code'] == expected_exit and item['effective_exit'] == expected_exit and
+                               item['stop_reason'] is None and item['source_unchanged'])
+          terminal_path = root / 'baseline-terminal.json'
+          terminal = json.loads(terminal_path.read_text()) if terminal_path.is_file() else {}
+          if not isinstance(terminal, dict):
+              terminal = {'invalid_terminal': terminal}
+          rows = terminal.get('rows', [])
+          complete &= terminal.get('status') == 'fail' and terminal.get('reason') == 'expected-experimental-availability'
+          complete &= [row.get('name') for row in rows] == [
+              'artifact_identity', 'ordinary_initializer_preservation', 'ordinary_worker_action', 'experimental_availability']
+          complete &= [row.get('status') for row in rows] == ['pass', 'pass', 'pass', 'fail']
+          if len(rows) == 4:
+              complete &= rows[3].get('evidence') == {
+                  'initialize_experimental_local_game': False, 'experimental_local_actor': False}
+              observed = rows[0].get('evidence', {})
+              supplied = observed.get('supplied', {})
+              complete &= supplied.get('candidate_sha') == os.environ['MANUAL_EXPECTED_SOURCE_SHA']
+              complete &= supplied.get('baseline_sha') == os.environ['BOOTSTRAP_BASE_SHA']
+              complete &= supplied.get('candidate_tree') == (records.get('candidate-source-before') or {}).get('source_tree')
+              complete &= supplied.get('baseline_tree') == (records.get('baseline-source-before') or {}).get('source_tree')
+              controls = rows[1].get('evidence', [])
+              names = {control.get('name') for control in controls}
+              complete &= len(controls) == 90 and len(names) == 90
+              complete &= all(control.get('status') == 'pass' for control in controls)
+              for control in controls:
+                  reach_guard = control.get('evidence', {}).get('reachGuard')
+                  complete &= reach_guard is None or reach_guard in names
+              wasm_path = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-bindgen-baseline/engine_wasm_bg.wasm'
+              glue_path = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-bindgen-baseline/engine_wasm.js'
+              complete &= wasm_path.is_file() and observed.get('wasmHash') == hashlib.sha256(wasm_path.read_bytes()).hexdigest()
+              complete &= glue_path.is_file() and supplied.get('glue_sha256') == hashlib.sha256(glue_path.read_bytes()).hexdigest()
+              complete &= observed.get('servedGlueHash') == hashlib.sha256((root / 'served-engine-glue.js').read_bytes()).hexdigest()
+          verdict = {'checkpoint_mode': os.environ['BOOTSTRAP_CHECKPOINT_MODE'],
+                     'qualifying_baseline_red': bool(complete), 'terminal_status': terminal.get('status'),
+                     'product_green': 'NOT RUN: tests-only checkpoint', 'commands': records}
+          (root / 'red-adjudication.json').write_text(json.dumps(verdict, indent=2) + '\n')
+          text = 'Qualifying baseline RED: ' + str(bool(complete)) + '. Experimental row remains failed; product GREEN is not run.\n'
+          print(text)
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write(text)
+          raise SystemExit(0 if complete else 1)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: local-worker-bootstrap-baseline-red-evidence
+          path: bootstrap-evidence/
+          if-no-files-found: warn
+          retention-days: 7

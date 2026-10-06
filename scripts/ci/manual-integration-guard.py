@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-SOURCE = "1c6c3f43b7db49111058fbf8247fc144714c739f"
+SOURCE = os.environ.get("MANUAL_EXPECTED_SOURCE_SHA", "1c6c3f43b7db49111058fbf8247fc144714c739f")
 PINS = {
     "Cargo.lock": "5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0",
     "client/pnpm-lock.yaml": "bc13ba1f6de5efd5bc724d9945aa541136df1d6938a41c53768f76c7b36c4ea4",
