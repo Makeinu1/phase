@@ -226,7 +226,7 @@ export function StackDisplay({
     <DraggableWidget
       target={{ kind: "widget", key: "stackPanel" }}
       flexZone="stackPanel"
-      className="pointer-events-none fixed z-[35] max-lg:portrait:z-30"
+      className="pointer-events-none fixed z-[35] max-lg:z-30"
       style={panelAnchorStyle}
       scaleKey="stack"
       resizeCorner={dockedLeft ? "br" : "bl"}
