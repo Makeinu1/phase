@@ -1,4 +1,4 @@
-name: Fork Undo independent actual-history counts
+name: Fork Undo bounded observer equivalence profile
 
 on:
   push:
@@ -17,21 +17,14 @@ env:
   CARGO_INCREMENTAL: '0'
 
 jobs:
-  actual-history:
-    name: Actual history ${{ matrix.count }}
+  observer-profile:
+    name: Five real operations paired observer profile
     if: github.repository == 'Makeinu1/phase'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
       actions: read
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix:
-        count: [50, 200, 1000]
-    env:
-      HISTORY_COUNT: ${{ matrix.count }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -66,20 +59,20 @@ jobs:
           cp "$GITHUB_WORKSPACE/retained-inputs/wasm.provenance.json" "$GITHUB_WORKSPACE/history-evidence/provenance/"
           cp "$GITHUB_WORKSPACE/wasm-payload/manifest.json" "$GITHUB_WORKSPACE/history-evidence/provenance/wasm-manifest.json"
           cp ../control/scripts/fixtures/undo-history/official-history-cards-b0.provenance.json "$GITHUB_WORKSPACE/history-evidence/provenance/"
-      - name: One requested real-history count under unchanged external runtime watchdog
+      - name: Five real operations per twin under unchanged external runtime watchdog
         if: ${{ !cancelled() && steps.input.outcome == 'success' }}
         working-directory: source
         run: |
           F_EVIDENCE="$GITHUB_WORKSPACE/history-evidence/history/guard" \
-            python3 ../control/scripts/ci/undo-history-runtime-guard.py "actual-history-$HISTORY_COUNT" \
+            python3 ../control/scripts/ci/undo-history-runtime-guard.py observer-profile-five \
             node --expose-gc ../control/scripts/ci/undo-history-feasibility.mjs \
             "$GITHUB_WORKSPACE/wasm-payload" \
             "$GITHUB_WORKSPACE/control/scripts/fixtures/undo-history/official-history-cards-b0.json" \
-            "$GITHUB_WORKSPACE/history-evidence/history/measurements" history "$HISTORY_COUNT"
+            "$GITHUB_WORKSPACE/history-evidence/history/measurements" observer-profile
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: undo-history-${{ matrix.count }}-feasibility-evidence
+          name: undo-history-observer-profile-five-evidence
           path: history-evidence
           if-no-files-found: warn
           retention-days: 7

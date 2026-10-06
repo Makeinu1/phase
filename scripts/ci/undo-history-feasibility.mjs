@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
+import { isDeepStrictEqual as nativeDeepEqual } from 'node:util';
 
 const [directoryArg, fixtureArg, outputArg, campaign, historyCountArg] = process.argv.slice(2);
 const historyTargetCount = Number(historyCountArg ?? 1000);
@@ -17,7 +17,27 @@ let stage = 'input', failedCheck, progress, lastActionType, lastOutcomeStatus, m
 let engine, wasmModule, stepCount = 0;
 let restoreAttempt = 0;
 const observedInteractionNamespaces = new Set();
-const sha = raw => createHash('sha256').update(raw).digest('hex');
+// Instrument call sites, never the immutable engine exports. Nested categories
+// accumulate exclusive elapsed time so a transform's parse is counted once.
+let profileCurrent = null, traceCurrent = null;
+const timingFrames = [];
+function timed(kind, fn) {
+  if (!profileCurrent) return fn();
+  const frame = { start: performance.now(), children: 0 };
+  timingFrames.push(frame);
+  try { return fn(); } finally {
+    const elapsed = performance.now() - frame.start;
+    timingFrames.pop();
+    if (timingFrames.length) timingFrames.at(-1).children += elapsed;
+    const entry = profileCurrent[kind] ??= { count: 0, exclusiveMs: 0 };
+    entry.count++; entry.exclusiveMs += elapsed - frame.children;
+  }
+}
+const sha = raw => timed('hash', () => createHash('sha256').update(raw).digest('hex'));
+const parseJSON = raw => timed('jsParse', () => JSON.parse(raw));
+const stringifyJSON = value => timed('jsStringify', () => JSON.stringify(value));
+const isDeepStrictEqual = (a, b) => timed('deepEquality', () => nativeDeepEqual(a, b));
+const canonicalDigest = raw => sha(stringifyJSON(canonical(raw)));
 const check = (value, code) => { if (!value) { failedCheck = code; throw Error(code); } };
 const receipt = (name, value) => {
   const item = { sourceSha, campaign, ...(campaign === 'history' ? { historyTargetCount } : {}), ...value };
@@ -39,6 +59,7 @@ function stable(value) {
 // Keys remain keys; number1 and an original string '@number:1' cannot collide.
 // This comparator never round-trips JS-rounded u64 values into restore.
 function lossless(raw) {
+  return timed('losslessTransform', () => {
   let text = '', index = 0;
   while (index < raw.length) {
     if (raw[index] === '"') {
@@ -56,13 +77,16 @@ function lossless(raw) {
       text += JSON.stringify('@number:' + match[0]); index += match[0].length;
     } else text += raw[index++];
   }
-  return JSON.parse(text);
+  return parseJSON(text);
+  });
 }
 function canonical(raw) {
+  return timed('canonicalTransform', () => {
   const envelope = lossless(raw);
   check(envelope.state, 'trusted-envelope-state');
   for (const key of authorityFields) delete envelope.state[key];
   return stable(envelope);
+  });
 }
 function differentPaths(a, b) {
   if (isDeepStrictEqual(a, b)) return [];
@@ -117,8 +141,8 @@ function differentPaths(a, b) {
   if (found.length === 0) found.push('other-authoritative-envelope-section');
   return found;
 }
-const rawState = () => engine.export_game_state_json();
-const state = () => JSON.parse(rawState()).state; // Internal observations only.
+const rawState = (purpose = 'validationExport') => timed(purpose, () => engine.export_game_state_json());
+const state = () => parseJSON(rawState()).state; // Internal observations only.
 function equalWithVerifiedRekey(expected, actual, code) {
   const a = canonical(expected), b = canonical(actual);
   const before = a.precast_shortcut_runtime, after = b.precast_shortcut_runtime;
@@ -144,20 +168,21 @@ function recordFreshNamespace(saved, live, fresh) {
   observedInteractionNamespaces.add(fresh);
 }
 function legal(actor) {
-  const result = engine.get_legal_actions_for_viewer_js(actor);
+  const result = timed('legalQueryBoundary', () => engine.get_legal_actions_for_viewer_js(actor));
   return [...result.actions, ...Object.values(result.legalActionsByObject ?? {}).flat()]
     .map(a => ({ type: a.type, ...(a.data ? { data: a.data } : {}) }));
 }
 function submit(actor, action) {
   lastActionType = action.type;
-  const outcome = engine.submit_action(actor, action);
+  const outcome = timed('normalActionBoundary', () => engine.submit_action(actor, action));
   lastOutcomeStatus = outcome?.status;
   check(outcome?.status === 'applied' && outcome.result && !outcome.result.disposition, 'normal-action-applied');
   stepCount++;
+  if (traceCurrent) timed('traceNormalization', () => traceCurrent.push(stable(lossless(stringifyJSON({ actor, action, events: outcome.result.events ?? [] })))));
   return outcome.result.events ?? [];
 }
 function oldCapability(actor, actionCode) {
-  const view = engine.get_viewer_snapshot_js(actor);
+  const view = timed('viewerQueryBoundary', () => engine.get_viewer_snapshot_js(actor));
   for (const opportunity of view.viewerInteraction.opportunities) {
     if (opportunity.response.type !== 'exactChoices') continue;
     const choice = opportunity.response.data.choices.find(c => c.status.type === 'available'
@@ -168,11 +193,11 @@ function oldCapability(actor, actionCode) {
 }
 function installChecked(raw, { stale, actor } = {}) {
   const before = rawState(), liveState = lossless(before).state;
-  actor ??= JSON.parse(before).state.waiting_for.data?.player;
+  actor ??= parseJSON(before).state.waiting_for.data?.player;
   check(Number.isInteger(actor), 'restore-old-capability-actor');
   stale ??= oldCapability(actor, 'passPriority');
   const start = performance.now();
-  engine.restore_game_state(raw);
+  timed('restoreBoundary', () => engine.restore_game_state(raw));
   const elapsed = performance.now() - start;
   const restored = rawState();
   const expectedEnvelope = canonical(raw), restoredEnvelope = canonical(restored);
@@ -191,7 +216,7 @@ function installChecked(raw, { stale, actor } = {}) {
   equalWithVerifiedRekey(raw, restored, 'trusted-gameplay-and-private-state-exact-after-verified-rekey');
   recordFreshNamespace(lossless(raw).state.interaction_session_id, liveState.interaction_session_id,
     lossless(restored).state.interaction_session_id);
-  const outcome = engine.submit_interaction_js(actor, stale);
+  const outcome = timed('interactionBoundary', () => engine.submit_interaction_js(actor, stale));
   check(outcome?.status === 'rejected' && outcome.rejection?.code === 'stale_interaction', 'old-issued-capability-rejected-as-stale');
   check(isDeepStrictEqual(lossless(restored), lossless(rawState())), 'stale-capability-preserves-exact-state');
   receipt('restore-authority-' + restoreAttempt, { pass: true, verifiedExactSavedEpochRotation: true,
@@ -205,7 +230,7 @@ function restore(raw, options = {}) {
   const elapsed = installChecked(raw, options);
   const currentActor = state().waiting_for.data.player;
   const fresh = oldCapability(currentActor, 'passPriority'), beforeFresh = rawState();
-  const accepted = engine.submit_interaction_js(currentActor, fresh);
+  const accepted = timed('interactionBoundary', () => engine.submit_interaction_js(currentActor, fresh));
   check(accepted?.status === 'applied' && accepted.result && !accepted.result.disposition, 'fresh-real-capability-applied');
   const afterFresh = rawState();
   // Every diagnostic reinstall checks fresh authority and real stale rejection.
@@ -283,11 +308,11 @@ function castNamed(actor, name, target) {
   return { cast, events };
 }
 function init(playerCards, opponentCards, seed = 0xF32002) {
-  engine.clear_game_state();
-  const format = engine.getFormatRegistry().find(f => f.format === 'Limited')?.default_config;
+  timed('setupBoundary', () => engine.clear_game_state());
+  const format = timed('setupBoundary', () => engine.getFormatRegistry()).find(f => f.format === 'Limited')?.default_config;
   check(format, 'real-limited-format');
-  const result = engine.initialize_game({ player: { main_deck: playerCards }, opponent: { main_deck: opponentCards } }, seed, format, null, 2, 0);
-  check(!result.error && !engine.is_multiplayer_mode(), 'actual-local-init-not-multiplayer-bypass');
+  const result = timed('setupBoundary', () => engine.initialize_game({ player: { main_deck: playerCards }, opponent: { main_deck: opponentCards } }, seed, format, null, 2, 0));
+  check(!result.error && !timed('setupBoundary', () => engine.is_multiplayer_mode()), 'actual-local-init-not-multiplayer-bypass');
   for (const actor of [0, 1]) submit(actor, { type: 'SetPriorityPassingMode', data: { mode: 'FullControl' } });
 }
 const copies = (n, name) => Array(n).fill(name);
@@ -368,6 +393,104 @@ function abilityResponse() {
 function distribution(values) {
   const sorted = [...values].sort((a, b) => a - b);
   return { min: sorted[0], p50: sorted[Math.floor((sorted.length - 1) * .5)], p95: sorted[Math.floor((sorted.length - 1) * .95)], max: sorted.at(-1) };
+}
+function profileTwin(label, reuseAdjacentObservation) {
+  const preparationStart = performance.now(), setupTiming = {}, setupTrace = [];
+  profileCurrent = setupTiming; traceCurrent = setupTrace;
+  const startActions = stepCount;
+  init([...copies(12, 'Forest'), ...copies(12, 'Island'), ...copies(8, 'Seeker of Skybreak'), ...copies(8, 'Wake Thrasher')], copies(40, 'Island'));
+  spellReady(0, 'Seeker of Skybreak', 3); castNamed(0, 'Seeker of Skybreak'); resolveAll();
+  spellReady(0, 'Wake Thrasher', 3); castNamed(0, 'Wake Thrasher'); resolveAll();
+  const seeker = state().battlefield.find(id => state().objects[id].name === 'Seeker of Skybreak');
+  const wake = state().battlefield.find(id => state().objects[id].name === 'Wake Thrasher');
+  const activation = () => legal(0).find(a => a.type === 'ActivateAbility' && a.data.source_id === seeker);
+  seek(s => s.waiting_for.type === 'Priority' && s.waiting_for.data.player === 0 && s.stack.length === 0 && activation(), { landGoal: 3 });
+  const initial = canonical(rawState());
+  const preparationMs = performance.now() - preparationStart;
+  const rootTiming = {}, preEnvelopes = [], retained = [], rootTraces = [], samples = [], hashes = new Set();
+  profileCurrent = rootTiming;
+  const loopStart = performance.now();
+  for (let n = 1; n <= 5; n++) {
+    stage = 'observer-profile-' + label + '-' + n;
+    const trace = []; traceCurrent = trace;
+    const rootStart = performance.now();
+    check(activation(), 'real-reusable-ability-legal');
+    const captureStart = performance.now(), raw = rawState('retainedPreExport');
+    const captureMs = performance.now() - captureStart;
+    const preEnvelope = canonical(raw), digest = sha(stringifyJSON(preEnvelope));
+    check(!hashes.has(digest), 'independently-distinct-real-pre-state'); hashes.add(digest);
+    const preEffects = state().transient_continuous_effects.length;
+    const events = [...submit(0, activation()), ...finishDeclaration({ target: seeker }), ...resolveAll()];
+    check(events.some(e => e.type === 'AbilityActivated'), 'real-activation-event');
+    const untaps = events.filter(e => e.type === 'PermanentUntapped' && e.data.object_id === seeker).length;
+    // Only these adjacent assertions share one observation. No engine call is
+    // moved, cached across a transition, or removed anywhere else.
+    const post = reuseAdjacentObservation ? state() : null;
+    check(untaps > 0 && !(post ?? state()).objects[seeker].tapped, 'actual-self-untap');
+    const triggered = events.filter(e => e.type === 'EffectResolved' && e.data.source_id === wake && ['Pump', 'PumpSelf'].includes(e.data.kind)).length;
+    check(triggered > 0 && (post ?? state()).transient_continuous_effects.length > preEffects, 'actual-wake-trigger-growth');
+    retained.push(raw); preEnvelopes.push(preEnvelope); rootTraces.push(trace);
+    const sample = { n, completedRealRoot: true, snapshotUtf8Bytes: Buffer.byteLength(raw), captureMs,
+      canonicalPreSha256: digest, actualUntaps: untaps, actualWakeEffectResolutions: triggered,
+      normalActionCount: trace.length, rootWallMs: performance.now() - rootStart };
+    samples.push(sample);
+    appendFileSync(path.join(output, 'profile-' + label + '-samples.jsonl'), JSON.stringify(sample) + '\n');
+  }
+  const rootLoopMs = performance.now() - loopStart;
+  traceCurrent = null;
+  const observationTiming = {}; profileCurrent = observationTiming;
+  const finalRaw = rawState(), finalEnvelope = canonical(finalRaw);
+  const finalRng = { seed: finalEnvelope.state.rng_seed, wordPos: finalEnvelope.state.rng_word_pos, rng: finalEnvelope.state.rng };
+  profileCurrent = null;
+  receipt('profile-' + label, { pass: true, completedRealRoots: 5, distinctCanonicalPreSnapshots: hashes.size, reuseAdjacentObservation,
+    actualSetupActionCount: stepCount - startActions - rootTraces.reduce((total, trace) => total + trace.length, 0),
+    preparationMs, rootLoopMs, setupTiming, rootTiming, finalObservationTiming: observationTiming,
+    setupTraceSha256: sha(JSON.stringify(setupTrace)), rootTraceSha256: rootTraces.map(trace => sha(JSON.stringify(trace))),
+    initialCanonicalPreSha256: sha(JSON.stringify(initial)), finalCanonicalEnvelopeSha256: sha(JSON.stringify(finalEnvelope)),
+    finalRngSha256: sha(JSON.stringify(finalRng)), samples,
+    timingScope: 'exclusive instrumented category elapsed; nested categories subtracted; API times include WASM/JS conversion, not pure Rust CPU; string token decoding is lossless transform; in-frame/nested profiler overhead may remain in category elapsed; final receipt/journal outside categories',
+    normalization: 'trace actor/action/all ordered events: object-key sorting and lossless numeric/string tagging only; envelope excludes only original four state interaction carriers; private runtime and all other fields retained',
+    benchmarkClaim: 'one ordered pair, same process; cold/warm confound, no speed or device benchmark' });
+  return { initial, preEnvelopes, finalEnvelope, finalRng, setupTrace, rootTraces, retained, finalRaw, activation, seeker };
+}
+function observerProfile() {
+  const baseline = profileTwin('baseline', false), variant = profileTwin('adjacent-reuse', true);
+  const comparisonTiming = {}; profileCurrent = comparisonTiming;
+  check(isDeepStrictEqual(baseline.initial, variant.initial), 'paired-initial-complete-canonical-envelope');
+  check(isDeepStrictEqual(baseline.setupTrace, variant.setupTrace), 'paired-exact-setup-action-event-trace');
+  for (let n = 0; n < 5; n++) {
+    check(isDeepStrictEqual(baseline.preEnvelopes[n], variant.preEnvelopes[n]), 'paired-each-complete-canonical-pre');
+    check(isDeepStrictEqual(baseline.rootTraces[n], variant.rootTraces[n]), 'paired-each-exact-normal-action-event-trace');
+  }
+  check(isDeepStrictEqual(baseline.finalEnvelope, variant.finalEnvelope), 'paired-final-complete-canonical-envelope');
+  check(isDeepStrictEqual(baseline.finalRng, variant.finalRng), 'paired-exact-final-rng');
+  profileCurrent = null;
+  receipt('profile-equivalence', { pass: true, roots: 5, initialAndEveryPreAndFinalCompleteEnvelopeEqual: true,
+    setupAndAllRootActionEventTracesEqual: true, rngEqual: true, comparisonTiming,
+    unchangedExclusions: authorityFields, privateEpochAndAllOtherFieldsComparedExactly: true });
+  // Existing authority/continuation controls remain intact, outside the twin's
+  // measured progression and equivalence (fresh game traces contain no probes).
+  const probeTiming = {}; profileCurrent = probeTiming;
+  const suiteStart = performance.now(), restoreSamples = [];
+  for (const position of [0, 2, 4]) {
+    stage = 'observer-profile-restore-' + position;
+    const elapsed = restore(variant.retained[position]);
+    const start = performance.now();
+    const events = [...submit(0, variant.activation()), ...finishDeclaration({ target: variant.seeker }), ...resolveAll()];
+    check(events.some(e => e.type === 'AbilityActivated'), 'restored-real-history-legal-continuation');
+    restoreSamples.push({ position, restoreMs: elapsed, continuationMs: performance.now() - start });
+    restore(variant.finalRaw);
+  }
+  profileCurrent = null;
+  receipt('profile-restore', { pass: true, restoreSamples, checkedInstallCount: restoreAttempt,
+    suiteMs: performance.now() - suiteStart, probeTiming, controlContract: 'unchanged exact saved-u64 rotation, complete remaining equality, never-reused namespace, real stale rejection and fresh-vs-normal transition' });
+  for (const twin of [baseline, variant]) {
+    twin.retained.length = 0; twin.preEnvelopes.length = 0; twin.rootTraces.length = 0; twin.setupTrace.length = 0;
+  }
+  global.gc();
+  receipt('observer-profile', { pass: true, pairedRootCount: 5, adjacentReuseAcceptedForThisWorkload: true,
+    authorityChecks: 'PASS: existing Priority controls only', nonPriorityRestore: 'NOT PASSED',
+    ordinaryFixture: 'NOT RUN in this campaign; separate reviewed policy required', memory: memory() });
 }
 function history() {
   const preparationStart = performance.now();
@@ -464,7 +587,7 @@ function history() {
 try {
   check(!isDeepStrictEqual(lossless('{"x":1}'), lossless('{"x":"@number:1"}')), 'comparator-preserves-number-string-type');
   check(!isDeepStrictEqual(lossless('{"x":18446744073709551614}'), lossless('{"x":18446744073709551615}')), 'comparator-preserves-u64-token');
-  check(['payment', 'multistack', 'ability-response', 'rng', 'history'].includes(campaign), 'fixed-campaign');
+  check(['payment', 'multistack', 'ability-response', 'rng', 'history', 'observer-profile'].includes(campaign), 'fixed-campaign');
   check(campaign !== 'history' || [50, 200, 1000].includes(historyTargetCount), 'fixed-independent-history-measurement-count');
   check(typeof global.gc === 'function', 'expose-gc-required');
   const inputStart = performance.now();
@@ -480,7 +603,7 @@ try {
   receipt('inputs', { pass: true, inputValidationAndWasmInitMs: performance.now() - inputStart,
     binaryProfile: 'unoptimized tool WASM; not release-device latency', fixtureCards: 9, node: process.version, memory: memory() });
   stage = campaign;
-  ({ payment, multistack, 'ability-response': abilityResponse, rng, history })[campaign]();
+  ({ payment, multistack, 'ability-response': abilityResponse, rng, history, 'observer-profile': observerProfile })[campaign]();
 } catch {
   receipt('failure', { pass: false, stage, failedCheck: failedCheck ?? 'wasm-api-or-runtime-error', progress, lastActionType, lastOutcomeStatus, mismatchPaths });
   process.exitCode = 1;
