@@ -1,0 +1,86 @@
+{
+  "source_sha": "b0c477a4f200479d9a3f97a46b564336b6085a2b",
+  "source_dataset_sha256": "5386947d58fea89bae441a1b30378c955b362b120358b91c7ebf79098bcd5fe0",
+  "source_dataset_bytes": 100945198,
+  "source_data_filename": "card-data-5386947d58fea89b.json",
+  "fixture_file": "official-history-cards-b0.json",
+  "fixture_sha256": "1849fbe675e2e5acac2b32e6f96fd8d4e2d67a8c426138452d32cb0db4f494db",
+  "fixture_bytes": 79406,
+  "card_count": 9,
+  "scope": "Unchanged complete public card records; no game state or custom ability fixture. Exact-e109 data compatibility NOT RUN yet.",
+  "cards": [
+    {
+      "key": "forest",
+      "name": "Forest",
+      "oracle_text": "({T}: Add {G}.)",
+      "scryfall_oracle_id": "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6",
+      "canonical_record_sha256": "50927805141864d7e38814c6215f849cb4721bee99672451b420dbb667bd27d1",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "island",
+      "name": "Island",
+      "oracle_text": "({T}: Add {U}.)",
+      "scryfall_oracle_id": "b2c6aa39-2d2a-459c-a555-fb48ba993373",
+      "canonical_record_sha256": "738eb3d1a9286a55631c04c42d60741ee1f493283594bbca36e1eb010bc93e6d",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "grizzly bears",
+      "name": "Grizzly Bears",
+      "oracle_text": null,
+      "scryfall_oracle_id": "14c8f55d-d177-4c25-a931-ebeb9e6062a0",
+      "canonical_record_sha256": "6c76e3d3fcd41c7840d7963c5d601eb67414e2436ced9c6c69bf1dbfaa018b5d",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "seeker of skybreak",
+      "name": "Seeker of Skybreak",
+      "oracle_text": "{T}: Untap target creature.",
+      "scryfall_oracle_id": "704723f3-0490-4d96-930a-aacc6d19ba8d",
+      "canonical_record_sha256": "c1483e8abc2eadb7dac704437354600ac43dfb2ec45facf3568e9bc777d59402",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "giant growth",
+      "name": "Giant Growth",
+      "oracle_text": "Target creature gets +3/+3 until end of turn.",
+      "scryfall_oracle_id": "5748ebf1-24e3-499d-ab7c-c2cebd462a24",
+      "canonical_record_sha256": "577de1f071905be9c1eec2ac2099acc5428685689da8ac0656743281608bb553",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "counterspell",
+      "name": "Counterspell",
+      "oracle_text": "Counter target spell.",
+      "scryfall_oracle_id": "cc187110-1148-4090-bbb8-e205694a39f5",
+      "canonical_record_sha256": "96a879bddd002cb98f1a5a80f0992551bf2176eafebbe1379ae7d1d8335bd3d4",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "opt",
+      "name": "Opt",
+      "oracle_text": "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.",
+      "scryfall_oracle_id": "713332c1-5bd8-400f-bfff-c1ca0697a043",
+      "canonical_record_sha256": "286f036659169989296410c750b86079137112966d75981555d9a7f0544f6d4f",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "rampant growth",
+      "name": "Rampant Growth",
+      "oracle_text": "Search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
+      "scryfall_oracle_id": "8539f295-5d58-4436-a73a-b9277c4c7795",
+      "canonical_record_sha256": "5568e7345dde67fb0b5f32ac85499c7b55fdc7563e38ffa598eba14c6a10fdf2",
+      "full_original_record_retained": true
+    },
+    {
+      "key": "wake thrasher",
+      "name": "Wake Thrasher",
+      "oracle_text": "Whenever a permanent you control becomes untapped, this creature gets +1/+1 until end of turn.",
+      "scryfall_oracle_id": "f2d1e991-e13a-43c7-85aa-d53dd14822e6",
+      "canonical_record_sha256": "0fea767101c3b7faa0f0c47f8d4a33de4646e0c76165c343ced8eb19447642c1",
+      "full_original_record_retained": true
+    }
+  ],
+  "record_hash_method": "SHA256 of UTF-8 compact JSON.stringify(record), preserving original selected-record property order; not sorted-key canonicalization."
+}

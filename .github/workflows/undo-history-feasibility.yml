@@ -1,0 +1,86 @@
+name: Fork Undo actual-history feasibility
+
+on:
+  push:
+    branches: [experiment/undo-history-feasibility-e10955dc]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-undo-history-feasibility-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  F_SOURCE_SHA: e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+  F_PRODUCER_SHA: 387b7542a901d711cbef2868e686b29726c905f0
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  actual-history:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/ci/
+            /scripts/fixtures/undo-history/
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Verify existing exact e109 WASM without compiler or package installation
+        id: input
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/history-evidence/input
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py history-wasm-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/wasm-payload" "$GITHUB_WORKSPACE/reused-inputs/wasm.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+          mkdir -p "$GITHUB_WORKSPACE/history-evidence/provenance"
+          cp "$GITHUB_WORKSPACE/retained-inputs/wasm.provenance.json" "$GITHUB_WORKSPACE/history-evidence/provenance/"
+          cp "$GITHUB_WORKSPACE/wasm-payload/manifest.json" "$GITHUB_WORKSPACE/history-evidence/provenance/wasm-manifest.json"
+          cp ../control/scripts/fixtures/undo-history/official-history-cards-b0.provenance.json "$GITHUB_WORKSPACE/history-evidence/provenance/"
+      - name: Fixed independent real-operation campaigns under external runtime watchdog
+        if: ${{ !cancelled() && steps.input.outcome == 'success' }}
+        working-directory: source
+        run: |
+          FAILED=0
+          for CAMPAIGN in payment multistack ability-response rng history; do
+            if F_EVIDENCE="$GITHUB_WORKSPACE/history-evidence/$CAMPAIGN/guard" \
+              python3 ../control/scripts/ci/undo-history-runtime-guard.py "actual-history-$CAMPAIGN" \
+              node --expose-gc ../control/scripts/ci/undo-history-feasibility.mjs \
+              "$GITHUB_WORKSPACE/wasm-payload" \
+              "$GITHUB_WORKSPACE/control/scripts/fixtures/undo-history/official-history-cards-b0.json" \
+              "$GITHUB_WORKSPACE/history-evidence/$CAMPAIGN/measurements" "$CAMPAIGN"; then
+              echo "Actual history $CAMPAIGN: PASS"
+            else
+              FAILED=1
+              echo "Actual history $CAMPAIGN: FAIL (partial receipts preserved; no retry)"
+            fi
+          done
+          exit "$FAILED"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-history-feasibility-evidence
+          path: history-evidence
+          if-no-files-found: warn
+          retention-days: 7
