@@ -25,7 +25,7 @@ def recipe(kind, feature):
 
 def receipts(kind, feature):
     base = ['stage1-source-before', 'stage1-rust-tools']
-    if kind == 'native': return base + ['candidate-native-enabled-archive', 'native-archive-source-after']
+    if kind == 'native': return base + (['candidate-native-off-archive', 'native-off-archive-source-after'] if feature == 'off' else ['candidate-native-enabled-archive', 'native-archive-source-after'])
     if kind == 'checks': return base + ['candidate-format', 'candidate-clippy', 'native-checks-source-after']
     if kind == 'raw': return base + ['candidate-wasm-' + feature + '-build', 'wasm-' + feature + '-raw-source-after']
     return base + ['candidate-wasm-' + feature + '-bindgen', 'wasm-' + feature + '-full-source-after']
@@ -34,7 +34,7 @@ def receipt_valid(item, label, producer, native, inputs):
     keys = {'label','started_at','source_sha','event_sha','source_tree','argv','input_sha256','environment','guard','preflight',
         'finished_at','exit_code','effective_exit','stop_reason','source_unchanged','.log_sha256','.jsonl_sha256'}
     assert set(item) == keys and item['label'] == label
-    assert item['source_sha'] == '4fa56ded3a65431ce3f5f943dafaff979a40255f' and item['source_tree'] == 'f41d9e32a31aaa7ed653d24991226c3c92c51316'
+    assert item['source_sha'] == 'a7402dda9062ede8eddd1b0c725048edaaad35a8' and item['source_tree'] == '96d4074830db3c05bc103e96cdc1104284d4a106'
     assert item['event_sha'] == producer['sha']
     assert type(item['exit_code']) is int and item['exit_code'] == item['effective_exit'] == 0 and item['stop_reason'] is None and item['source_unchanged'] is True
     assert item['input_sha256'] == {key: inputs[key] for key in ['Cargo.lock','client/pnpm-lock.yaml','rust-toolchain.toml']}
@@ -58,8 +58,9 @@ def receipt_valid(item, label, producer, native, inputs):
         actual = item['argv'][4].strip()
         feature = 'enabled' if '-enabled-' in label else 'off'
         commands = {
+            'candidate-native-off-archive': 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config \'profile.test.codegen-backend="cranelift"\' -p engine-wasm --lib --no-default-features --archive-file "$RUNNER_TEMP/bootstrap-native-archives/off.tar.zst" >/dev/null 2>&1',
             'candidate-native-enabled-archive': 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config \'profile.test.codegen-backend="cranelift"\' -p engine-wasm --lib --no-default-features --features manual_resolution_local_bootstrap --archive-file "$RUNNER_TEMP/bootstrap-native-archives/enabled.tar.zst" >/dev/null 2>&1',
-            'candidate-format': 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs',
+            'candidate-format': 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs crates/engine/src/game/effects/life.rs',
             'candidate-clippy': 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\\"cranelift\\"" --message-format=json -- -D warnings',
         }
         if label.endswith('-build'):
@@ -88,8 +89,8 @@ def source():
         assert event['deleted'] is False
         assert event['after'] == os.environ['GITHUB_WORKFLOW_SHA'] == os.environ['GITHUB_SHA'] == git(validation, 'rev-parse', 'HEAD')
         assert re.fullmatch('[a-f0-9]{40}', os.environ['GITHUB_SHA'])
-        assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == '4fa56ded3a65431ce3f5f943dafaff979a40255f'
-        assert git(source, 'rev-parse', 'HEAD^{tree}') == 'f41d9e32a31aaa7ed653d24991226c3c92c51316'
+        assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == 'a7402dda9062ede8eddd1b0c725048edaaad35a8'
+        assert git(source, 'rev-parse', 'HEAD^{tree}') == '96d4074830db3c05bc103e96cdc1104284d4a106'
         assert git(source, 'status', '--porcelain') == git(validation, 'status', '--porcelain') == ''
         changed = git(validation, 'diff', '--name-only', os.environ['MANUAL_EXPECTED_SOURCE_SHA'], 'HEAD').splitlines()
         assert set(changed) <= {workflow_path, 'scripts/ci/manual-integration-guard.py', 'scripts/ci/stage1-bootstrap-browser.sh', 'scripts/ci/stage1-bootstrap-validation.py'}
@@ -139,16 +140,17 @@ def select():
     import json, os, re
     from pathlib import Path
     try:
-        def selected(value, native=False):
+        def selected(value, native=False, off=False):
             if value == '': return 'EMPTY'
             record = json.loads(value)
             assert isinstance(record, dict) and set(record) == ({'archive', 'checks'} if native else {'raw', 'full'})
             first, last = ('archive', 'checks') if native else ('raw', 'full')
             assert isinstance(record[first], dict) and record[first]
             assert record[last] is None or isinstance(record[last], dict) and record[last]
+            assert not off or record[last] is None
             return ('FULL' if record[last] is not None else 'RAW')
-        refs = {'native': os.environ['STAGE1_NATIVE_ENABLED_REF'], 'off': os.environ['STAGE1_WASM_OFF_REF'], 'enabled': os.environ['STAGE1_WASM_ENABLED_REF']}
-        states = {key: selected(value, key == 'native') for key, value in refs.items()}
+        refs = {'native_off': os.environ['STAGE1_NATIVE_OFF_REF'], 'native': os.environ['STAGE1_NATIVE_ENABLED_REF'], 'off': os.environ['STAGE1_WASM_OFF_REF'], 'enabled': os.environ['STAGE1_WASM_ENABLED_REF']}
+        states = {key: selected(value, key in ['native_off','native'], key == 'native_off') for key, value in refs.items()}
         (Path(os.environ['MANUAL_EVIDENCE']) / 'selection.json').write_text(json.dumps({'states': states, 'product_green': False}) + '\n')
         with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
             for key, state in states.items(): output.write(key + '=' + state + '\n')
@@ -282,7 +284,7 @@ def package():
         source = json.loads((root / 'source-manifest.json').read_text()); inputs = source['input_sha256']
         feature, kind = os.environ['STAGE1_FEATURE'], os.environ['STAGE1_KIND']
         assert feature in ['off','enabled'] and kind in ['native','checks','raw','full']
-        assert kind not in ['native','checks'] or feature == 'enabled'
+        assert kind != 'checks' or feature == 'enabled'
         producer = {'repository':'Makeinu1/phase','repository_id':1377698441,'sha':source['validation_sha'],'tree':source['validation_tree'],
             'workflow_path':'.github/workflows/wasm-local-bootstrap-validation.yml','workflow_sha256':source['workflow_sha256'],
             'guard_sha256':source['guard_sha256'],'run_id':int(os.environ['GITHUB_RUN_ID']),'run_attempt':1,
@@ -300,7 +302,7 @@ def package():
             assert archive['recipe'] == recipe('native','enabled') and archive['tools'] == tools
         names = {'engine_wasm.js','engine_wasm_bg.wasm','engine_wasm.d.ts','engine_wasm_bg.wasm.d.ts'}
         raw = None
-        if kind == 'native': paths = {'enabled.tar.zst':temp / 'bootstrap-native-archives/enabled.tar.zst'}
+        if kind == 'native': paths = {feature + '.tar.zst':temp / ('bootstrap-native-archives/' + feature + '.tar.zst')}
         elif kind == 'checks': paths = {}
         elif kind == 'raw': paths = {'engine_wasm.wasm':temp / 'bootstrap-wasm-target/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm'}
         else:
@@ -383,7 +385,7 @@ def pins():
             'artifact':{'id':metadata['id'],'name':metadata['name'],'size':metadata['size_in_bytes'],'sha256':os.environ['STAGE1_UPLOAD_DIGEST']},
             'manifest_sha256':hashlib.sha256((Path(os.environ['RUNNER_TEMP']) / ('bootstrap-public-' + feature + '-' + kind) / 'runtime-provenance.json').read_bytes()).hexdigest(),
             'files':descriptor['files']}
-        reference_path = root / (('native' if kind in ['native','checks'] else feature) + '-reference.json')
+        reference_path = root / (('native-off' if kind == 'native' and feature == 'off' else 'native' if kind in ['native','checks'] else feature) + '-reference.json')
         reference = json.loads(reference_path.read_text()) if reference_path.exists() else ({'archive':None,'checks':None} if kind in ['native','checks'] else {'raw':None,'full':None})
         reference['archive' if kind == 'native' else kind] = record
         reference_path.write_text(json.dumps(reference,separators=(',',':')) + '\n')
@@ -415,17 +417,18 @@ def admit():
                 return super().redirect_request(req,fp,status,message,headers,https(newurl))
         root = Path(os.environ['MANUAL_EVIDENCE']); temp = Path(os.environ['RUNNER_TEMP'])
         source = json.loads((root / 'source-manifest.json').read_text()); inputs = source['input_sha256']
-        feature = os.environ['STAGE1_FEATURE']; native = feature == 'native'
-        assert feature in ['native','off','enabled']
+        feature = os.environ['STAGE1_FEATURE']; native = feature in ['native-off','native']
+        assert feature in ['native-off','native','off','enabled']
         reference = json.loads(os.environ['STAGE1_REFERENCE'])
         assert set(reference) == ({'archive','checks'} if native else {'raw','full'})
         assert reference['archive' if native else 'raw'] is not None
+        assert feature != 'native-off' or reference['checks'] is None
         if os.environ['STAGE1_REQUIRE_FULL'] == 'true': assert reference['checks' if native else 'full'] is not None
         descriptors = {}
         for key in ('archive','checks') if native else ('raw','full'):
             record = reference[key]
             if record is None: continue
-            kind = 'native' if key == 'archive' else key; selected_feature = 'enabled' if native else feature
+            kind = 'native' if key == 'archive' else key; selected_feature = 'off' if feature == 'native-off' else 'enabled' if native else feature
             assert set(record) == {'kind','feature','producer','artifact','manifest_sha256','files'}
             assert record['kind'] == kind and record['feature'] == selected_feature
             producer,artifact = record['producer'],record['artifact']
@@ -455,7 +458,7 @@ def admit():
             numbers = [item['number'] for item in steps]; names = [item['name'] for item in steps]
             assert all(type(number) is int and number > 0 for number in numbers) and numbers == sorted(set(numbers)) and len(names) == len(set(names))
             boundaries = ['Admit clean immutable Stage1 sources','Capture Stage1 resource preflight','Verify actual Stage1 Rust tools']
-            if kind == 'native': boundaries += ['Build the single missing native enabled archive','Check native archive source after','Package enabled native public output']
+            if kind == 'native': boundaries += ['Build the single missing native off archive','Check off native archive source after','Package off native public output'] if selected_feature == 'off' else ['Build the single missing native enabled archive','Check native archive source after','Package enabled native public output']
             elif kind == 'checks': boundaries += ['Check exact Rust formatting','Check exact candidate clippy','Check native checks source after','Package enabled checks public output']
             elif kind == 'raw': boundaries += ['Build the single missing ' + selected_feature + ' WASM','Check ' + selected_feature + ' raw source after','Package ' + selected_feature + ' raw public output']
             else: boundaries += ['Bind the remaining ' + selected_feature + ' WASM','Check ' + selected_feature + ' full source after','Package ' + selected_feature + ' full public output']
@@ -506,7 +509,7 @@ def admit():
                 assert hashlib.sha256(manifest).hexdigest() == record['manifest_sha256']
                 descriptor = json.loads(manifest)
                 assert set(descriptor) == {'schema_version','product','producer','feature','kind','inputs','tools','recipe','files','receipts','raw'} and descriptor['schema_version'] == 1
-                assert descriptor['product'] == {'sha':'4fa56ded3a65431ce3f5f943dafaff979a40255f','tree':'f41d9e32a31aaa7ed653d24991226c3c92c51316'}
+                assert descriptor['product'] == {'sha':'a7402dda9062ede8eddd1b0c725048edaaad35a8','tree':'96d4074830db3c05bc103e96cdc1104284d4a106'}
                 assert descriptor['producer'] == {name:value for name,value in producer.items() if name != 'job_id'}
                 assert descriptor['feature'] == selected_feature and descriptor['kind'] == kind and descriptor['inputs'] == inputs
                 assert descriptor['recipe'] == recipe(kind,selected_feature) and descriptor['files'] == record['files']
@@ -525,7 +528,7 @@ def admit():
                     parsed = re.fullmatch(r'cargo-nextest 0\.9\.146 \((?P<short>[a-f0-9]{7,40}) (?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\)\nrelease: 0\.9\.146\ncommit-hash: (?P<commit>[a-f0-9]{40})\ncommit-date: (?P=date)\nhost: x86_64-unknown-linux-gnu\n?',version)
                     assert parsed and parsed['commit'].startswith(parsed['short']); datetime.date.fromisoformat(parsed['date'])
                 else: assert tools['bindgen'] == 'wasm-bindgen 0.2.121' and tools['wasm_target_installed'] is True
-                required = {'enabled.tar.zst'} if kind == 'native' else set() if kind == 'checks' else {'engine_wasm.wasm'} if kind == 'raw' else {'engine_wasm.js','engine_wasm_bg.wasm','engine_wasm.d.ts','engine_wasm_bg.wasm.d.ts'}
+                required = {selected_feature + '.tar.zst'} if kind == 'native' else set() if kind == 'checks' else {'engine_wasm.wasm'} if kind == 'raw' else {'engine_wasm.js','engine_wasm_bg.wasm','engine_wasm.d.ts','engine_wasm_bg.wasm.d.ts'}
                 snippets = set(record['files']) - required
                 if kind == 'full' and selected_feature == 'enabled':
                     assert len(snippets) == 1
@@ -551,8 +554,8 @@ def admit():
             descriptors[key] = descriptor
             (root / (selected_feature + '-' + kind + '-descriptor.json')).write_text(json.dumps(descriptor) + '\n')
             if kind == 'native':
-                destination = temp / 'bootstrap-native-archives/enabled.tar.zst'; assert not destination.exists()
-                shutil.copyfile(staging / 'enabled.tar.zst',destination)
+                destination = temp / ('bootstrap-native-archives/' + selected_feature + '.tar.zst'); assert not destination.exists()
+                shutil.copyfile(staging / (selected_feature + '.tar.zst'),destination)
             elif kind == 'full':
                 destination = temp / ('bootstrap-bindgen-' + selected_feature); assert not destination.exists()
                 shutil.copytree(staging,destination)
@@ -648,7 +651,8 @@ def safe_result():
     code = int(sys.argv[2]); label = sys.argv[3]
     assert 0 <= code <= 255 and re.fullmatch('[a-z0-9]+(?:-[a-z0-9]+)*',label)
     paths = []
-    if label == 'candidate-native-enabled-archive': paths = ['bootstrap-native-archives/enabled.tar.zst']
+    if label in ['candidate-native-off-archive','candidate-native-enabled-archive']:
+        paths = ['bootstrap-native-archives/' + ('off' if label == 'candidate-native-off-archive' else 'enabled') + '.tar.zst']
     elif label in ['candidate-wasm-off-build','candidate-wasm-enabled-build']: paths = ['bootstrap-wasm-target/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm']
     elif label in ['candidate-wasm-off-bindgen','candidate-wasm-enabled-bindgen']:
         feature = 'off' if label == 'candidate-wasm-off-bindgen' else 'enabled'
@@ -673,8 +677,7 @@ def safe_result():
         # Nothing from a raw line or arbitrary JSON value is copied to the result.
         fixed_errors = {'stage1-source-refused','stage1-retained-ref-invalid','runtime-provenance-mismatch',
             'stage1-public-package-refused','stage1-upload-metadata-refused','stage1-retained-output-refused',
-            'stage1-raw-input-refused','stage1-baseline-source-refused','native-off-reuse-metadata-refused',
-            'native-off-reuse-archive-refused','stage1-producer-current-tool-mismatch','adapter-report-unavailable',
+            'stage1-raw-input-refused','stage1-baseline-source-refused','stage1-producer-current-tool-mismatch','adapter-report-unavailable',
             'adapter-summary-save-failed','native-off-reuse-observation-save-failed'}
         value['static_causes'] = []
         if len(raw) <= 4*1024**2:
@@ -771,79 +774,16 @@ def baseline_identity():
         raise SystemExit(1)
 
 
-def off_metadata():
-    import datetime, json, os, urllib.request
-    from pathlib import Path
-    try:
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, status, message, headers, newurl): return None
-        def api(path):
-            request = urllib.request.Request('https://api.github.com/repos/Makeinu1/phase/' + path,
-                headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
-                    'X-GitHub-Api-Version': '2026-03-10'})
-            with urllib.request.build_opener(NoRedirect()).open(request, timeout=60) as response:
-                content = response.read(2 * 1024**2 + 1)
-                assert len(content) <= 2 * 1024**2
-                return json.loads(content)
-        run = api('actions/runs/37518173142/attempts/1')
-        assert run['id'] == 37518173142 and run['run_attempt'] == 1
-        assert run['repository']['id'] == run['head_repository']['id'] == 1377698441
-        assert run['repository']['full_name'] == run['head_repository']['full_name'] == 'Makeinu1/phase'
-        assert run['head_sha'] == '2743c9441a7a770d3b88dbb7487a284f7649655b'
-        assert run['head_commit']['tree_id'] == '3255ea22df350bed2d601482383d06ad550bdac4'
-        assert run['path'] == '.github/workflows/wasm-local-bootstrap-validation.yml'
-        assert run['event'] == 'push' and run['head_branch'] == 'experiment/manual-wasm-native-off-diagnostic'
-        assert run['status'] == 'completed' and run['conclusion'] == 'failure'
-        metadata = api('actions/artifacts/11438377287'); producer = metadata['workflow_run']
-        assert metadata['id'] == 11438377287 and metadata['name'] == 'local-worker-bootstrap-native-off-diagnostic-archive'
-        assert metadata['size_in_bytes'] == 46399076 and type(metadata['size_in_bytes']) is int
-        assert metadata['digest'] == 'sha256:f66b290f3f98596d5254b1e65501a188f8be2ba1caa126d8c71d04a5c1d313e6'
-        assert metadata['expired'] is False
-        expiry = datetime.datetime.fromisoformat(metadata['expires_at'].replace('Z', '+00:00'))
-        assert expiry > datetime.datetime.now(datetime.timezone.utc)
-        assert producer['id'] == 37518173142 and producer['head_sha'] == run['head_sha']
-        assert producer['repository_id'] == producer['head_repository_id'] == 1377698441
-        assert producer['head_branch'] == run['head_branch']
-        value = {'producer_run_id': 37518173142, 'producer_run_attempt': 1, 'producer_head': run['head_sha'],
-            'artifact_id': 11438377287, 'artifact_name': metadata['name'], 'zip_size': 46399076,
-            'zip_sha256': metadata['digest'].removeprefix('sha256:'), 'expires_at': expiry.isoformat(),
-            'metadata_admitted': True, 'current_compile_executed': False, 'product_green': False}
-        (Path(os.environ['MANUAL_EVIDENCE']) / 'producer-manifest.json').write_text(json.dumps(value) + '\n')
-        print('{"retained_off_producer_admitted":true,"current_compile_executed":false}')
-    except Exception:
-        print('{"error":"native-off-reuse-metadata-refused"}')
-        raise SystemExit(1)
-
-
-def off_archive():
-    import hashlib, json, os, stat
-    from pathlib import Path
-    try:
-        directory = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-archives'
-        assert stat.S_ISDIR(directory.lstat().st_mode)
-        assert sorted(path.name for path in directory.iterdir()) == ['off.tar.zst']
-        archive = directory / 'off.tar.zst'; info = archive.lstat()
-        assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == 46703637
-        with archive.open('rb') as stream: digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-        assert digest == '5e99987532006082eee38656b3cf5b5f4588222fcf8658e338f9a4b2e53c8a56'
-        value = {'basename': 'off.tar.zst', 'size': info.st_size, 'sha256': digest,
-            'archive_admitted': True, 'reused_producer_run_id': 37518173142, 'current_compile_executed': False}
-        (Path(os.environ['MANUAL_EVIDENCE']) / 'archive-manifest.json').write_text(json.dumps(value) + '\n')
-        print('{"retained_off_archive_admitted":true}')
-    except Exception:
-        print('{"error":"native-off-reuse-archive-refused"}')
-        raise SystemExit(1)
-
-
 def tools_match():
     import json, os
     from pathlib import Path
     try:
         root = Path(os.environ['MANUAL_EVIDENCE']); actual = json.loads((root / 'tool-manifest.json').read_text())
         native = json.loads((root / 'enabled-native-descriptor.json').read_text())
+        off = json.loads((root / 'off-native-descriptor.json').read_text())
         checks = json.loads((root / 'enabled-checks-descriptor.json').read_text())
         selected = {name:actual[name] for name in ['toolchain','rustc','cargo','nextest','nextest_query']}
-        assert native['tools'] == checks['tools'] == selected
+        assert off['tools'] == native['tools'] == checks['tools'] == selected
         for feature in ['off','enabled']:
             descriptor = json.loads((root / (feature + '-full-descriptor.json')).read_text())
             assert all(descriptor['tools'][name] == actual[name] for name in ['toolchain','rustc','cargo'])
@@ -1047,26 +987,36 @@ def green():
     complete = value.get('declarations_verified') is True
     source = load('source-manifest.json')
     complete &= source.get('product_equal') is True and source.get('validation_sha') == os.environ['GITHUB_SHA']
+    complete &= source.get('source_sha') == 'a7402dda9062ede8eddd1b0c725048edaaad35a8' and source.get('source_tree') == '96d4074830db3c05bc103e96cdc1104284d4a106'
     complete &= source.get('guard_sha256') == os.environ['STAGE1_GUARD_SHA256']
     import datetime, re
     inputs = source.get('input_sha256',{})
     producer_commands = {}
-    for feature in ['native','off','enabled']:
+    for feature in ['native-off','native','off','enabled']:
         admission = load(feature + '-admission.json')
-        complete &= admission.get('admitted') is True and admission.get('full') is True and admission.get('producer_jobs_completed') is True
+        native = feature in ['native-off','native']
+        complete &= admission.get('admitted') is True and admission.get('feature') == feature
+        complete &= admission.get('full') is (feature != 'native-off') and admission.get('producer_jobs_completed') is (feature != 'native-off')
         reference = load(feature + '-reference.json')
-        required = ['archive','checks'] if feature == 'native' else ['raw','full']
-        complete &= set(reference) == set(required) and all(reference.get(key) for key in required)
+        required = ['archive'] if feature == 'native-off' else ['archive','checks'] if native else ['raw','full']
+        complete &= set(reference) == ({'archive','checks'} if native else {'raw','full'}) and all(reference.get(key) for key in required)
+        if feature == 'native-off': complete &= reference.get('checks') is None
         for key in required:
             kind = 'native' if key == 'archive' else key
-            selected_feature = 'enabled' if feature == 'native' else feature
+            selected_feature = 'off' if feature == 'native-off' else 'enabled' if native else feature
             descriptor = load(selected_feature + '-' + kind + '-descriptor.json')
-            complete &= descriptor.get('product') == {'sha':'4fa56ded3a65431ce3f5f943dafaff979a40255f','tree':'f41d9e32a31aaa7ed653d24991226c3c92c51316'}
+            complete &= descriptor.get('product') == {'sha':'a7402dda9062ede8eddd1b0c725048edaaad35a8','tree':'96d4074830db3c05bc103e96cdc1104284d4a106'}
             producer_commands[selected_feature + '-' + kind] = descriptor.get('receipts',{})
             try:
                 assert descriptor.get('recipe') == recipe(kind,selected_feature)
+                if feature == 'native-off':
+                    assert descriptor.get('kind') == 'native' and descriptor.get('feature') == 'off' and descriptor.get('raw') is None
+                    assert reference['archive']['kind'] == 'native' and reference['archive']['feature'] == 'off'
+                    files = descriptor['files']; assert files == reference['archive']['files'] and set(files) == {'off.tar.zst'}
+                    item = files['off.tar.zst']
+                    assert set(item) == {'size','sha256'} and type(item['size']) is int and item['size'] > 0 and re.fullmatch('[a-f0-9]{64}',item['sha256'])
                 assert set(descriptor.get('receipts',{})) == set(receipts(kind,selected_feature))
-                for label,item in descriptor['receipts'].items(): receipt_valid(item,label,descriptor['producer'],feature == 'native', inputs)
+                for label,item in descriptor['receipts'].items(): receipt_valid(item,label,descriptor['producer'],native, inputs)
             except Exception: complete = False
             for label,item in descriptor.get('receipts',{}).items():
                 complete &= item.get('label') == label and item.get('exit_code') == item.get('effective_exit') == 0
@@ -1087,17 +1037,17 @@ def green():
     complete &= adapter.get('report_valid') is True and adapter.get('all_selected_tests_passed') is True and adapter.get('runner_exit_code') == 0
     complete &= all(adapter.get(key) == 102 for key in ['tests_total', 'tests_executed', 'tests_passed'])
     complete &= all(adapter.get(key) == 0 for key in ['tests_failed', 'tests_skipped', 'tests_pending', 'tests_todo', 'tests_disabled'])
-    labels = ['stage1-source-before', 'stage1-selection', 'stage1-baseline-identity', 'baseline-source-before', 'stage1-off-native-metadata', 'stage1-off-native-archive-admission', 'stage1-native-admission', 'stage1-off-admission', 'stage1-enabled-admission', 'stage1-rust-tools', 'stage1-current-tools-match', 'candidate-native-off-tests', 'candidate-native-enabled-tests', 'candidate-declarations', 'hosted-tools', 'client-dependencies', 'baseline-runtime-copy', 'client-types', 'client-lint', 'client-protocol', 'client-adapter-tests', 'candidate-enabled-browser', 'candidate-off-browser', 'stage1-source-after', 'baseline-source-after']
+    labels = ['stage1-source-before', 'stage1-selection', 'stage1-baseline-identity', 'baseline-source-before', 'stage1-native-off-admission', 'stage1-native-admission', 'stage1-off-admission', 'stage1-enabled-admission', 'stage1-rust-tools', 'stage1-current-tools-match', 'candidate-native-off-tests', 'candidate-native-enabled-tests', 'candidate-declarations', 'hosted-tools', 'client-dependencies', 'baseline-runtime-copy', 'client-types', 'client-lint', 'client-protocol', 'client-adapter-tests', 'candidate-enabled-browser', 'candidate-off-browser', 'stage1-source-after', 'baseline-source-after']
     records = {}
     for label in labels:
         record = load(label + '.json'); records[label] = record
-        before = label in ['stage1-source-before', 'stage1-selection', 'stage1-baseline-identity', 'baseline-source-before', 'stage1-off-native-metadata', 'stage1-off-native-archive-admission', 'stage1-native-admission', 'stage1-off-admission', 'stage1-enabled-admission']
+        before = label in ['stage1-source-before', 'stage1-selection', 'stage1-baseline-identity', 'baseline-source-before', 'stage1-native-off-admission', 'stage1-native-admission', 'stage1-off-admission', 'stage1-enabled-admission']
         expected_sha = os.environ['BOOTSTRAP_BASE_SHA'] if label.startswith('baseline-source-') else os.environ['MANUAL_EXPECTED_SOURCE_SHA']
         expected_argv = ['true'] if label in ['stage1-source-before','baseline-source-before','stage1-source-after','baseline-source-after'] else ['bash','-euo','pipefail']
         if label in ['candidate-enabled-browser','candidate-off-browser']:
             expected_argv = ['bash','-euo','pipefail','../validation-source/scripts/ci/stage1-bootstrap-browser.sh']
         modes = {'stage1-selection':'select','stage1-baseline-identity':'baseline-identity',
-            'stage1-off-native-metadata':'off-metadata','stage1-off-native-archive-admission':'off-archive',
+            'stage1-native-off-admission':'admit',
             'stage1-native-admission':'admit','stage1-off-admission':'admit','stage1-enabled-admission':'admit',
             'stage1-rust-tools':'native-tools','stage1-current-tools-match':'tools-match',
             'candidate-native-off-tests':'native-tests','candidate-native-enabled-tests':'native-tests',
@@ -1107,7 +1057,7 @@ def green():
             'client-types':'pnpm --dir client run type-check','client-lint':'pnpm --dir client run lint --format json',
             'client-protocol':'pnpm --dir client run protocol:check'}
         if label in client_commands: expected_argv = ['bash','-euo','pipefail','-c',client_commands[label]]
-        complete &= bool(record and record.get('source_sha') == expected_sha and record.get('source_tree') == (os.environ['BOOTSTRAP_BASE_TREE'] if label.startswith('baseline-source-') else 'f41d9e32a31aaa7ed653d24991226c3c92c51316') and record.get('label') == label
+        complete &= bool(record and record.get('source_sha') == expected_sha and record.get('source_tree') == (os.environ['BOOTSTRAP_BASE_TREE'] if label.startswith('baseline-source-') else '96d4074830db3c05bc103e96cdc1104284d4a106') and record.get('label') == label
             and record.get('event_sha') == os.environ['GITHUB_SHA'] and record.get('argv') == expected_argv
             and record.get('input_sha256') == {key:source.get('input_sha256',{}).get(key) for key in ['Cargo.lock','client/pnpm-lock.yaml','rust-toolchain.toml']}
             and record.get('exit_code') == record.get('effective_exit') == 0 and record.get('stop_reason') is None and record.get('source_unchanged') is True
@@ -1179,8 +1129,6 @@ if __name__ == '__main__':
         case 'safe-result': safe_result()
         case 'raw-input': raw_input()
         case 'baseline-identity': baseline_identity()
-        case 'off-metadata': off_metadata()
-        case 'off-archive': off_archive()
         case 'tools-match': tools_match()
         case 'native-tests': native_tests()
         case 'declarations': declarations()
