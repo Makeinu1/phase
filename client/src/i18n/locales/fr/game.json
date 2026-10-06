@@ -236,7 +236,17 @@
     "debugLog": "Journal de débogage",
     "waitingForGame": "En attente de la partie...",
     "clickOpponent": "Cliquez sur un adversaire pour voir son plateau",
-    "undo": "Annuler"
+    "undo": "Annuler",
+    "localHistory": {
+      "count": "Historique local (actions) : {{count}}",
+      "busy": "Historique local : traitement",
+      "recovery": "Historique local : récupération",
+      "stopped": "Historique local : arrêté",
+      "blocked": "Une opération non enregistrée a été bloquée. Démarrez une nouvelle partie locale.",
+      "notStarted": "Impossible de lancer l’opération. L’état précédent a été conservé.",
+      "rolledBack": "L’opération a été annulée et l’état précédent restauré.",
+      "newGameRequired": "L’historique local nécessite un nouvel identifiant de partie locale et un deck normal."
+    }
   },
   "battlefieldOverflow": {
     "close": "Close",

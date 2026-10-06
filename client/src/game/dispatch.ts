@@ -31,6 +31,7 @@ import { useUiStore } from "../stores/uiStore";
 import { pressureMultiplier } from "../utils/stackPressure";
 import { effectiveStackPressure, recordStackResolutions } from "../utils/stackThroughput";
 import { applySpellPaymentPreference } from "./castPaymentMode";
+import { currentLocalHistory } from "./localHistorySession";
 
 /**
  * Event types whose SFX is deferred to the card slam onImpact callback
@@ -194,6 +195,7 @@ export function abandonPendingDispatches(): void {
  * committed state legitimately lags the adapter's snapshot.
  */
 export function isDispatchIdle(): boolean {
+  if (currentLocalHistory()) return useGameStore.getState().localHistory?.phase === "idle";
   return !isAnimating && pendingQueue.length === 0 && inFlightLocalAction === null;
 }
 
@@ -769,6 +771,13 @@ async function dispatchActionInternal(
   }
 
   const submittedAction = actor === getPlayerId() ? applySpellPaymentPreference(action) : action;
+  const localHistory = currentLocalHistory();
+  if (localHistory) {
+    if (proposal || automated) { localHistory.violation(); return; }
+    const result = await localHistory.dispatch({ kind: "action", action: submittedAction }, actor);
+    if (session && result.status !== "accepted") throw new Error("Local history preference was not adopted");
+    return;
+  }
   // Snapshot the prompt object that caused this action. The same action from
   // the same actor is a duplicate only while it answers the same prompt.
   const currentWaitingFor = useGameStore.getState().waitingFor;
@@ -864,6 +873,8 @@ export async function dispatchInteraction(
 ): Promise<void> {
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
+  const localHistory = currentLocalHistory();
+  if (localHistory) { await localHistory.dispatch({ kind: "interaction", submission }, actor); return; }
   const generation = dispatchGeneration;
   const session: BoundGameSession = { adapter, generation: useGameStore.getState().gameSessionGeneration };
 
@@ -1024,6 +1035,8 @@ export async function processRemoteUpdate(
   logEntries?: GameLogEntry[],
   rewindTargets?: RewindOption[],
 ): Promise<void> {
+  const localHistory = currentLocalHistory();
+  if (localHistory) { localHistory.violation(); return; }
   if (isAnimating) {
     return new Promise<void>((resolve, reject) => {
       pendingQueue.push({ kind: "remote", snapshot, events, logEntries, rewindTargets, resolve, reject });
@@ -1049,6 +1062,8 @@ export async function restoreGameState(
 ): Promise<string | null> {
   const { adapter, gameId } = useGameStore.getState();
   if (!adapter) return "No adapter available";
+  const localHistory = currentLocalHistory();
+  if (localHistory) { localHistory.violation(); return "External restore is blocked in this Local history session"; }
 
   abandonPendingDispatches();
   try {

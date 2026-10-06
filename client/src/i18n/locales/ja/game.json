@@ -241,7 +241,17 @@
     "debugLog": "デバッグログ",
     "waitingForGame": "ゲームを待っています…",
     "clickOpponent": "対戦相手をクリックして盤面を表示",
-    "undo": "元に戻す"
+    "undo": "元に戻す",
+    "localHistory": {
+      "count": "操作履歴：{{count}}件",
+      "busy": "操作履歴：処理中",
+      "recovery": "操作履歴：復旧中",
+      "stopped": "操作履歴：停止中",
+      "blocked": "履歴に記録できない操作を停止しました。新しいLocal対戦を開始してください。",
+      "notStarted": "操作を開始できませんでした。直前の状態を維持しています。",
+      "rolledBack": "操作前の状態に戻しました。",
+      "newGameRequired": "操作履歴には、新しいLocal対戦IDと通常のデッキが必要です。"
+    }
   },
   "battlefieldOverflow": {
     "close": "閉じる",

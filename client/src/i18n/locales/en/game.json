@@ -236,7 +236,17 @@
     "debugLog": "Debug log",
     "waitingForGame": "Waiting for game...",
     "clickOpponent": "Click an opponent to view their board",
-    "undo": "Undo"
+    "undo": "Undo",
+    "localHistory": {
+      "count": "Local history (actions): {{count}}",
+      "busy": "Local history: processing",
+      "recovery": "Local history: recovering",
+      "stopped": "Local history: stopped",
+      "blocked": "An unrecorded operation was blocked. Start a new Local session.",
+      "notStarted": "The operation could not start. The previous game state was kept.",
+      "rolledBack": "The operation was rolled back to its previous state.",
+      "newGameRequired": "Local history requires a new Local game ID and a normal deck."
+    }
   },
   "battlefieldOverflow": {
     "close": "Close",

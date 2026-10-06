@@ -236,7 +236,17 @@
     "debugLog": "Dziennik debugowania",
     "waitingForGame": "Oczekiwanie na grę...",
     "clickOpponent": "Kliknij przeciwnika, aby zobaczyć jego pole bitwy",
-    "undo": "Cofnij"
+    "undo": "Cofnij",
+    "localHistory": {
+      "count": "Historia lokalna (akcje): {{count}}",
+      "busy": "Historia lokalna: przetwarzanie",
+      "recovery": "Historia lokalna: odzyskiwanie",
+      "stopped": "Historia lokalna: zatrzymana",
+      "blocked": "Zablokowano niezapisaną operację. Rozpocznij nową grę lokalną.",
+      "notStarted": "Nie można rozpocząć operacji. Zachowano poprzedni stan.",
+      "rolledBack": "Operacja została cofnięta do poprzedniego stanu.",
+      "newGameRequired": "Historia lokalna wymaga nowego identyfikatora gry lokalnej i zwykłej talii."
+    }
   },
   "battlefieldOverflow": {
     "close": "Close",

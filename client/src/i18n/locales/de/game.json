@@ -236,7 +236,17 @@
     "debugLog": "Debug-Protokoll",
     "waitingForGame": "Warten auf Spiel...",
     "clickOpponent": "Klicke auf einen Gegner, um sein Spielfeld anzusehen",
-    "undo": "Rückgängig"
+    "undo": "Rückgängig",
+    "localHistory": {
+      "count": "Lokaler Verlauf (Aktionen): {{count}}",
+      "busy": "Lokaler Verlauf: Verarbeitung",
+      "recovery": "Lokaler Verlauf: Wiederherstellung",
+      "stopped": "Lokaler Verlauf: angehalten",
+      "blocked": "Eine nicht aufgezeichnete Aktion wurde blockiert. Starte eine neue lokale Partie.",
+      "notStarted": "Die Aktion konnte nicht starten. Der vorherige Zustand wurde beibehalten.",
+      "rolledBack": "Der Zustand vor der Aktion wurde wiederhergestellt.",
+      "newGameRequired": "Der lokale Verlauf erfordert eine neue lokale Spiel-ID und ein normales Deck."
+    }
   },
   "battlefieldOverflow": {
     "close": "Close",

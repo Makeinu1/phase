@@ -10,14 +10,18 @@ import { isAuthorityRemote, useGameStore } from "../../stores/gameStore.ts";
 export function UndoButton() {
   const { t } = useTranslation("game");
   const canUndo = useGameStore(
-    (s) => s.stateHistory.length > 0 && !isAuthorityRemote(s.gameMode),
+    (s) => s.localHistory ? s.localHistory.canUndo : s.stateHistory.length > 0 && !isAuthorityRemote(s.gameMode),
   );
+  const history = useGameStore((s) => s.localHistory);
   const undo = useGameStore((s) => s.undo);
 
-  if (!canUndo) return null;
+  if (!canUndo && !history) return null;
   return (
+    <>
     <button
       onClick={undo}
+      disabled={!canUndo}
+      data-local-history-undo={history ? "true" : undefined}
       className="flex items-center gap-1 rounded-md bg-gray-800/80 px-2.5 py-1 text-[11px] font-medium text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
     >
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
@@ -25,5 +29,11 @@ export function UndoButton() {
       </svg>
       {t("board.undo")}
     </button>
+    {history && <span role="status" className="ml-2 text-[11px] text-gray-400">
+      {history.notice ? t(`board.localHistory.${history.notice}`)
+        : history.phase === "idle" ? t("board.localHistory.count", { count: history.entries })
+          : t(`board.localHistory.${history.phase}`)}
+    </span>}
+    </>
   );
 }

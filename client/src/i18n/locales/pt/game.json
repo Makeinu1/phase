@@ -236,7 +236,17 @@
     "debugLog": "Registro de depuração",
     "waitingForGame": "Aguardando o jogo...",
     "clickOpponent": "Clique em um oponente para ver seu tabuleiro",
-    "undo": "Desfazer"
+    "undo": "Desfazer",
+    "localHistory": {
+      "count": "Histórico local (ações): {{count}}",
+      "busy": "Histórico local: processando",
+      "recovery": "Histórico local: recuperando",
+      "stopped": "Histórico local: parado",
+      "blocked": "Uma operação não registrada foi bloqueada. Inicie uma nova partida local.",
+      "notStarted": "Não foi possível iniciar a operação. O estado anterior foi mantido.",
+      "rolledBack": "A operação foi revertida ao estado anterior.",
+      "newGameRequired": "O histórico local requer um novo ID de partida local e um deck normal."
+    }
   },
   "battlefieldOverflow": {
     "close": "Close",

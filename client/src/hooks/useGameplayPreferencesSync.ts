@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 import type {
   EngineAdapter,
+  GameState,
   PhaseStop,
   PriorityPassingMode,
 } from "../adapter/types";
@@ -9,6 +10,8 @@ import { dispatchActionForGameSession } from "../game/dispatch";
 import { useGameStore } from "../stores/gameStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
+import { currentLocalHistory } from "../game/localHistorySession";
+import { getPlayerId } from "./usePlayerId";
 
 /**
  * The mode the engine must hold for this player.
@@ -31,7 +34,13 @@ type LastSent = {
   generation: number;
   stops?: readonly PhaseStop[];
   mode?: PriorityPassingMode;
+  presentation?: LocalGameplayPresentation;
 };
+export interface LocalGameplayPresentation { priorityPassingMode: PriorityPassingMode; fullControl: boolean }
+const gameplayPresentation = (): LocalGameplayPresentation => ({
+  priorityPassingMode: usePreferencesStore.getState().priorityPassingMode,
+  fullControl: useUiStore.getState().fullControl,
+});
 
 // Module-scoped so React StrictMode remounts cannot resend preferences for the
 // same live engine lifecycle. `gameSessionGeneration` is monotonically unique,
@@ -40,6 +49,39 @@ type LastSent = {
 let lastSent: LastSent | null = null;
 let syncRequested = false;
 let syncInFlight = false;
+
+/** New experimental setup only: configure before the initial pair is exposed. */
+export async function prepareLocalGameplayPreferences(adapter: EngineAdapter, generation: number, checkCurrent: () => void): Promise<void> {
+  const stops = usePreferencesStore.getState().phaseStops.slice();
+  const mode = effectivePriorityPassingMode();
+  const presentation = gameplayPresentation();
+  await adapter.submitAction({ type: "SetPhaseStops", data: { stops } }, getPlayerId());
+  checkCurrent();
+  await adapter.submitAction({ type: "SetPriorityPassingMode", data: { mode } }, getPlayerId());
+  checkCurrent();
+  lastSent = { adapter, generation, stops, mode, presentation };
+}
+
+/** Pending controls can already show POST; retain the last committed PRE display. */
+export function localGameplayPresentation(adapter: EngineAdapter, generation: number, state: GameState): LocalGameplayPresentation {
+  const mode = state.priority_passing_modes?.[getPlayerId()] ?? "Standard";
+  if (effectivePriorityPassingMode() === mode) return gameplayPresentation();
+  if (lastSent?.adapter === adapter && lastSent.generation === generation && lastSent.mode === mode && lastSent.presentation) return { ...lastSent.presentation };
+  return { priorityPassingMode: mode, fullControl: false };
+}
+
+/** Restore projects the engine's PRE settings; it must not resend POST settings. */
+export function adoptLocalGameplayPreferences(adapter: EngineAdapter, generation: number, state: GameState, presentation: LocalGameplayPresentation): void {
+  const actor = getPlayerId();
+  const stops = state.phase_stops?.[actor] ?? [];
+  const mode = state.priority_passing_modes?.[actor] ?? "Standard";
+  lastSent = { adapter, generation, stops: stops.slice(), mode, presentation };
+  usePreferencesStore.setState({
+    phaseStops: stops.slice(),
+    priorityPassingMode: presentation.priorityPassingMode,
+  });
+  useUiStore.setState({ fullControl: presentation.fullControl });
+}
 
 function phaseStopsEqual(a: readonly PhaseStop[], b: readonly PhaseStop[]): boolean {
   return a.length === b.length
@@ -78,9 +120,13 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         gameState,
       } = useGameStore.getState();
       if (!adapter || !gameState) continue;
+      // A blocked send is not a success. The idle transition below re-arms
+      // pending user settings after the current root/restore is terminal.
+      if (currentLocalHistory() && useGameStore.getState().localHistory?.phase !== "idle") continue;
 
       const stops = usePreferencesStore.getState().phaseStops;
       const mode = effectivePriorityPassingMode();
+      const presentation = gameplayPresentation();
       const sent = successfulSendFor(adapter, generation);
 
       if (!sent.stops || !phaseStopsEqual(sent.stops, stops)) {
@@ -136,7 +182,7 @@ async function drainGameplayPreferenceSync(): Promise<void> {
           isCurrentSession(adapter, generation)
           && effectivePriorityPassingMode() === mode
         ) {
-          lastSent = { ...successfulSendFor(adapter, generation), mode };
+          lastSent = { ...successfulSendFor(adapter, generation), mode, presentation };
         } else {
           syncRequested = true;
         }
@@ -165,8 +211,16 @@ export function useGameplayPreferencesSync(): void {
         state.gameSessionGeneration,
         state.gameState !== null,
         state.engineCommitEpoch,
+        state.localHistory?.phase,
       ] as const,
-      sendGameplayPreferences,
+      (next, previous) => {
+        // A failed preference's own capture/recovery/idle notifications are
+        // not a new request. Independent setting changes still queue below;
+        // a different lifecycle must also be inspected after this attempt.
+        if (currentLocalHistory() && syncInFlight
+          && next[0] === previous[0] && next[1] === previous[1]) return;
+        sendGameplayPreferences();
+      },
       { fireImmediately: true },
     );
     const unsubPreferences = usePreferencesStore.subscribe(sendGameplayPreferences);

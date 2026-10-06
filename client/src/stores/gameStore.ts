@@ -28,6 +28,8 @@ import { reportStructuredActionRejection } from "../game/actionRejectionReporter
 import { getPlayerId } from "../hooks/usePlayerId";
 import { captureTrustedCheckpoint, loadCheckpoints, saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
+import { currentLocalHistory, endLocalHistorySession, permitLocalHistoryCommit, startLocalHistorySession, type LocalHistoryView } from "../game/localHistorySession";
+import { prepareLocalGameplayPreferences } from "../hooks/useGameplayPreferencesSync";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
 export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "endContinuousEffectOffers" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "activationBlockReasons" | "stuckDiagnostic" | "viewerInteraction"> {
@@ -211,6 +213,8 @@ interface GameStoreState {
    * changes for a fresh init/resume/reset even when the adapter and id are
    * reused. Transient: never persisted or restored from engine snapshots. */
   gameSessionGeneration: number;
+  /** In-memory UI status for a new explicitly opted-in Local session only. */
+  localHistory: LocalHistoryView | null;
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
@@ -331,6 +335,7 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
     initialSave?: "best-effort" | "strict",
+    localHistory?: boolean,
   ) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
@@ -402,6 +407,7 @@ interface GameStoreActions {
        * fields alongside their pair.
        */
       extraState?: CommitExtraState;
+      localHistoryOwner?: symbol;
     },
   ) => boolean;
   setGameMode: (mode: GameMode) => void;
@@ -472,6 +478,7 @@ const initialState: GameStoreState = {
   nextLogSeq: 0,
   adapter: null,
   gameSessionGeneration: nextGameSessionGeneration(),
+  localHistory: null,
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
@@ -494,11 +501,14 @@ const initialState: GameStoreState = {
   manaPaymentPreviewSourceIds: [],
 };
 
+let pendingLocalHistorySetup: number | null = null;
+
 export const useGameStore = create<GameStore>()(
   subscribeWithSelector((set, get) => ({
     ...initialState,
 
     commitEngineSnapshot: (snapshot, opts) => {
+      if (!permitLocalHistoryCommit(opts?.localHistoryOwner)) return false;
       // Decide the gate BEFORE `set`, so the updater stays a pure reducer.
       // Safe: `get()` → `set()` runs synchronously with no `await` between, so
       // no other commit can land in the window.
@@ -546,12 +556,37 @@ export const useGameStore = create<GameStore>()(
       return accepted;
     },
 
-    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer, initialSave = "best-effort") => {
+    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer, initialSave = "best-effort", localHistory = false) => {
+      if (localHistory && (!import.meta.env.DEV || import.meta.env.VITE_PHASE_LOCAL_HISTORY !== "1" || get().gameMode !== "local")) {
+        throw new Error("Local history requires a new opted-in Local session");
+      }
+      endLocalHistorySession();
+      const historyGeneration = localHistory ? nextGameSessionGeneration() : null;
+      pendingLocalHistorySetup = historyGeneration;
+      if (historyGeneration !== null) set({
+        gameId, adapter: null, gameState: null, waitingFor: null, legalActions: [],
+        gameSessionGeneration: historyGeneration, localHistory: null,
+      });
+      const checkHistorySetup = () => {
+        if (historyGeneration !== null && (pendingLocalHistorySetup !== historyGeneration || get().gameSessionGeneration !== historyGeneration
+          || get().gameMode !== "local" || (get().adapter !== null && get().adapter !== adapter))) {
+          adapter.dispose();
+          throw new Error("Retired Local history initialization");
+        }
+      };
       // Clear the display-only stack-pacing tracker so a fast-churning end to a
       // prior game can't bleed stale resolution rate into this game's opening
       // pacing (rematch started within the throughput window).
       resetStackThroughput();
       await adapter.initialize();
+      checkHistorySetup();
+      if (localHistory) {
+        const workerAdapter = adapter as EngineAdapter & { getEngineClient?: () => unknown };
+        if (!workerAdapter.getEngineClient?.()) {
+          adapter.dispose();
+          throw new Error("Local history requires a dedicated module Worker before game creation");
+        }
+      }
       // Network-backed adapters can publish the initial authoritative snapshot
       // from inside `initializeGame`. Bind the transport before that happens so
       // the shared remote-update path never commits a visible game state whose
@@ -566,20 +601,35 @@ export const useGameStore = create<GameStore>()(
           matchConfig,
           firstPlayer,
         );
+        checkHistorySetup();
       } catch (error) {
         // A failed initialization must not leave a transport that never
         // produced a playable game attached to the store.
         if (get().adapter === adapter) set({ adapter: null });
+        if (historyGeneration !== null) adapter.dispose();
         throw error;
       }
       // Fetched AFTER the engine is initialized, so this snapshot is
       // newest-by-construction under the global counter — it always passes the
       // gate, and it drops any leftover in-flight commit from a prior match.
-      const snapshot = await adapter.getSnapshot();
+      let snapshot: EngineSnapshot;
+      try {
+        if (historyGeneration !== null) await prepareLocalGameplayPreferences(adapter, historyGeneration, checkHistorySetup);
+        snapshot = await adapter.getSnapshot();
+        checkHistorySetup();
+      } catch (error) {
+        if (historyGeneration !== null) {
+          adapter.dispose();
+          if (get().adapter === adapter) set({ adapter: null });
+          if (pendingLocalHistorySetup === historyGeneration) pendingLocalHistorySetup = null;
+        }
+        throw error;
+      }
       const state = snapshot.state;
       if (initialSave === "strict") {
         try {
           await saveAuthoritativeGameStrict(gameId, adapter, state);
+          checkHistorySetup();
         } catch (error) {
           if (get().adapter === adapter) set({ adapter: null });
           throw error;
@@ -605,11 +655,16 @@ export const useGameStore = create<GameStore>()(
             startingPlayer: state.current_starting_player ?? state.active_player,
           }
         : null;
-      get().commitEngineSnapshot(snapshot, {
+      // Install the owner before publishing the first pair: Zustand invokes
+      // subscribers synchronously, including standing-preference dispatch.
+      const historyOwner = localHistory ? startLocalHistorySession(adapter, snapshot.seq) : undefined;
+      pendingLocalHistorySetup = null;
+      const initialized = get().commitEngineSnapshot(snapshot, {
+        localHistoryOwner: historyOwner,
         extraState: {
           gameId,
           adapter,
-          gameSessionGeneration: nextGameSessionGeneration(),
+          gameSessionGeneration: historyGeneration ?? nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: initLogEntries,
@@ -619,12 +674,21 @@ export const useGameStore = create<GameStore>()(
           rewindTargets: [],
           startingContest,
           restoredStackAutomation: null,
+          localHistory: null,
         },
       });
+      if (localHistory) {
+        if (!initialized) { adapter.dispose(); throw new Error("Local history initialization adoption failed"); }
+        const history = currentLocalHistory();
+        if (!history?.ownsSession()) { adapter.dispose(); throw new Error("Retired Local history initialization adoption"); }
+        history.publish();
+      }
       if (initialSave === "best-effort") void saveAuthoritativeGame(gameId, adapter, state);
     },
 
     resumeGame: async (gameId, adapter, savedState) => {
+      pendingLocalHistorySetup = null;
+      if (currentLocalHistory()) { currentLocalHistory()!.violation(); throw new Error("Start a new session to resume a saved game"); }
       // Reset stack-pacing throughput — resuming may load a different game than
       // the one just played; stale churn must not carry across.
       resetStackThroughput();
@@ -654,6 +718,8 @@ export const useGameStore = create<GameStore>()(
     },
 
     resumeP2PHost: async (gameId, adapter) => {
+      pendingLocalHistorySetup = null;
+      if (currentLocalHistory()) { currentLocalHistory()!.violation(); throw new Error("Start a new session to resume a host"); }
       // `adapter.initialize()` on a resumed P2PHostAdapter already called
       // `wasm.resumeMultiplayerHostState(savedState)` — the engine is populated
       // and in multiplayer mode — so the shared helper just pulls the state out
@@ -663,6 +729,8 @@ export const useGameStore = create<GameStore>()(
     },
 
     resumeNativeSolo: async (gameId, adapter) => {
+      pendingLocalHistorySetup = null;
+      if (currentLocalHistory()) { currentLocalHistory()!.violation(); throw new Error("Start a new session to reconnect"); }
       // The reconnecting native adapter's `initialize()` sends a reconnect frame
       // and resolves once the phase-server replays the current GameStarted
       // state; the shared helper then seeds the store from that authority.
@@ -671,6 +739,8 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
+      const localHistory = currentLocalHistory();
+      if (localHistory) return (await localHistory.dispatch({ kind: "action", action: submittedAction }, getPlayerId())).events;
       const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
@@ -742,6 +812,8 @@ export const useGameStore = create<GameStore>()(
     },
 
     undo: async () => {
+      const localHistory = currentLocalHistory();
+      if (localHistory) return localHistory.undo();
       const { stateHistory, adapter, gameMode } = get();
       if (isAuthorityRemote(gameMode)) return;
       if (stateHistory.length === 0 || !adapter) return;
@@ -769,6 +841,8 @@ export const useGameStore = create<GameStore>()(
     },
 
     reset: () => {
+      pendingLocalHistorySetup = null;
+      endLocalHistorySession();
       const { adapter } = get();
       if (adapter) {
         adapter.dispose();
@@ -777,10 +851,20 @@ export const useGameStore = create<GameStore>()(
     },
 
     setAdapter: (adapter) => {
+      if (get().adapter !== adapter) {
+        pendingLocalHistorySetup = null;
+        endLocalHistorySession();
+        set({ localHistory: null });
+      }
       set({ adapter });
     },
 
     setGameMode: (mode) => {
+      if (get().gameMode !== mode) {
+        pendingLocalHistorySetup = null;
+        endLocalHistorySession();
+        set({ localHistory: null });
+      }
       set({ gameMode: mode });
     },
 

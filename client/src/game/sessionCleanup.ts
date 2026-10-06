@@ -1,6 +1,7 @@
 import { abandonPendingDispatches } from "./dispatch.ts";
 import { useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { endLocalHistorySession } from "./localHistorySession";
 
 /**
  * Drop engine prompt + UI overlay state without disposing the WASM adapter.
@@ -27,6 +28,7 @@ import { useUiStore } from "../stores/uiStore.ts";
  * `restoreGameState` remains a separate local persistence path outside this gate.
  */
 export function clearPromptOverlayState(): void {
+  endLocalHistorySession();
   abandonPendingDispatches();
   useGameStore.setState({
     waitingFor: null,

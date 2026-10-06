@@ -26,6 +26,7 @@ import type { EngineSnapshot, GameState } from "../adapter/types";
 import { debugLog } from "./debugLog";
 import { isDispatchIdle, processRemoteUpdate } from "./dispatch";
 import { useGameStore } from "../stores/gameStore";
+import { currentLocalHistory } from "./localHistorySession";
 
 /** Quiet time after a commit before its one-shot divergence check fires. */
 export const WATCHDOG_ARM_DELAY_MS = 10_000;
@@ -73,6 +74,7 @@ async function readAdapterSnapshot(): Promise<EngineSnapshot | null> {
  * game-state equality. The store's commit gate still orders the commit.
  */
 export async function resyncFromAdapter(reason: string): Promise<void> {
+  if (currentLocalHistory()) return;
   const adapterBefore = useGameStore.getState().adapter;
   const snapshot = await readAdapterSnapshot();
   if (!snapshot) return;
@@ -145,6 +147,7 @@ export function createStaleStateWatchdog(): StaleStateWatchdog {
   }
 
   async function check(): Promise<void> {
+    if (currentLocalHistory()) return;
     // A busy pipeline will normally re-arm through its own commit, but a
     // queue that drains through rejections commits nothing — keep our own
     // re-arm so that case still gets its check.

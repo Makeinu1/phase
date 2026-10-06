@@ -236,7 +236,17 @@
     "debugLog": "Registro di debug",
     "waitingForGame": "In attesa della partita...",
     "clickOpponent": "Clicca un avversario per vedere il suo campo",
-    "undo": "Annulla"
+    "undo": "Annulla",
+    "localHistory": {
+      "count": "Cronologia locale (azioni): {{count}}",
+      "busy": "Cronologia locale: elaborazione",
+      "recovery": "Cronologia locale: ripristino",
+      "stopped": "Cronologia locale: interrotta",
+      "blocked": "Un’operazione non registrata è stata bloccata. Avvia una nuova partita locale.",
+      "notStarted": "Impossibile avviare l’operazione. Lo stato precedente è stato mantenuto.",
+      "rolledBack": "L’operazione è stata annullata ripristinando lo stato precedente.",
+      "newGameRequired": "La cronologia locale richiede un nuovo ID di partita locale e un mazzo normale."
+    }
   },
   "battlefieldOverflow": {
     "close": "Close",

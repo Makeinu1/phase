@@ -33,6 +33,7 @@ import { debugLog } from "./debugLog";
 import { useGameStore } from "../stores/gameStore";
 import { loadCheckpoints } from "../services/gamePersistence";
 import { trackEvent } from "../services/telemetry";
+import { currentLocalHistory } from "./localHistorySession";
 import { AdapterError, AdapterErrorCode, type PersistedGameState } from "../adapter/types";
 
 /**
@@ -43,6 +44,8 @@ import { AdapterError, AdapterErrorCode, type PersistedGameState } from "../adap
  * the current mode is not locally recoverable.
  */
 export async function attemptStateRehydrate(): Promise<boolean> {
+  const localHistory = currentLocalHistory();
+  if (localHistory) { localHistory.violation(); return false; }
   const { adapter, gameState, gameMode, gameId, gameSessionGeneration } = useGameStore.getState();
 
   if (!adapter) {

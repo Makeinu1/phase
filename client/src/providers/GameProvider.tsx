@@ -631,6 +631,8 @@ function scheduleStoreReset(reset: () => void): void {
 
 export interface GameProviderProps {
   gameId: string;
+  /** Captured only when a new Local setup begins; changing it never migrates a live session. */
+  localHistoryRequested?: boolean;
   mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate";
   difficulty?: string;
   joinCode?: string;
@@ -671,6 +673,7 @@ export interface GameProviderProps {
 
 export function GameProvider({
   gameId,
+  localHistoryRequested = false,
   mode,
   difficulty,
   joinCode,
@@ -692,6 +695,8 @@ export function GameProvider({
   children,
 }: GameProviderProps) {
   const { t } = useTranslation("game");
+  const localHistoryRequestRef = useRef(localHistoryRequested);
+  localHistoryRequestRef.current = localHistoryRequested;
 
   // Sync persistent gameplay preferences into engine-owned state so the
   // engine remains the single authority for priority recommendations.
@@ -1550,9 +1555,13 @@ export function GameProvider({
     // Uses the shared singleton adapter so the WASM worker (and its V8 TurboFan-
     // optimized code, card database, and AI worker pool) persist across game sessions.
     // On cleanup, we clear the WASM game state but keep the worker alive.
+    const historyRequested = mode === "local" && import.meta.env.DEV
+      && import.meta.env.VITE_PHASE_LOCAL_HISTORY === "1" && localHistoryRequestRef.current;
+    let ownedHistoryAdapter: WasmAdapter | null = null;
     const setupLocal = async () => {
       if (cancelled) return;
-      const adapter = getSharedAdapter();
+      const adapter = historyRequested ? new WasmAdapter() : getSharedAdapter();
+      if (historyRequested) ownedHistoryAdapter = adapter;
       const soloDraft = source === "draft" && !!draftId;
       const draftDeckKey = `phase:draft-deck:${gameId}`;
       const reportDraftError = (error: unknown) => {
@@ -1642,6 +1651,12 @@ export function GameProvider({
         return;
       }
       if (cancelled) return;
+
+      if (historyRequested && (savedState || source === "draft" || source === "multiplayer")) {
+        adapter.dispose();
+        onNoDeckRef.current?.(tRef.current("game:board.localHistory.newGameRequired"));
+        return;
+      }
 
       if (soloDraft) {
         try {
@@ -1797,6 +1812,11 @@ export function GameProvider({
         }
       }
       if (draftDeckRaw !== null) {
+        if (historyRequested) {
+          adapter.dispose();
+          onNoDeckRef.current?.(tRef.current("game:board.localHistory.newGameRequired"));
+          return;
+        }
         await startDraftDeck(draftDeckRaw);
         return;
       }
@@ -1833,6 +1853,8 @@ export function GameProvider({
           playerCount,
           matchConfig,
           firstPlayer,
+          "best-effort",
+          historyRequested,
         );
         if (cancelled) return;
         if (!adapter.cardDbLoaded) {
@@ -2119,6 +2141,17 @@ export function GameProvider({
       cancelled = true;
       if (controller) controller.dispose();
       audioManager.setContext("menu");
+      if (ownedHistoryAdapter) {
+        // This session never shares its executor. Termination rejects old RPCs
+        // before any replacement session can create its own Worker.
+        ownedHistoryAdapter.dispose();
+        if (useGameStore.getState().gameId === gameId) {
+          useGameStore.setState({ gameSessionGeneration: nextGameSessionGeneration() });
+        }
+        clearPromptOverlayState();
+        if (useGameStore.getState().adapter === ownedHistoryAdapter) reset();
+        return;
+      }
       // Issue #2369: drop prompt overlays synchronously so the next mount's
       // `cancelPendingStoreReset` cannot resurrect convoke payment UI.
       clearPromptOverlayState();

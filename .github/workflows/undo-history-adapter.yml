@@ -1,4 +1,4 @@
-name: Fork Undo actual adapter history boundaries
+name: Fork Undo Local product UI experiment
 on:
   push:
     branches: [experiment/undo-history-adapter-e10955dc]
@@ -21,6 +21,7 @@ jobs:
       actions: read
     env:
       F_DRAFT_PAYLOAD: ${{ github.workspace }}/draft-payload
+      F_LOCAL_UI: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -122,7 +123,7 @@ jobs:
             node ../control/scripts/ci/undo-history-adapter-run.mjs \
             "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
             "$GITHUB_WORKSPACE/adapter-evidence/module-selfcheck" --module-selfcheck-only
-      - name: Normal module Worker history faults and conditional heap observations
+      - name: Existing product hand and Undo controls through normal module Worker
         if: ${{ !cancelled() && steps.module.outcome == 'success' }}
         working-directory: source
         run: |
@@ -151,7 +152,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: undo-history-real-adapter-evidence
+          name: undo-history-local-product-ui-evidence
           path: adapter-evidence
           if-no-files-found: warn
           retention-days: 7

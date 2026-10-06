@@ -12,6 +12,7 @@ const [candidateArg, payloadArg, evidenceArg, mode] = process.argv.slice(2);
 assert([undefined, '--selfcheck-only', '--browser-selfcheck-only', '--module-selfcheck-only'].includes(mode), 'unknown consumer mode');
 const inputOnly = mode === '--selfcheck-only', browserOnly = mode === '--browser-selfcheck-only';
 const moduleOnly = mode === '--module-selfcheck-only';
+const localUi = process.env.F_LOCAL_UI === '1';
 const candidate = path.resolve(candidateArg), payload = path.resolve(payloadArg), evidence = path.resolve(evidenceArg);
 await mkdir(evidence, { recursive: true });
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -50,7 +51,7 @@ await cp(path.join(candidate, 'client'), client, { recursive: true, filter: p =>
 await symlink(path.join(candidate, 'client/node_modules'), path.join(client, 'node_modules'), 'dir');
 await cp(path.join(candidate, 'data-files.json'), path.join(runtime, 'data-files.json'));
 const scriptDir = path.dirname(new URL(import.meta.url).pathname);
-await cp(path.join(scriptDir, 'undo-history-browser.mjs'), path.join(client, 'qa-history-adapter.mjs'));
+await cp(path.join(scriptDir, localUi ? 'undo-history-local-ui.mjs' : 'undo-history-browser.mjs'), path.join(client, 'qa-history-adapter.mjs'));
 await cp(path.join(scriptDir, 'undo-history-comparator.mjs'), path.join(client, 'qa-history-comparator.mjs'));
 await mkdir(path.join(client, 'src/wasm'), { recursive: true });
 await writeFile(path.join(client, 'src/wasm/engine_wasm.js'), originalGlue);
@@ -62,6 +63,7 @@ await writeFile(path.join(client, 'public/qa-history-cards.json'), fixture);
 process.env.CARD_DATA_URL = '/qa-history-cards.json'; process.env.ENGINE_WASM_URL = '';
 process.env.TELEMETRY_URL = ''; process.env.SUPABASE_URL = ''; process.env.SUPABASE_ANON_KEY = '';
 process.env.MULTIPLAYER_SERVER_URL = 'ws://127.0.0.1:9';
+if (localUi) process.env.VITE_PHASE_LOCAL_HISTORY = '1';
 const { createServer } = await import(pathToFileURL(path.join(candidate, 'client/node_modules/vite/dist/node/index.js')));
 vite = await createServer({ root: client, configFile: path.join(client, 'vite.config.ts'),
   server: { host: '127.0.0.1', port: 0, strictPort: false },
@@ -130,6 +132,7 @@ try {
   const version = await call('Browser.getVersion');
   const target = await call('Target.createTarget', { url: 'about:blank' });
   pageSession = (await call('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
+  if (localUi) await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, pageSession);
   assert(!args.some(x => /no-sandbox|disable.*sandbox/.test(x)), 'browser sandbox must stay enabled');
   let listedRegions;
   await evaluate('globalThis.__qaSyntheticMemory = new WebAssembly.Memory({ initial: 1 }); true');
@@ -167,8 +170,31 @@ try {
   stage = 'actual-adapter-campaign';
   const started = performance.now(); let result, lastProgress;
   while (performance.now() - started < 230000) {
-    const observed = await evaluate('({result:globalThis.__qaResult,heap:globalThis.__qaHeapStage,progress:globalThis.__qaProgress})');
+    const observed = await evaluate('({result:globalThis.__qaResult,heap:globalThis.__qaHeapStage,progress:globalThis.__qaProgress,ui:globalThis.__qaUiRequest})');
     if (observed.progress && JSON.stringify(observed.progress) !== lastProgress) { lastProgress = JSON.stringify(observed.progress); await writeFile(path.join(evidence, 'browser-progress.json'), lastProgress + '\n'); }
+    if (observed.ui) {
+      const { selector, double, screenshot } = observed.ui;
+      const point = await evaluate(`(() => {
+        const element = document.querySelector(${JSON.stringify(selector)}); if (!element || element.disabled) return null;
+        element.scrollIntoView({block:'nearest'}); const r = element.getBoundingClientRect();
+        for (const fx of [.5,.2,.8,.1,.9]) for (const fy of [.5,.2,.8,.1,.9]) {
+          const x=r.left+r.width*fx,y=r.top+r.height*fy,hit=document.elementFromPoint(x,y);
+          if (hit && (hit === element || element.contains(hit))) return {x,y};
+        } return null;
+      })()`);
+      assert(point, 'existing enabled visible product control is clickable');
+      if (screenshot) {
+        assert(/^[a-z-]+$/.test(screenshot), 'fixed screenshot basename');
+        const capture = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, pageSession);
+        await writeFile(path.join(evidence, `${screenshot}.png`), Buffer.from(capture.data, 'base64'));
+      }
+      await call('Input.dispatchMouseEvent', {type:'mouseMoved',...point}, pageSession);
+      for (let count=1; count <= (double ? 2 : 1); count++) {
+        await call('Input.dispatchMouseEvent', {type:'mousePressed',...point,button:'left',clickCount:count}, pageSession);
+        await call('Input.dispatchMouseEvent', {type:'mouseReleased',...point,button:'left',clickCount:count}, pageSession);
+      }
+      await evaluate('globalThis.__qaUiRequest=null;globalThis.__qaUiClicked();true');
+    }
     if (observed.heap) {
       const samples = [];
       for (let round = 1; round <= 3; round++) {
@@ -192,7 +218,8 @@ try {
     bindingOriginalSha256: digest(originalGlue), bindingRuntimeSha256: digest(originalGlue), bindingUnmodified: true, publicMethods,
     draftBindingSha256: digest(draftGlue), draftBindingUnmodified: true,
     fixtureSha256: digest(fixture), peakChromeTreeRssBytes, peakNodeRssBytes: process.resourceUsage().maxRSS * 1024,
-    heapScope: 'single headless Chromium on Ubuntu; UTF8/main JS/Worker JS/WASM allocated region/process peak separated; not product limit or free guarantee',
+    localUi,
+    heapScope: localUi ? 'No retained-heap campaign; process RSS sampled only' : 'single headless Chromium on Ubuntu; UTF8/main JS/Worker JS/WASM allocated region/process peak separated; not product limit or free guarantee',
     heaps,
   }, null, 2) + '\n');
   console.log(JSON.stringify({ pass: result.pass, stage: result.stage, checks: result.checks, failure: result.failure }));

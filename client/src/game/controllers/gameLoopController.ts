@@ -9,6 +9,7 @@ import { dispatchAction } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
 import { createStaleStateWatchdog } from "../staleStateWatchdog";
 import type { OpponentController } from "./types";
+import { currentLocalHistory } from "../localHistorySession";
 
 const AUTO_PASS_BEAT_MS = 200;
 
@@ -63,6 +64,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
   function onWaitingForChanged(): void {
     if (!active) return;
     clearAutoPassTimeout();
+    if (currentLocalHistory()) return;
 
     const { waitingFor, gameState } = useGameStore.getState();
     if (!waitingFor || waitingFor.type === "GameOver") return;
@@ -98,6 +100,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     autoPassTimeout = setTimeout(() => {
       autoPassTimeout = null;
       if (!active) return;
+      if (currentLocalHistory()) return;
       const { waitingFor, gameState, autoPassRecommended } = useGameStore.getState();
       const { fullControl } = useUiStore.getState();
       if (
@@ -149,7 +152,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
     // Process current state immediately
     onWaitingForChanged();
 
-    staleStateWatchdog.start();
+    if (!currentLocalHistory()) staleStateWatchdog.start();
   }
 
   function stop(): void {

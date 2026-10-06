@@ -766,6 +766,7 @@ export function GamePage() {
   return (
     <GameProvider
       gameId={gameId}
+      localHistoryRequested={searchParams.get("history") === "1"}
       mode={mode}
       difficulty={difficulty}
       joinCode={joinCode || undefined}

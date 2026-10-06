@@ -81,6 +81,7 @@ export function useKeyboardShortcuts(): void {
         dispatch,
         undo,
         stateHistory,
+        localHistory,
         gameMode,
         manaPaymentShortcutActions,
         adapter,
@@ -148,7 +149,7 @@ export function useKeyboardShortcuts(): void {
           // swallowing the keystroke.
           if (!e.ctrlKey && !e.metaKey && !isAuthorityRemote(gameMode)) {
             e.preventDefault();
-            if (stateHistory.length > 0) {
+            if (localHistory ? localHistory.canUndo : stateHistory.length > 0) {
               undo();
             }
           }
