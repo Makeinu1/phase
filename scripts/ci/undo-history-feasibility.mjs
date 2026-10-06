@@ -492,6 +492,246 @@ function observerProfile() {
     authorityChecks: 'PASS: existing Priority controls only', nonPriorityRestore: 'NOT PASSED',
     ordinaryFixture: 'NOT RUN in this campaign; separate reviewed policy required', memory: memory() });
 }
+// Bounded ordinary-cadence policy for the pinned nine simple cards. Every
+// selection comes from the current engine prompt/normal legal actions. The
+// engine's applied/rejected result remains the complete legality authority.
+function ordinaryPrompt(current, context = {}) {
+  const waiting = current.waiting_for, data = waiting.data;
+  let actor = data?.player, action, kind;
+  if (waiting.type === 'MulliganDecision') {
+    actor = data.pending[0].player;
+    action = { type: 'MulliganDecision', data: { choice: { type: 'Keep' } } }; kind = 'mulligan-keep';
+  } else if (waiting.type === 'DeclareAttackers') {
+    const id = data.valid_attacker_ids.find(id => (data.valid_attack_targets_by_attacker == null
+      ? data.valid_attack_targets : data.valid_attack_targets_by_attacker[id] ?? []).length > 0);
+    const targets = id == null ? [] : data.valid_attack_targets_by_attacker == null
+      ? data.valid_attack_targets : data.valid_attack_targets_by_attacker[id] ?? [];
+    action = { type: 'DeclareAttackers', data: { attacks: id == null ? [] : [[id, targets[0]]], bands: [] } };
+    kind = id == null ? null : 'attack-declaration';
+  } else if (waiting.type === 'DeclareBlockers') {
+    const id = data.valid_blocker_ids.find(id => (data.valid_block_targets[id] ?? []).length > 0);
+    action = { type: 'DeclareBlockers', data: { assignments: id == null ? [] : [[id, data.valid_block_targets[id][0]]] } };
+    kind = id == null ? null : 'block-declaration';
+  } else if (['TargetSelection', 'TriggerTargetSelection'].includes(waiting.type)) {
+    const targets = data.target_slots.map(slot => {
+      const legalTargets = slot.legal_targets;
+      const preferred = legalTargets.find(target => context.targetId != null ? target.Object === context.targetId
+        : context.targetMode === 'opposing-spell' ? current.objects[target.Object]?.zone === 'Stack'
+          && current.objects[target.Object]?.controller !== actor
+        : current.objects[target.Object]?.controller === actor && current.objects[target.Object]?.zone === 'Battlefield');
+      const target = preferred ?? (context.targetId == null && context.targetMode == null ? legalTargets[0] : null);
+      check(target, 'ordinary-target-selected-from-issued-legal-slot'); return target;
+    });
+    action = { type: 'SelectTargets', data: { targets } }; kind = 'target-choice';
+  } else if (['ScryChoice', 'SearchChoice', 'DiscardToHandSize'].includes(waiting.type)) {
+    const count = waiting.type === 'ScryChoice' ? data.cards.length : data.count;
+    check(Number.isInteger(count) && count >= 0 && count <= data.cards.length, 'ordinary-issued-card-choice-count');
+    action = { type: 'SelectCards', data: { cards: data.cards.slice(0, count) } }; kind = 'resolution-card-choice';
+  } else if (waiting.type === 'OrderTriggers') {
+    action = { type: 'OrderTriggers', data: { order: data.triggers.map((_, i) => i) } }; kind = 'trigger-order';
+  } else if (waiting.type === 'AssignCombatDamage') {
+    // This policy attacks/blocks with one creature and the pinned cards have no
+    // trample/banding. Broader damage declarations are intentionally unsupported.
+    check(data.blockers.length === 1 && data.trample == null
+      && (data.assignment_modes ?? ['Normal']).includes('Normal'), 'ordinary-single-blocker-normal-damage-only');
+    action = { type: 'AssignCombatDamage', data: { mode: 'Normal', assignments: [[data.blockers[0].blocker_id, data.total_damage]], trample_damage: 0, controller_damage: 0 } };
+    kind = 'combat-damage-choice';
+  } else check(false, 'ordinary-supported-engine-prompt');
+  check(Number.isInteger(actor), 'ordinary-issued-prompt-actor');
+  return { actor, action, kind, context };
+}
+function ordinaryPriority(current, actions, used) {
+  const actor = current.waiting_for.data.player, turn = current.turn_number;
+  const nameOf = action => current.objects[action.data?.object_id]?.name;
+  const available = name => actions.find(a => a.type === 'CastSpell' && nameOf(a) === name);
+  const usedKey = name => actor + ':' + turn + ':' + name;
+  const onceCast = (name, kind, context = {}) => {
+    const action = !used.has(usedKey(name)) && available(name);
+    return action ? { actor, action, kind, context, markUsed: usedKey(name) } : null;
+  };
+  const inCombat = ['BeginCombat', 'DeclareAttackers', 'DeclareBlockers', 'CombatDamage', 'EndCombat'].includes(current.phase);
+  const friendlyCreature = current.battlefield.find(id => current.objects[id].controller === actor
+    && ['Grizzly Bears', 'Seeker of Skybreak', 'Wake Thrasher'].includes(current.objects[id].name));
+  if (current.stack.length > 0) {
+    const opposingSpell = Object.values(current.objects).some(o => o.zone === 'Stack' && o.controller !== actor);
+    const counter = opposingSpell && onceCast('Counterspell', 'stack-response', { targetMode: 'opposing-spell' });
+    if (counter) return counter;
+    const trick = inCombat && friendlyCreature != null && onceCast('Giant Growth', 'combat-trick', { targetId: friendlyCreature });
+    if (trick) return trick;
+  } else {
+    if (actor === current.active_player && ['PreCombatMain', 'PostCombatMain'].includes(current.phase)) {
+      const lands = actions.filter(a => a.type === 'PlayLand');
+      if (lands.length) {
+        const battlefieldLands = current.battlefield.filter(id => current.objects[id].controller === actor);
+        const count = name => battlefieldLands.filter(id => current.objects[id].name === name).length;
+        const holdsCounter = current.players[actor].hand.some(id => current.objects[id].name === 'Counterspell');
+        const desired = holdsCounter && count('Island') < 2 ? 'Island' : count('Forest') <= count('Island') ? 'Forest' : 'Island';
+        return { actor, action: lands.find(a => nameOf(a) === desired) ?? lands[0], kind: 'land', context: {} };
+      }
+      for (const name of ['Grizzly Bears', 'Seeker of Skybreak', 'Wake Thrasher', 'Rampant Growth']) {
+        const action = available(name); if (action) return { actor, action, kind: 'main-cast', context: {} };
+      }
+      const opt = onceCast('Opt', 'main-cast'); if (opt) return opt;
+    }
+    const trick = inCombat && friendlyCreature != null && onceCast('Giant Growth', 'combat-trick', { targetId: friendlyCreature });
+    if (trick) return trick;
+    if (!used.has(usedKey('Seeker'))) {
+      const activation = actions.find(a => a.type === 'ActivateAbility' && current.objects[a.data.source_id]?.name === 'Seeker of Skybreak');
+      const otherTapped = activation && current.battlefield.find(id => id !== activation.data.source_id
+        && current.objects[id].controller === actor && current.objects[id].tapped
+        && ['Grizzly Bears', 'Seeker of Skybreak', 'Wake Thrasher'].includes(current.objects[id].name));
+      if (otherTapped != null) return { actor, action: activation, kind: 'nonself-untap', context: { targetId: otherTapped }, markUsed: usedKey('Seeker') };
+    }
+  }
+  const pass = actions.find(a => a.type === 'PassPriority');
+  check(pass, 'ordinary-real-legal-priority-pass');
+  return { actor, action: pass, kind: null, context: {} };
+}
+function ordinaryExecute(choice) {
+  const events = [...submit(choice.actor, choice.action)];
+  if (['CastSpell', 'ActivateAbility'].includes(choice.action.type)) {
+    for (let n = 0; n < 30; n++) {
+      const current = state();
+      if (current.waiting_for.type === 'Priority') break;
+      const decision = ordinaryPrompt(current, choice.context);
+      check(decision.actor === choice.actor && !['DeclareAttackers', 'DeclareBlockers', 'MulliganDecision'].includes(decision.action.type), 'ordinary-root-declaration-only');
+      events.push(...submit(decision.actor, decision.action));
+      check(n < 29, 'ordinary-bounded-declaration');
+    }
+    check(events.some(e => e.type === (choice.action.type === 'CastSpell' ? 'SpellCast' : 'AbilityActivated')), 'ordinary-real-cast-or-ability-root');
+  }
+  return events;
+}
+function ordinary() {
+  const setupTiming = {}; profileCurrent = setupTiming;
+  const setupStart = performance.now();
+  init([...copies(12, 'Forest'), ...copies(8, 'Island'), ...copies(4, 'Grizzly Bears'), ...copies(4, 'Seeker of Skybreak'), ...copies(4, 'Wake Thrasher'), ...copies(4, 'Opt'), ...copies(4, 'Rampant Growth')],
+    [...copies(12, 'Forest'), ...copies(12, 'Island'), ...copies(4, 'Grizzly Bears'), ...copies(4, 'Giant Growth'), ...copies(4, 'Counterspell'), ...copies(4, 'Opt')]);
+  const initialStart = performance.now(), initialPre = rawState('retainedPreExport');
+  const initialCaptureMs = performance.now() - initialStart, initial = parseJSON(initialPre).state;
+  receipt('ordinary-initial', { pass: true, initialOpaquePreUtf8Bytes: Buffer.byteLength(initialPre), initialCaptureMs,
+    canonicalInitialPreSha256: canonicalDigest(initialPre), beforeFirstSemanticOperation: true,
+    setupMs: performance.now() - setupStart, setupTiming,
+    initialRestore: 'NOT RUN: original prompt may be MulliganDecision; no manufactured PassPriority' });
+  const roots = [], hashes = new Set(), used = new Set(), timing = {}, eventsSeen = {};
+  let current = initial, completedTurns = 0, lastTurn = initial.turn_number, firstNaturalTurn = null, postWindowPromptActions = 0, stopReason;
+  let lastActivePlayer = initial.active_player;
+  const completedTurnsBySeat = [0, 0];
+  const progressionStart = performance.now(); profileCurrent = timing;
+  for (let n = 0; n < 800; n++) {
+    stage = 'ordinary-three-turn-pairs-' + n;
+    current = state();
+    if (firstNaturalTurn === null && current.waiting_for.type !== 'MulliganDecision' && current.turn_number > 0) {
+      firstNaturalTurn = current.turn_number; lastTurn = current.turn_number; lastActivePlayer = current.active_player;
+    }
+    if (current.turn_number !== lastTurn) {
+      check(current.turn_number === lastTurn + 1 && current.active_player === 1 - lastActivePlayer, 'ordinary-natural-consecutive-alternating-turns');
+      completedTurnsBySeat[lastActivePlayer]++; completedTurns++; lastTurn = current.turn_number; lastActivePlayer = current.active_player;
+    }
+    progress = { stepCount, turn: current.turn_number, phase: current.phase, waiting: current.waiting_for.type, completedTurns, completedRoots: roots.length };
+    if (current.game_end != null) { stopReason = 'earlier-natural-game-end'; break; }
+    if (completedTurns === 6) {
+      if (current.waiting_for.type === 'Priority') { stopReason = 'three-complete-turn-pairs'; break; }
+      // Only finish already issued mandatory start-of-turn prompts to obtain a
+      // live Priority capability for unchanged probes. No next-turn land/cast,
+      // fabricated priority pass, or extra retained operation root is inserted.
+      check(postWindowPromptActions < 30, 'ordinary-bounded-post-window-prompt-stabilization');
+      const decision = ordinaryPrompt(current); ordinaryExecute(decision); postWindowPromptActions++; continue;
+    }
+    let choice;
+    if (current.waiting_for.type === 'Priority') {
+      const actor = current.waiting_for.data.player, actions = legal(actor);
+      // Legal queries flush layers. Obtain a new observation after the query;
+      // never reuse a parsed observation across an engine call.
+      current = state();
+      check(current.waiting_for.type === 'Priority' && current.waiting_for.data.player === actor, 'ordinary-post-query-priority-actor-unchanged');
+      choice = ordinaryPriority(current, actions, used);
+    } else choice = ordinaryPrompt(current);
+    const trace = []; traceCurrent = choice.kind ? trace : null;
+    let pre, captureMs, saveMs, digest, eligibility, snapshotUtf8Bytes;
+    const rootStart = performance.now();
+    if (choice.kind) {
+      const saveStart = performance.now(), start = performance.now(); pre = rawState('retainedPreExport');
+      captureMs = performance.now() - start; snapshotUtf8Bytes = Buffer.byteLength(pre);
+      digest = canonicalDigest(pre); check(!hashes.has(digest), 'ordinary-distinct-real-operation-pre'); hashes.add(digest);
+      const observed = parseJSON(pre);
+      eligibility = observed.state.waiting_for.type !== 'Priority' ? 'non-Priority: NOT RUN'
+        : observed.state.priority_pass_count !== 0 ? 'Priority pass already pending: conservative probe subset'
+        : observed.precast_shortcut_runtime.offer !== null || observed.precast_shortcut_runtime.must_diverge !== null
+          || observed.precast_shortcut_runtime.materializing !== false ? 'active private runtime: NOT RUN' : 'eligible Priority';
+      saveMs = performance.now() - saveStart;
+    }
+    const events = ordinaryExecute(choice);
+    for (const event of events) eventsSeen[event.type] = (eventsSeen[event.type] ?? 0) + 1;
+    if (choice.markUsed) used.add(choice.markUsed);
+    traceCurrent = null;
+    if (choice.kind) {
+      // One parsed post observation for adjacent completion checks, with no
+      // intervening engine call. Original bytes, never parsed state, are stored.
+      const postRaw = rawState(), post = parseJSON(postRaw).state;
+      if (choice.action.type === 'PlayLand') check(post.objects[choice.action.data.object_id].zone === 'Battlefield', 'ordinary-real-land-entered');
+      if (choice.action.type === 'DeclareAttackers') check(events.some(e => e.type === 'AttackersDeclared'), 'ordinary-real-nonempty-attacks');
+      if (choice.action.type === 'DeclareBlockers') check(events.some(e => e.type === 'BlockersDeclared'), 'ordinary-real-nonempty-blocks');
+      if (choice.action.type === 'ActivateAbility') check(choice.context.targetId !== choice.action.data.source_id, 'ordinary-never-self-untap');
+      const sample = { n: roots.length + 1, kind: choice.kind, actionType: choice.action.type, actor: choice.actor, turn: current.turn_number,
+        completedRealRoot: true, snapshotUtf8Bytes, captureMs, saveMs, canonicalPreSha256: digest,
+        declarationActionCount: trace.length, normalTraceSha256: sha(stringifyJSON(trace)), restoreEligibility: eligibility,
+        operationAndValidationMs: performance.now() - rootStart - saveMs };
+      roots.push({ pre, postRaw, trace, choice, sample });
+      appendFileSync(path.join(output, 'ordinary-root-samples.jsonl'), JSON.stringify(sample) + '\n');
+    }
+  }
+  check(stopReason, 'ordinary-bounded-natural-three-pairs-or-end');
+  profileCurrent = null;
+  const eligible = roots.filter(root => root.sample.restoreEligibility === 'eligible Priority');
+  const totalBytes = roots.reduce((sum, root) => sum + root.sample.snapshotUtf8Bytes, 0);
+  receipt('ordinary-capture', { pass: true, stopReason, completedTurns, completedTurnsBySeat, completedTurnPairs: Math.floor(completedTurns / 2), postWindowPromptActions,
+    completedRealRoots: roots.length, distinctCanonicalPreSnapshots: hashes.size, eligiblePriorityRoots: eligible.length,
+    nonPriorityRoots: roots.filter(root => root.sample.restoreEligibility.startsWith('non-Priority')).length,
+    rootKinds: Object.fromEntries([...new Set(roots.map(root => root.sample.kind))].map(kind => [kind, roots.filter(root => root.sample.kind === kind).length])),
+    cumulativeOpaquePreUtf8Bytes: totalBytes, bytesPerOperation: distribution(roots.map(root => root.sample.snapshotUtf8Bytes)),
+    captureMs: distribution(roots.map(root => root.sample.captureMs)), saveMs: distribution(roots.map(root => root.sample.saveMs)),
+    progressionAndValidationMs: performance.now() - progressionStart, timing,
+    actualCardDrawEvents: eventsSeen.CardDrawn ?? 0, actualSpellCastEvents: eventsSeen.SpellCast ?? 0,
+    actualAbilityActivatedEvents: eventsSeen.AbilityActivated ?? 0, actualSpellCounteredEvents: eventsSeen.SpellCountered ?? 0,
+    publicCreaturePermanentsAtStop: current.battlefield.filter(id => ['Grizzly Bears', 'Seeker of Skybreak', 'Wake Thrasher'].includes(current.objects[id].name)).length,
+    actualNonemptyAttackRoots: roots.filter(root => root.sample.kind === 'attack-declaration').length,
+    actualNonemptyBlockRoots: roots.filter(root => root.sample.kind === 'block-declaration').length,
+    actualResponseRoots: roots.filter(root => root.sample.kind === 'stack-response').length,
+    saveScope: 'original trusted PRE export plus byte count, exact canonical digest/eligibility checks; numeric journal and postproof export excluded; diagnostic in-memory retention, no durable file storage benchmark',
+    workload: 'seeded nine-card40-card Limited ordinary cadence; one attacker/blocker, no Seeker self-loop, at most one Seeker/Opt/GiantGrowth/Counterspell per seat-turn; not full-db/meta/AI strength or frequency estimate' });
+  if (stopReason === 'earlier-natural-game-end' || current.waiting_for.type !== 'Priority' || current.priority_pass_count !== 0) {
+    receipt('ordinary-restore', { pass: false, status: 'NOT RUN', reason: 'bounded final live state outside existing Priority control contract; never manufacture pass' });
+  } else {
+    check(eligible.length >= 3, 'ordinary-at-least-three-eligible-priority-roots');
+    const currentRaw = rawState(), probeTiming = {}; profileCurrent = probeTiming;
+    const suiteStart = performance.now(), samples = [];
+    for (const position of [0, Math.floor((eligible.length - 1) / 2), eligible.length - 1]) {
+      const root = eligible[position]; stage = 'ordinary-restore-root-' + root.sample.n;
+      const probeStart = performance.now(), restoreMs = restore(root.pre), probeMs = performance.now() - probeStart;
+      const continuationStart = performance.now();
+      const actions = legal(root.choice.actor);
+      check(actions.some(action => isDeepStrictEqual(action, root.choice.action)), 'ordinary-restored-original-action-is-fresh-engine-legal');
+      const trace = []; traceCurrent = trace;
+      ordinaryExecute(root.choice); traceCurrent = null;
+      check(isDeepStrictEqual(root.trace, trace), 'ordinary-restored-exact-normal-root-trace');
+      equalWithVerifiedRekey(root.postRaw, rawState(), 'ordinary-restored-complete-post-with-one-exact-rekey');
+      const continuationMs = performance.now() - continuationStart;
+      const reinstallStart = performance.now(); restore(currentRaw);
+      samples.push({ eligiblePosition: position, operationIndex: root.sample.n, kind: root.sample.kind, restoreMs, probeMs, continuationMs,
+        currentReinstallProbeMs: performance.now() - reinstallStart });
+    }
+    profileCurrent = null;
+    receipt('ordinary-restore', { pass: true, eligiblePriorityRoots: eligible.length, samples, checkedInstallCount: restoreAttempt,
+      suiteMs: performance.now() - suiteStart, probeTiming, authorityContract: 'unchanged exact private epoch rotation/full remaining equality/new never-used namespace/actual stale refusal and fresh-vs-normal transition',
+      rootContinuationProof: 'fresh legal action, exact actor/action/all event trace and complete post envelope with one precisely verified rekey' });
+  }
+  const releaseStart = performance.now(); roots.length = 0; eligible.length = 0; hashes.clear(); global.gc();
+  receipt('ordinary', { pass: true, completedTurnPairs: Math.floor(completedTurns / 2), stopReason,
+    releaseMs: performance.now() - releaseStart, memory: memory(), initialAndNonPriorityRestore: 'NOT PASSED',
+    fullGameToNaturalEnd: stopReason === 'earlier-natural-game-end' ? 'earlier natural end' : 'NOT RUN: three-turn-pair calibration only',
+    productCountMemoryBudget: 'NOT CHOSEN', twoSeatSyncPrivacyUiControllerDevice: 'NOT RUN' });
+}
 function history() {
   const preparationStart = performance.now();
   init([...copies(12, 'Forest'), ...copies(12, 'Island'), ...copies(8, 'Seeker of Skybreak'), ...copies(8, 'Wake Thrasher')], copies(40, 'Island'));
@@ -587,7 +827,7 @@ function history() {
 try {
   check(!isDeepStrictEqual(lossless('{"x":1}'), lossless('{"x":"@number:1"}')), 'comparator-preserves-number-string-type');
   check(!isDeepStrictEqual(lossless('{"x":18446744073709551614}'), lossless('{"x":18446744073709551615}')), 'comparator-preserves-u64-token');
-  check(['payment', 'multistack', 'ability-response', 'rng', 'history', 'observer-profile'].includes(campaign), 'fixed-campaign');
+  check(['payment', 'multistack', 'ability-response', 'rng', 'history', 'observer-profile', 'ordinary'].includes(campaign), 'fixed-campaign');
   check(campaign !== 'history' || [50, 200, 1000].includes(historyTargetCount), 'fixed-independent-history-measurement-count');
   check(typeof global.gc === 'function', 'expose-gc-required');
   const inputStart = performance.now();
@@ -603,7 +843,7 @@ try {
   receipt('inputs', { pass: true, inputValidationAndWasmInitMs: performance.now() - inputStart,
     binaryProfile: 'unoptimized tool WASM; not release-device latency', fixtureCards: 9, node: process.version, memory: memory() });
   stage = campaign;
-  ({ payment, multistack, 'ability-response': abilityResponse, rng, history, 'observer-profile': observerProfile })[campaign]();
+  ({ payment, multistack, 'ability-response': abilityResponse, rng, history, 'observer-profile': observerProfile, ordinary })[campaign]();
 } catch {
   receipt('failure', { pass: false, stage, failedCheck: failedCheck ?? 'wasm-api-or-runtime-error', progress, lastActionType, lastOutcomeStatus, mismatchPaths });
   process.exitCode = 1;
