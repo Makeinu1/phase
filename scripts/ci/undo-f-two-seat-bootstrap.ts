@@ -160,7 +160,7 @@ function observe(conn: TransportConnection) {
   };
   if (conn.open) onOpen(); else conn.once("open", onOpen);
   // The unique-channel count above stays unchanged. Observe every emitted
-  // open separately because hostRoom uses a persistent open listener.
+  // open separately even when hostRoom consumes only the first notification.
   conn.on("open", () => lifecycle("data-connection-open-emission", conn));
   conn.on("close", () => lifecycle("data-connection-close-event", conn));
   conn.on("error", error => {

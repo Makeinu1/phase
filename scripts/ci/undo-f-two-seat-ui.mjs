@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 
 const [client, wasm, draft, fixture, serverPackages, evidence] = process.argv.slice(2).map(x => path.resolve(x));
-const frontendSha = "553c87136898d9b1b778c7c51bc19f805c8de407";
+const frontendSha = "91e761eec1a2fa6251cd4aa9b7728c6175ca9f42";
 const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const hostForm = "document.querySelector('button[aria-label=Format]')?.closest('form')";
