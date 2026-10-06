@@ -56,6 +56,65 @@ function deferred<T>() {
 }
 
 describe("client manual-resolution receipt coordinator (mock atomic boundary)", () => {
+  it("owns one opaque identity across its ports and isolates genuinely different receipt sessions", () => {
+    const receiptSession = session();
+    const original = receiptSession.bindBoundary(boundary())(scope);
+    const replacement = receiptSession.bindBoundary(boundary())({ stackEntryId: 90, sourceObjectId: 80, adapterGeneration: 8 });
+    expect(replacement).not.toBe(original);
+    expect(replacement.receiptSessionIdentity).toBe(original.receiptSessionIdentity);
+    expect(Object.isFrozen(original.receiptSessionIdentity)).toBe(true);
+    expect(session(1).bindBoundary(boundary())(scope).receiptSessionIdentity).not.toBe(original.receiptSessionIdentity);
+    expect(session(0).bindBoundary(boundary())(scope).receiptSessionIdentity).not.toBe(original.receiptSessionIdentity);
+  });
+
+  it("exposes the immutable pending/unknown request across source ports for read-only remount recovery", async () => {
+    const endpoint = boundary();
+    const delivery = deferred<ManualResolutionResult>();
+    endpoint.submitCaptured.mockReturnValue(delivery.promise);
+    const receiptSession = session();
+    const port = receiptSession.bindBoundary(endpoint)(scope);
+    expect(port.getUnresolvedManualResolutionRequest()).toBeNull();
+    const input = loss();
+    const pending = port.submitManualResolutionCommand(input);
+    const original = port.getUnresolvedManualResolutionRequest()!;
+    expect(original).not.toBe(input);
+    expect(Object.isFrozen(original)).toBe(true);
+    expect(Object.isFrozen(original.binding)).toBe(true);
+    expect(Object.isFrozen(original.command)).toBe(true);
+    const replacement = boundary();
+    const replacementPort = receiptSession.bindBoundary(replacement)({ stackEntryId: 90, sourceObjectId: 80, adapterGeneration: 8 });
+    expect(replacementPort.getUnresolvedManualResolutionRequest()).toBe(original);
+    delivery.reject(new Error("Original delivery unknown"));
+    await pending;
+    expect(endpoint.submitCaptured.mock.calls[0]![0]).toBe(original);
+    expect(replacementPort.getUnresolvedManualResolutionRequest()).toBe(original);
+    replacement.lookupReceipt.mockResolvedValue({ binding: original.binding, status: "completed" });
+    expect(await replacementPort.reconcileManualResolution(original)).toMatchObject({ status: "completed" });
+    expect(replacement.lookupReceipt.mock.calls[0]![0]).toBe(original);
+    expect(port.getUnresolvedManualResolutionRequest()).toBeNull();
+    expect(replacementPort.getUnresolvedManualResolutionRequest()).toBeNull();
+    expect(endpoint.submitCaptured).toHaveBeenCalledOnce();
+    expect(replacement.submitCaptured).not.toHaveBeenCalled();
+  });
+
+  it("recovers the exact retry identity when a rejected attempt and its unknown retry have identical values", async () => {
+    const endpoint = boundary();
+    endpoint.submitCaptured.mockImplementationOnce(async (request) => ({ binding: request.binding, status: "rejected", reason: "First attempt not applied." }))
+      .mockRejectedValueOnce(new Error("Retry unknown"));
+    const port = session().bindBoundary(endpoint)(scope);
+    await port.submitManualResolutionCommand(loss());
+    expect(port.getUnresolvedManualResolutionRequest()).toBeNull();
+    await port.submitManualResolutionCommand(loss());
+    const retry = port.getUnresolvedManualResolutionRequest()!;
+    expect(retry).not.toBe(endpoint.submitCaptured.mock.calls[0]![0]);
+    expect(retry).toBe(endpoint.submitCaptured.mock.calls[1]![0]);
+    endpoint.lookupReceipt.mockResolvedValue({ binding: retry.binding, status: "not-applied" });
+    expect(await port.reconcileManualResolution(retry)).toMatchObject({ status: "not-applied" });
+    expect(endpoint.lookupReceipt.mock.calls[0]![0]).toBe(retry);
+    expect(port.getUnresolvedManualResolutionRequest()).toBeNull();
+    expect(endpoint.submitCaptured).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces concurrent delivery, retains its exact receipt, and allows another newly bound loss", async () => {
     const endpoint = boundary();
     const receiptSession = session();

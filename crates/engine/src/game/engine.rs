@@ -1509,6 +1509,14 @@ fn apply_action_boundary_core(
                 ..
             } | GameAction::RevokeResolveAllConsent { .. }
         );
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    let suppress_auto_pass_once = suppress_auto_pass_once
+        || matches!(
+            action,
+            GameAction::DesignateManualResolution { .. }
+                | GameAction::FinishManualResolution { .. }
+                | GameAction::ApplyManualLifeLoss { .. }
+        );
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -11111,6 +11119,139 @@ pub(super) fn auto_advance_settling_deferral(
     }
 }
 
+#[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+fn finish_manual_resolution(
+    state: &mut GameState,
+    player: PlayerId,
+    stack_entry_id: crate::types::identifiers::ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if state.manual_resolution_designation != Some(stack_entry_id)
+        || state.stack.back().map(|entry| entry.id) != Some(stack_entry_id)
+    {
+        return Err(EngineError::InvalidAction(
+            "Finish must name the exact designated stack top".to_string(),
+        ));
+    }
+    let entry = state.stack.back().expect("the exact top was checked");
+    if entry.controller != player || !state.manual_resolution_source_is_supported(player, entry) {
+        return Err(EngineError::InvalidAction(
+            "the designated source is no longer eligible for manual Finish".to_string(),
+        ));
+    }
+
+    // This action explicitly releases the pause through the ordinary action
+    // boundary. The manual terminal seam removes the exact occurrence and uses
+    // the normal target/fizzle and zone-finalization authorities while keeping
+    // the announced instruction chain suppressed. The outer
+    // `apply_action_boundary` owns the sole rollback, auto-pass policy, event
+    // log, interaction rebind, terminal check and public-state finalization.
+    state.priority_passes.clear();
+    state.priority_pass_count = 0;
+    state.pending_activations.clear();
+    state.cancelled_casts.clear();
+    state.priority_player = state.active_player;
+    let priority = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    sync_waiting_for(state, &priority);
+
+    if !super::stack::finish_manual_resolution_terminal(state, stack_entry_id, events) {
+        return Err(EngineError::InvalidAction(
+            "the designated spell could not enter the manual terminal path".to_string(),
+        ));
+    }
+    resume_pending_continuation_if_priority(state, events)?;
+
+    // The normal all-pass path always runs the post-resolution pipeline, even
+    // when the resolver parked an interactive prompt. The common action path
+    // below runs it for Priority results; mirror it here only for a nonpriority
+    // result so no resolution pipeline is run twice.
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        let start = state.waiting_for.clone();
+        let waiting_for =
+            engine_priority::run_post_action_pipeline(state, events, &start, false, false)?;
+        sync_waiting_for(state, &waiting_for);
+    }
+    Ok(state.waiting_for.clone())
+}
+
+#[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+fn apply_manual_life_loss(
+    state: &mut GameState,
+    actor: PlayerId,
+    player: PlayerId,
+    waiting_id: ObjectId,
+    stack_entry_id: ObjectId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if actor != player {
+        return Err(EngineError::WrongPlayer);
+    }
+    if state.manual_resolution_designation != Some(waiting_id)
+        || stack_entry_id != waiting_id
+        || state.stack.back().map(|entry| entry.id) != Some(waiting_id)
+    {
+        return Err(EngineError::InvalidAction(
+            "manual life loss must name the exact designated stack top".to_string(),
+        ));
+    }
+    if amount == 0 || amount > i32::MAX as u32 {
+        return Err(EngineError::InvalidAction(
+            "manual life loss amount must be between 1 and i32::MAX".to_string(),
+        ));
+    }
+    let entry = state.stack.back().expect("the exact top was checked");
+    if entry.controller != player || !state.manual_resolution_source_is_supported(player, entry) {
+        return Err(EngineError::InvalidAction(
+            "manual life loss source is no longer eligible".to_string(),
+        ));
+    }
+    let source_id = entry.source_id;
+
+    // CR 119.3: use the ordinary replacement authority. Any choice or
+    // substitution deferral is unsupported in this first slice; returning an
+    // error makes the outer authenticated action boundary restore its complete
+    // snapshot, including the prompt and any provisional events or edits.
+    let event_start = events.len();
+    let _actual = super::effects::life::apply_life_loss_bounded(
+        state,
+        player,
+        amount,
+        i32::MAX as u32,
+        events,
+    )
+    .map_err(|error| match error {
+        super::effects::life::BoundedLifeLossError::ReplacementDeferred(_) => {
+            EngineError::InvalidAction(
+                "manual life loss cannot continue through a deferred replacement".to_string(),
+            )
+        }
+        super::effects::life::BoundedLifeLossError::ExceedsMaximum => EngineError::InvalidAction(
+            "replacement-adjusted manual life loss exceeds the supported range".to_string(),
+        ),
+        super::effects::life::BoundedLifeLossError::UnsupportedReplacementQuantity => {
+            EngineError::InvalidAction(
+                "manual life loss cannot evaluate this replacement quantity".to_string(),
+            )
+        }
+        super::effects::life::BoundedLifeLossError::UnsupportedReplacementSubstitution => {
+            EngineError::InvalidAction(
+                "manual life loss cannot execute a substitute replacement instruction".to_string(),
+            )
+        }
+    })?;
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::LoseLife,
+        source_id,
+        subject: None,
+    });
+    super::triggers::collect_triggers_into_deferred(state, &events[event_start..]);
+    super::triggers::collect_delayed_triggers_into_deferred(state, &events[event_start..]);
+    Ok(state.waiting_for.clone())
+}
+
 fn apply_non_priority_pass_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -11140,6 +11281,69 @@ fn apply_non_priority_pass_action(
 
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        (
+            WaitingFor::Priority { player },
+            GameAction::DesignateManualResolution { stack_entry_id },
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if state.manual_resolution_designation.is_some()
+                || state.stack_resolution_session.is_some()
+                || state.resolve_all_consent_run.is_some()
+                || state.pending_replacement.is_some()
+                || state.replacement_may_cost_paused
+            {
+                return Err(EngineError::InvalidAction(
+                    "manual resolution is unavailable while another resolution or replacement hook is active".to_string(),
+                ));
+            }
+            let entry = state
+                .stack
+                .iter()
+                .find(|entry| entry.id == stack_entry_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "manual resolution requires an exact live stack occurrence".to_string(),
+                    )
+                })?;
+            if !state.manual_resolution_source_is_supported(*player, entry) {
+                return Err(EngineError::InvalidAction(
+                    "manual resolution supports only an owned, controlled, ordinary hand-cast instant or sorcery without paid Buyback or an exile rider".to_string(),
+                ));
+            }
+            state.manual_resolution_designation = Some(stack_entry_id);
+            WaitingFor::Priority { player: *player }
+        }
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        (
+            WaitingFor::ManualResolution { player, stack_entry_id: waiting_id },
+            GameAction::FinishManualResolution { stack_entry_id },
+        ) if waiting_id == &stack_entry_id => finish_manual_resolution(
+            state,
+            *player,
+            *waiting_id,
+            &mut events,
+        )?,
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        (
+            WaitingFor::ManualResolution { player, stack_entry_id: waiting_id },
+            GameAction::ApplyManualLifeLoss {
+                stack_entry_id,
+                amount,
+            },
+        ) => apply_manual_life_loss(
+            state,
+            actor,
+            *player,
+            *waiting_id,
+            stack_entry_id,
+            amount,
+            &mut events,
+        )?,
         (
             WaitingFor::Priority { player },
             GameAction::BeginResolveAll {
@@ -15881,6 +16085,14 @@ pub fn preflight_debug_action(
     action: &DebugAction,
 ) -> Result<(), EngineError> {
     check_debug_action_access(state, actor)?;
+
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    if state.manual_resolution_designation.is_some() {
+        return Err(EngineError::InvalidAction(
+            "Debug actions are unavailable while a manual-resolution designation is active".into(),
+        ));
+    }
+
     action
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;

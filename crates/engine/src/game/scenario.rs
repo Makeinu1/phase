@@ -2017,6 +2017,8 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+            WaitingFor::ManualResolution { .. } => "ManualResolution",
             WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
             WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",

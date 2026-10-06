@@ -58,13 +58,21 @@ function indeterminateReconciliation(request: ManualResolutionRequest, reason?: 
   return { binding: request.binding, status: "indeterminate", reason };
 }
 
+// Replacement-port fixtures share one mocked authenticated receipt session.
+const mockReceiptSessionIdentity = Object.freeze({});
+
 function makePort(
   submit = vi.fn<ManualResolutionCommandPort["submitManualResolutionCommand"]>()
     .mockImplementation(async (request) => completedReceipt(request)),
   reconcile = vi.fn<ManualResolutionCommandPort["reconcileManualResolution"]>()
     .mockImplementation(async (request) => indeterminateReconciliation(request, "Still waiting for an authoritative answer.")),
 ): ManualResolutionCommandPort {
-  return { submitManualResolutionCommand: submit, reconcileManualResolution: reconcile };
+  return {
+    receiptSessionIdentity: mockReceiptSessionIdentity,
+    getUnresolvedManualResolutionRequest: () => null,
+    submitManualResolutionCommand: submit,
+    reconcileManualResolution: reconcile,
+  };
 }
 
 interface HarnessProps {

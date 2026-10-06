@@ -532,6 +532,12 @@ fn remove_stack_entry_at_unobserved(
         return None;
     }
     let entry = state.stack.remove(index);
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    if state.manual_resolution_designation == Some(entry.id) {
+        // Retirement is occurrence-scoped: removing an unrelated response must
+        // leave the lower designated spell armed.
+        state.manual_resolution_designation = None;
+    }
     let paid_facts = state.stack_paid_facts.remove(&entry.id);
     let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
     let trigger_firing = take_stack_trigger_firing(state, &entry);
@@ -621,6 +627,101 @@ pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEn
     remove_stack_entry_at_unobserved(state, state.stack.len().checked_sub(1)?)
 }
 
+/// Completes a manually designated ordinary instant or sorcery without
+/// executing its suppressed instructions or resolution hooks. Stack removal,
+/// target-fizzle classification, spell-zone replacement handling, event
+/// cleanup, and carrier settlement remain owned by the same authorities as a
+/// normal resolution.
+#[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+pub(crate) fn finish_manual_resolution_terminal(
+    state: &mut GameState,
+    stack_entry_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(top) = state.stack.back() else {
+        return false;
+    };
+    if top.id != stack_entry_id
+        || state.manual_resolution_designation != Some(stack_entry_id)
+        || !matches!(&top.kind, StackEntryKind::Spell { .. })
+        || state.resolving_stack_entry.is_some()
+        || state.resolving_trigger_firing.is_some()
+    {
+        return false;
+    }
+
+    // CR 400.7j and CR 107.3a: resolution-scoped carriers are reset at the
+    // same boundary used by `resolve_top` before the exact occurrence is
+    // popped. The central pop also retires this occurrence's designation.
+    state.resolution_source_relatch = None;
+    state.announced_source_x = None;
+    state.turn_up_paid_cost_source = None;
+    let Some(PoppedStackEntry {
+        entry,
+        trigger_event_batch,
+        trigger_firing,
+        ..
+    }) = pop_top_stack_entry(state)
+    else {
+        return false;
+    };
+    begin_resolving_stack_entry(state, entry.clone(), trigger_firing)
+        .expect("the manual terminal path checked the carrier slot before popping");
+
+    let intervening_if_holds = bind_resolution_scope(state, &entry, trigger_event_batch);
+    let all_targets_illegal = if intervening_if_holds {
+        entry.ability().is_some_and(|ability| {
+            let original_targets = flatten_specified_targets_in_chain(ability);
+            if original_targets.is_empty() {
+                return false;
+            }
+            let validated = validate_targets_in_chain(state, ability);
+            let legal_targets = flatten_specified_targets_in_chain(&validated);
+            targeting::check_fizzle(&original_targets, &legal_targets)
+        })
+    } else {
+        false
+    };
+
+    // Eligibility guarantees an ordinary nonpermanent hand-cast spell with
+    // no Buyback payment, exile rider, or alternate casting route. Use the
+    // existing replacement-aware spell-resolution move for both successful
+    // terminal completion and fizzle; it applies board-wide zone replacements.
+    let move_result = zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::spell_resolution_default(entry.id, Zone::Graveyard),
+        events,
+    );
+    events.push(GameEvent::StackResolved {
+        object_id: entry.id,
+    });
+    state.current_trigger_event = None;
+    state.current_trigger_events.clear();
+    state.current_trigger_match_count = None;
+    state.die_result_this_resolution = None;
+
+    // A normal zone-pipeline replacement choice owns the live carrier until
+    // its answer delivers the parked move, matching `resolve_top`'s existing
+    // NeedsChoice exit. No automatic fallback can execute the spell later.
+    if matches!(
+        move_result,
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice
+    ) {
+        return true;
+    }
+
+    let disposition = if !intervening_if_holds {
+        super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse
+    } else if all_targets_illegal {
+        super::lifecycle::DelayedTerminalDisposition::AllTargetsIllegal
+    } else {
+        super::lifecycle::DelayedTerminalDisposition::Resolved
+    };
+    finish_resolving_stack_entry(state, disposition);
+    state.resolution_source_relatch = None;
+    true
+}
+
 /// Removes the top stack entry outside normal resolution.
 pub(super) fn pop_nonresolving_top_stack_entry(
     state: &mut GameState,
@@ -667,6 +768,10 @@ pub fn apply_resolved_stack_removal(
 
     // In range: the `get` above returned `Some`, so this cannot panic.
     let entry = state.stack.remove(command.index);
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    if state.manual_resolution_designation == Some(entry.id) {
+        state.manual_resolution_designation = None;
+    }
     state.stack_paid_facts.remove(&entry.id);
     state.stack_trigger_event_batches.remove(&entry.id);
     state.stack_trigger_firings.remove(&entry.id);
@@ -1489,6 +1594,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             "resolve_top refused: a resolution carrier is still installed; the stack top was not popped"
         );
         return;
+    }
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    if let (Some(designated_id), Some(top)) =
+        (state.manual_resolution_designation, state.stack.back())
+    {
+        if top.id == designated_id {
+            state.waiting_for = crate::types::game_state::WaitingFor::ManualResolution {
+                player: top.controller,
+                stack_entry_id: top.id,
+            };
+            return;
+        }
     }
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
@@ -3425,7 +3542,13 @@ pub fn resolve_next_with_limit(
     let pending_top = state
         .pending_trigger_entry
         .is_some_and(|pending| state.stack.back().map(|e| e.id) == Some(pending));
-    if !pending_top {
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    let manual_designated_top = state
+        .manual_resolution_designation
+        .is_some_and(|id| state.stack.back().is_some_and(|entry| entry.id == id));
+    #[cfg(not(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32"))))]
+    let manual_designated_top = false;
+    if !pending_top && !manual_designated_top {
         if let Some(consumed) = inert_noop_run_len(state) {
             let consumed = consumed.min(max_consumed);
             if consumed >= 2 {

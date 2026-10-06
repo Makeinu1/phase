@@ -1281,6 +1281,10 @@ enum FlatPriorityActionClass {
 fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass {
     match action {
         GameAction::PassPriority => FlatPriorityActionClass::Pass,
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        GameAction::DesignateManualResolution { .. }
+        | GameAction::FinishManualResolution { .. }
+        | GameAction::ApplyManualLifeLoss { .. } => FlatPriorityActionClass::Other,
         GameAction::CastSpell { .. } => FlatPriorityActionClass::CastSpell,
         GameAction::ActivateAbility {
             source_id,

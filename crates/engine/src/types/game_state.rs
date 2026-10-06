@@ -13306,6 +13306,122 @@ impl GameState {
     /// caller can finalize or replay it; otherwise a crafted raw snapshot can
     /// smuggle an out-of-range actor/owner through serde and into the ordinary
     /// action boundary.
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    pub(crate) fn manual_resolution_source_is_supported(
+        &self,
+        actor: PlayerId,
+        entry: &StackEntry,
+    ) -> bool {
+        // This first prototype has no controlled-player operation authority.
+        // Reuse this eligibility check at designation, active operations, Finish,
+        // and checked restore so raw actions and interaction capabilities agree.
+        if crate::game::turn_control::live_authorized_submitter_for_player(self, actor) != actor {
+            return false;
+        }
+        let StackEntryKind::Spell {
+            ability,
+            casting_variant,
+            ..
+        } = &entry.kind
+        else {
+            return false;
+        };
+        let Some(object) = self.objects.get(&entry.id) else {
+            return false;
+        };
+        if entry.controller != actor
+            || object.owner != actor
+            || object.controller != actor
+            || object.zone != Zone::Stack
+            || object.is_token
+            || object.is_copy
+            || object.exile_from_stack_linked_source.is_some()
+            || object.exile_from_stack_rider.is_some()
+            || !casting_variant.is_normal()
+            || !(object.cast_from_zone == Some(Zone::Hand)
+                || ability
+                    .as_deref()
+                    .is_some_and(|spell| spell.context.cast_from_zone == Some(Zone::Hand)))
+            || object
+                .card_types
+                .core_types
+                .iter()
+                .any(|kind| kind.is_permanent_type())
+            || !object
+                .card_types
+                .core_types
+                .iter()
+                .any(|kind| matches!(kind, CoreType::Instant | CoreType::Sorcery))
+        {
+            return false;
+        }
+        let effective_keywords =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(self, entry.id);
+        let has_buyback = effective_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Buyback(_)));
+        // Manual Finish deliberately suppresses the spell's instruction
+        // chain. Reject keywords whose resolution-time work lives outside that
+        // chain so a manual designation cannot silently omit their hooks.
+        let has_unsupported_resolution_hook = effective_keywords.iter().any(|keyword| {
+            matches!(
+                keyword,
+                Keyword::Cipher | Keyword::Paradigm | Keyword::Rebound | Keyword::Epic
+            )
+        });
+        let paid_buyback = has_buyback
+            && (ability
+                .as_deref()
+                .is_some_and(|spell| spell.context.additional_cost_paid)
+                || self
+                    .stack_paid_facts
+                    .get(&entry.id)
+                    .is_some_and(|facts| facts.additional_cost_paid));
+        !paid_buyback && !has_unsupported_resolution_hook
+    }
+
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    pub(crate) fn validate_manual_resolution_state(&self) -> Result<(), String> {
+        let manual_wait = match &self.waiting_for {
+            WaitingFor::ManualResolution {
+                player,
+                stack_entry_id,
+            } => Some((*player, *stack_entry_id)),
+            _ => None,
+        };
+        match (self.manual_resolution_designation, manual_wait) {
+            (None, None) => Ok(()),
+            (None, Some(_)) => Err("manual-resolution wait has no saved designation".to_string()),
+            (Some(stack_entry_id), manual_wait) => {
+                let entry = self
+                    .stack
+                    .iter()
+                    .find(|entry| entry.id == stack_entry_id)
+                    .ok_or_else(|| {
+                        "manual-resolution designation is not on the stack".to_string()
+                    })?;
+                if !self.manual_resolution_source_is_supported(entry.controller, entry) {
+                    return Err(
+                        "manual-resolution designation is outside the supported source scope"
+                            .to_string(),
+                    );
+                }
+                if let Some((player, waiting_id)) = manual_wait {
+                    if waiting_id != stack_entry_id
+                        || player != entry.controller
+                        || self.stack.back().map(|top| top.id) != Some(stack_entry_id)
+                    {
+                        return Err(
+                            "manual-resolution wait does not own the designated stack top"
+                                .to_string(),
+                        );
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn validate_payment_transaction(&self) -> Result<(), String> {
         let Some(transaction) = self.payment_transaction.as_deref() else {
             return Ok(());
@@ -13689,6 +13805,10 @@ impl PersistedGameState {
         finalization: PersistedRestoreFinalization,
     ) -> Result<PreparedPersistedGameState, PersistedRestoreError> {
         let mut state = self.into_game_state_unchecked();
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        state
+            .validate_manual_resolution_state()
+            .map_err(PersistedRestoreError::UnsupportedFormat)?;
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
@@ -13814,6 +13934,14 @@ impl ZoneOpponentChooserPurpose {
 pub enum WaitingFor {
     Priority {
         player: PlayerId,
+    },
+    /// Native prototype: the designated exact stack occurrence has been
+    /// completely paused before its first instruction. Only its controller may
+    /// release it with `FinishManualResolution`.
+    #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+    ManualResolution {
+        player: PlayerId,
+        stack_entry_id: ObjectId,
     },
     /// Public Resolve All consent prompt. The protocol details and frozen
     /// submitter ledger remain in `GameState::resolve_all_consent_run`.
@@ -16767,6 +16895,8 @@ impl WaitingFor {
     pub fn variant_name(&self) -> &'static str {
         match self {
             WaitingFor::Priority { .. } => "Priority",
+            #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+            WaitingFor::ManualResolution { .. } => "ManualResolution",
             WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
             WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
@@ -16931,6 +17061,8 @@ impl WaitingFor {
             WaitingFor::ResolveAllReady { .. } => {
                 ActingAuthority::None(NoActor::ResolveAllReadyPrefix)
             }
+            #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+            WaitingFor::ManualResolution { player, .. } => ActingAuthority::One(*player),
             WaitingFor::Priority { player }
             | WaitingFor::ResolveAllConsent {
                 representative: player,
@@ -17281,6 +17413,8 @@ impl WaitingFor {
             WaitingFor::PayManaAbilityMana { .. } => true,
             // Every other prompt is not part of a mana ability's activation.
             // Listed rather than `_` so a new prompt has to be classified.
+            #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+            WaitingFor::ManualResolution { .. } => false,
             WaitingFor::Priority { .. }
             | WaitingFor::ResolveAllConsent { .. }
             | WaitingFor::ResolveAllReady { .. }
@@ -19705,6 +19839,7 @@ fn stack_bound_reveals_is_empty(
 macro_rules! declare_game_state {
     (
         $(
+            $( @cfg($cfg:meta) )?
             $(#[$attribute:meta])*
             $visibility:vis $field:ident: $field_type:ty,
         )*
@@ -19712,6 +19847,7 @@ macro_rules! declare_game_state {
         #[derive(Debug, Clone, Serialize)]
         pub struct GameState {
             $(
+                $(#[cfg($cfg)])?
                 $(#[$attribute])*
                 $visibility $field: $field_type,
             )*
@@ -19720,6 +19856,7 @@ macro_rules! declare_game_state {
         #[derive(Deserialize)]
         struct RawGameStateFields {
             $(
+                $(#[cfg($cfg)])?
                 $(#[$attribute])*
                 $visibility $field: $field_type,
             )*
@@ -19729,11 +19866,13 @@ macro_rules! declare_game_state {
             fn from(raw: RawGameStateFields) -> Self {
                 let RawGameStateFields {
                     $(
+                        $(#[cfg($cfg)])?
                         $field,
                     )*
                 } = raw;
                 Self {
                     $(
+                        $(#[cfg($cfg)])?
                         $field,
                     )*
                 }
@@ -19842,6 +19981,11 @@ declare_game_state! {
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
     pub stack: im::Vector<StackEntry>,
+    @cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))
+    /// Native prototype: exact cast occurrence explicitly designated to pause
+    /// before resolution. Omitted when absent to preserve the default save shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) manual_resolution_designation: Option<ObjectId>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub stack_paid_facts: HashMap<ObjectId, StackPaidSnapshot>,
@@ -22320,6 +22464,13 @@ pub(crate) enum GameStateDecodeMode {
     ResolutionWireV2,
     ResolutionWireV3,
     ResolutionWireV4,
+    /// Native manual-resolution wire. Older readers reject this declared
+    /// version instead of dropping its exact-source state as an unknown field.
+    #[cfg_attr(
+        not(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32"))),
+        allow(dead_code)
+    )]
+    ResolutionWireV5,
     DirectCurrentRaw,
 }
 
@@ -22680,6 +22831,7 @@ impl GameStateDecode {
             | GameStateDecodeMode::ResolutionWireV2
             | GameStateDecodeMode::ResolutionWireV3
             | GameStateDecodeMode::ResolutionWireV4
+            | GameStateDecodeMode::ResolutionWireV5
             | GameStateDecodeMode::DirectCurrentRaw => {
                 return Err("invalid persisted resolution-state decode mode".to_string());
             }
@@ -22708,6 +22860,29 @@ impl GameStateDecode {
     ) -> Result<GameState, String> {
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        if matches!(mode, GameStateDecodeMode::DirectCurrentRaw)
+            && (value
+                .get("manual_resolution_designation")
+                .is_some_and(|designation| !designation.is_null())
+                || value
+                    .get("waiting_for")
+                    .and_then(|waiting| waiting.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ManualResolution"))
+        {
+            return Err(
+                "manual-resolution state requires the versioned trusted persistence boundary"
+                    .to_string(),
+            );
+        }
+        #[cfg(not(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32"))))]
+        if value
+            .get("manual_resolution_designation")
+            .is_some_and(|designation| !designation.is_null())
+        {
+            return Err("manual-resolution persistence is unavailable in this build".to_string());
+        }
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
             migrate_legacy_trigger_firing_carriers(
@@ -22759,6 +22934,7 @@ impl GameStateDecode {
                 | GameStateDecodeMode::ResolutionWireV2
                 | GameStateDecodeMode::ResolutionWireV3
                 | GameStateDecodeMode::ResolutionWireV4
+                | GameStateDecodeMode::ResolutionWireV5
         ));
         reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
@@ -24349,6 +24525,10 @@ impl GameState {
     /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
     /// and `CancelCast` predicate.
     pub fn withholds_priority(&self) -> bool {
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+        if matches!(self.waiting_for, WaitingFor::ManualResolution { .. }) {
+            return true;
+        }
         self.pending_cast.is_some()
             || self.waiting_for.has_pending_cast()
             || self
@@ -27457,6 +27637,8 @@ impl GameState {
             active_spend_only_on_x_count: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
+            #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+            manual_resolution_designation: None,
             stack_paid_facts: HashMap::new(),
             exile: im::Vector::new(),
             command_zone: im::Vector::new(),
@@ -29827,6 +30009,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_spend_only_on_x_count: _,
         battlefield: _,
         stack: _,
+        #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+            manual_resolution_designation: _,
         stack_paid_facts: _,
         exile: _,
         command_zone: _,
@@ -30238,6 +30422,16 @@ impl PartialEq for GameState {
             && self.resolved_rules_journal == other.resolved_rules_journal
             && self.battlefield == other.battlefield
             && self.stack == other.stack
+            && {
+                #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
+                {
+                    self.manual_resolution_designation == other.manual_resolution_designation
+                }
+                #[cfg(not(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32"))))]
+                {
+                    true
+                }
+            }
             && self.stack_paid_facts == other.stack_paid_facts
             && self.exile == other.exile
             && self.command_zone == other.command_zone
