@@ -244,9 +244,9 @@ async function campaign() {
   let staleBefore = await raw();
   await adapter.submitInteraction(stale, actor).then(() => check(false, 'old-capability-refused'), e => {
     globalThis.__qaStaleRejection = {
-      adapterCode: typeof e?.code === 'string' ? e.code.slice(0, 64) : null,
-      rejectionCode: typeof e?.rejection?.code === 'string' ? e.rejection.code.slice(0, 64) : null,
-      disposition: typeof e?.rejection?.disposition === 'string' ? e.rejection.disposition.slice(0, 32) : null,
+      adapterCode: [AdapterErrorCode.STALE_ACTION, AdapterErrorCode.ACTION_REJECTED].includes(e?.code) ? e.code : e?.code === undefined ? null : 'other',
+      rejectionCode: e?.rejection?.code === 'stale_interaction' ? 'stale_interaction' : e?.rejection?.code === undefined ? null : 'other',
+      disposition: e?.rejection?.disposition === 'stale' ? 'stale' : e?.rejection?.disposition === undefined ? null : 'other',
       recoverable: typeof e?.recoverable === 'boolean' ? e.recoverable : null,
     };
     check(e?.code === AdapterErrorCode.STALE_ACTION && e.rejection?.code === 'stale_interaction'
