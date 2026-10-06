@@ -21,7 +21,9 @@ limit = 13 * GIB
 disk_min = 4 * GIB
 label, *argv = sys.argv[1:]
 assert argv and label.replace("-", "").isalnum()
-timeout_seconds = 2400 if label == "baseline-wasm-build" else 1500
+timeout_seconds = 2400 if label in {
+    "baseline-wasm-build", "candidate-wasm-off-build", "candidate-wasm-enabled-build"
+} else 1500
 evidence = Path(os.environ["MANUAL_EVIDENCE"])
 evidence.mkdir(parents=True, exist_ok=True)
 assert not (evidence / (label + ".json")).exists(), "do not retry a recorded command"
@@ -171,12 +173,6 @@ finally:
 print(json.dumps({"label": label, "argv": argv, "exit_code": code,
                   "effective_exit": effective_exit, "stop_reason": reason}))
 if effective_exit != 0:
-    log_path = evidence / (label + ".log")
-    if log_path.exists():
-        with log_path.open("rb") as stream:
-            stream.seek(max(0, log_path.stat().st_size - 6000))
-            tail = stream.read().decode(errors="replace")
-        for line in tail.splitlines()[-30:]:
-            line = line.replace(str(Path.cwd()), "<source>").replace(os.environ.get("RUNNER_TEMP", "<runner-temp>"), "<runner-temp>")
-            print("[failed command] " + line)
+    print(json.dumps({"failed_command": label, "exit_code": code,
+                      "effective_exit": effective_exit, "guard_stopped": reason is not None}))
 sys.exit(effective_exit)

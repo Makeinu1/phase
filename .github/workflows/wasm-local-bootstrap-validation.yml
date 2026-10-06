@@ -2,7 +2,7 @@ name: Fork Local Worker bootstrap validation
 
 on:
   push:
-    branches: [experiment/manual-wasm-native-off-diagnostic, experiment/manual-wasm-native-off-reuse-diagnostic]
+    branches: [experiment/manual-wasm-native-off-diagnostic, experiment/manual-wasm-native-off-reuse-diagnostic, experiment/manual-wasm-stage1-validation]
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [experiment/manual-integration-actions]
@@ -33,6 +33,10 @@ env:
   BOOTSTRAP_RUNTIME_ZIP_SIZE: '23323649'
   BOOTSTRAP_PROVENANCE_SHA256: '4b6bbd36a78d3a3055d3b159d130962b609a3ac5c8120bff1b3eade7fd79f0cd'
   BOOTSTRAP_RUNTIME_FILES: '{"engine_wasm.d.ts":{"sha256":"8bc1cc21a04d46529e415df480db3a129baa4f535c21de6b4535c652bac54bab","size":39992},"engine_wasm.js":{"sha256":"4627c04238353d0e2a427b78b802fe1a9437aee87ef27361ff971bc57e85ae9b","size":70262},"engine_wasm_bg.wasm":{"sha256":"ebd72d24d302ec93b471fe84a7e536f3cbce74268d784d33b11b35391d133050","size":129410984},"engine_wasm_bg.wasm.d.ts":{"sha256":"5f945f48384458a2bbd2ea5f1de6037f05f049598444ad851d365e633704bf3b","size":6112}}'
+  STAGE1_GUARD_SHA256: efd477e5cdfc4cdc645546287de00649922f9458f33151d7aafaee4640b62aee
+  STAGE1_NATIVE_ENABLED_REF: ''
+  STAGE1_WASM_OFF_REF: ''
+  STAGE1_WASM_ENABLED_REF: ''
   MANUAL_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
   MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-evidence
   CARGO_INCREMENTAL: '0'
@@ -2867,3 +2871,1449 @@ jobs:
         if-no-files-found: error
         retention-days: 7
         overwrite: false
+
+  stage1-native-producer:
+    if: github.repository == 'Makeinu1/phase' && github.repository_id == '1377698441' && github.event_name == 'push' && github.run_attempt == 1 && github.ref == 'refs/heads/experiment/manual-wasm-stage1-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      MANUAL_EXPECTED_SOURCE_SHA: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+      MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-stage1-native-producer-evidence
+      RUST_MIN_STACK: '16777216'
+      STAGE1_JOB_NAME: stage1-native-producer
+    steps:
+    - name: Checkout immutable Stage1 product source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+        path: candidate-source
+        persist-credentials: false
+    - name: Checkout immutable Stage1 validation source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        path: validation-source
+        persist-credentials: false
+    - name: Admit clean immutable Stage1 sources
+      working-directory: candidate-source
+      run: |
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source 2>/dev/null
+      id: source-admission
+    - name: Capture Stage1 resource preflight
+      working-directory: candidate-source
+      run: |
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-native-target"
+        printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Select finite retained feature states
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: selection
+    - name: Create external native archive directory
+      working-directory: candidate-source
+      run: |
+        mkdir "$RUNNER_TEMP/bootstrap-native-archives"
+    - name: Admit retained native archive and check boundaries
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native != 'EMPTY'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_FEATURE: native
+        STAGE1_REFERENCE: ${{ env.STAGE1_NATIVE_ENABLED_REF }}
+        STAGE1_REQUIRE_FULL: 'false'
+    - name: Install pinned Stage1 Rust tools
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+      with:
+        toolchain: nightly-2026-04-19
+        rust-src-dir: candidate-source
+        cache: false
+        rustflags: ''
+        components: rustfmt,clippy,rustc-codegen-cranelift-preview
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Install pinned Stage1 nextest
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      with:
+        tool: cargo-nextest@0.9.146
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Verify actual Stage1 Rust tools
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tools 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Build the single missing native enabled archive
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-enabled-archive bash -euo pipefail -c 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config '"'"'profile.test.codegen-backend="cranelift"'"'"' -p engine-wasm --lib --no-default-features --features manual_resolution_local_bootstrap --archive-file "$RUNNER_TEMP/bootstrap-native-archives/enabled.tar.zst" >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-enabled-archive 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Check native archive source after
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-archive-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-archive-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Package enabled native public output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-native-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-native-package 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-native-package
+      if: steps.selection.outputs.native == 'EMPTY'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: native
+    - name: Retain enabled native public output
+      id: enabled-native-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-native
+        path: ${{ steps.enabled-native-package.outputs.paths }}
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Pin actual enabled native upload metadata
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-native-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-native-pins 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-native-pins
+      if: steps.selection.outputs.native == 'EMPTY'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: native
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_UPLOAD_ID: ${{ steps.enabled-native-upload.outputs.artifact-id }}
+        STAGE1_UPLOAD_DIGEST: ${{ steps.enabled-native-upload.outputs.artifact-digest }}
+    - name: Retain measured enabled-native reference mirror
+      id: enabled-native-mirror
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-native-reference
+        path: |-
+          bootstrap-stage1-native-producer-evidence/native-reference.json
+          bootstrap-stage1-native-producer-evidence/enabled-native-descriptor.json
+          bootstrap-stage1-native-producer-evidence/source-manifest.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Check exact Rust formatting
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-format 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Check exact candidate clippy
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-clippy bash -euo pipefail -c 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\"cranelift\"" -- -D warnings >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-clippy 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Check native checks source after
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-checks-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-checks-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Package enabled checks public output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-checks-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-checks-package 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-checks-package
+      if: steps.selection.outputs.native == 'EMPTY'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: checks
+    - name: Retain enabled checks public output
+      id: enabled-checks-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-checks
+        path: ${{ steps.enabled-checks-package.outputs.paths }}
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Pin actual enabled checks upload metadata
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-checks-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-checks-pins 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-checks-pins
+      if: steps.selection.outputs.native == 'EMPTY'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: checks
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_UPLOAD_ID: ${{ steps.enabled-checks-upload.outputs.artifact-id }}
+        STAGE1_UPLOAD_DIGEST: ${{ steps.enabled-checks-upload.outputs.artifact-digest }}
+    - name: Retain measured enabled-checks reference mirror
+      id: enabled-checks-mirror
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-checks-reference
+        path: |-
+          bootstrap-stage1-native-producer-evidence/native-reference.json
+          bootstrap-stage1-native-producer-evidence/enabled-checks-descriptor.json
+          bootstrap-stage1-native-producer-evidence/source-manifest.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.native == 'EMPTY'
+    - name: Check final Stage1 native source
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: always() && steps.source-admission.outcome == 'success'
+    - name: Expose admitted native reference
+      working-directory: candidate-source
+      run: |
+        python3 - 2>/dev/null <<'STAGE1_REFERENCES'
+        import json, os
+        from pathlib import Path
+        try:
+            root = Path(os.environ['MANUAL_EVIDENCE'])
+            with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+                reference = json.loads((root / 'native-reference.json').read_text())
+                assert reference['checks'] is not None
+                output.write('native_reference=' + json.dumps(reference,separators=(',',':')) + '\n')
+            print('{"complete_retained_references_available":true}')
+        except Exception:
+            print('{"error":"stage1-complete-reference-missing"}')
+            raise SystemExit(1)
+        STAGE1_REFERENCES
+      id: references
+    - name: Retain exact safe Stage1 evidence
+      id: evidence-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-native-producer-evidence
+        path: |-
+          bootstrap-stage1-native-producer-evidence/source-manifest.json
+          bootstrap-stage1-native-producer-evidence/selection.json
+          bootstrap-stage1-native-producer-evidence/tool-manifest.json
+          bootstrap-stage1-native-producer-evidence/native-reference.json
+          bootstrap-stage1-native-producer-evidence/native-admission.json
+          bootstrap-stage1-native-producer-evidence/enabled-native-descriptor.json
+          bootstrap-stage1-native-producer-evidence/enabled-checks-descriptor.json
+          bootstrap-stage1-native-producer-evidence/stage1-source-before.json
+          bootstrap-stage1-native-producer-evidence/stage1-source-before-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-selection.json
+          bootstrap-stage1-native-producer-evidence/stage1-selection-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-native-admission.json
+          bootstrap-stage1-native-producer-evidence/stage1-native-admission-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-rust-tools.json
+          bootstrap-stage1-native-producer-evidence/stage1-rust-tools-result.json
+          bootstrap-stage1-native-producer-evidence/candidate-native-enabled-archive.json
+          bootstrap-stage1-native-producer-evidence/candidate-native-enabled-archive-result.json
+          bootstrap-stage1-native-producer-evidence/native-archive-source-after.json
+          bootstrap-stage1-native-producer-evidence/native-archive-source-after-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-native-package.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-native-package-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-native-pins.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-native-pins-result.json
+          bootstrap-stage1-native-producer-evidence/candidate-format.json
+          bootstrap-stage1-native-producer-evidence/candidate-format-result.json
+          bootstrap-stage1-native-producer-evidence/candidate-clippy.json
+          bootstrap-stage1-native-producer-evidence/candidate-clippy-result.json
+          bootstrap-stage1-native-producer-evidence/native-checks-source-after.json
+          bootstrap-stage1-native-producer-evidence/native-checks-source-after-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-checks-package.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-checks-package-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-checks-pins.json
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-checks-pins-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-source-after.json
+          bootstrap-stage1-native-producer-evidence/stage1-source-after-result.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: always()
+    outputs:
+      native_reference: ${{ steps.references.outputs.native_reference }}
+  stage1-wasm-producer:
+    if: github.repository == 'Makeinu1/phase' && github.repository_id == '1377698441' && github.event_name == 'push' && github.run_attempt == 1 && github.ref == 'refs/heads/experiment/manual-wasm-stage1-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      MANUAL_EXPECTED_SOURCE_SHA: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+      MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-stage1-wasm-producer-evidence
+      RUST_MIN_STACK: '16777216'
+      STAGE1_JOB_NAME: stage1-wasm-producer
+    steps:
+    - name: Checkout immutable Stage1 product source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+        path: candidate-source
+        persist-credentials: false
+    - name: Checkout immutable Stage1 validation source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        path: validation-source
+        persist-credentials: false
+    - name: Admit clean immutable Stage1 sources
+      working-directory: candidate-source
+      run: |
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source 2>/dev/null
+      id: source-admission
+    - name: Capture Stage1 resource preflight
+      working-directory: candidate-source
+      run: |
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-wasm-target"
+        printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Select finite retained feature states
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: selection
+    - name: Create external native admission directory
+      working-directory: candidate-source
+      run: |
+        mkdir "$RUNNER_TEMP/bootstrap-native-archives"
+    - name: Admit chained native archive and all native checks
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_FEATURE: native
+        STAGE1_REFERENCE: ${{ needs.stage1-native-producer.outputs.native_reference }}
+        STAGE1_REQUIRE_FULL: 'true'
+    - name: Admit retained off raw or full output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.off != 'EMPTY'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_FEATURE: 'off'
+        STAGE1_REFERENCE: ${{ env.STAGE1_WASM_OFF_REF }}
+        STAGE1_REQUIRE_FULL: 'false'
+    - name: Admit retained enabled raw or full output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.enabled != 'EMPTY'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_FEATURE: enabled
+        STAGE1_REFERENCE: ${{ env.STAGE1_WASM_ENABLED_REF }}
+        STAGE1_REQUIRE_FULL: 'false'
+    - name: Install pinned Stage1 Rust tools
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+      with:
+        toolchain: nightly-2026-04-19
+        rust-src-dir: candidate-source
+        cache: false
+        rustflags: ''
+        components: rustfmt
+        target: wasm32-unknown-unknown
+      if: steps.selection.outputs.off != 'FULL' || steps.selection.outputs.enabled != 'FULL'
+    - name: Install pinned Stage1 bindgen
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      with:
+        tool: wasm-bindgen-cli@0.2.121
+      if: steps.selection.outputs.off != 'FULL' || steps.selection.outputs.enabled != 'FULL'
+    - name: Verify actual Stage1 Rust tools
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py wasm-tools 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.off != 'FULL' || steps.selection.outputs.enabled != 'FULL'
+    - name: Stage admitted off RAW at the existing bindgen input
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-input python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py raw-input 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-input 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.off == 'RAW'
+      env:
+        STAGE1_FEATURE: 'off'
+    - name: Build the single missing off WASM
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-build 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.off == 'EMPTY'
+    - name: Check off raw source after
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-off-raw-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-off-raw-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.off == 'EMPTY'
+    - name: Package off raw public output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-package 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: off-raw-package
+      if: steps.selection.outputs.off == 'EMPTY'
+      env:
+        STAGE1_FEATURE: 'off'
+        STAGE1_KIND: raw
+    - name: Retain off raw public output
+      id: off-raw-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-off-raw
+        path: ${{ steps.off-raw-package.outputs.paths }}
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.off == 'EMPTY'
+    - name: Pin actual off raw upload metadata
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-pins 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: off-raw-pins
+      if: steps.selection.outputs.off == 'EMPTY'
+      env:
+        STAGE1_FEATURE: 'off'
+        STAGE1_KIND: raw
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_UPLOAD_ID: ${{ steps.off-raw-upload.outputs.artifact-id }}
+        STAGE1_UPLOAD_DIGEST: ${{ steps.off-raw-upload.outputs.artifact-digest }}
+    - name: Retain measured off-raw reference mirror
+      id: off-raw-mirror
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-off-raw-reference
+        path: |-
+          bootstrap-stage1-wasm-producer-evidence/off-reference.json
+          bootstrap-stage1-wasm-producer-evidence/off-raw-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/source-manifest.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.off == 'EMPTY'
+    - name: Bind the remaining off WASM
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-off" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-bindgen 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.off != 'FULL'
+    - name: Check off full source after
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-off-full-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-off-full-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.off != 'FULL'
+    - name: Package off full public output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-full-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-full-package 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: off-full-package
+      if: steps.selection.outputs.off != 'FULL'
+      env:
+        STAGE1_FEATURE: 'off'
+        STAGE1_KIND: full
+    - name: Retain off full public output
+      id: off-full-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-off-full
+        path: ${{ steps.off-full-package.outputs.paths }}
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.off != 'FULL'
+    - name: Pin actual off full upload metadata
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-full-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-full-pins 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: off-full-pins
+      if: steps.selection.outputs.off != 'FULL'
+      env:
+        STAGE1_FEATURE: 'off'
+        STAGE1_KIND: full
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_UPLOAD_ID: ${{ steps.off-full-upload.outputs.artifact-id }}
+        STAGE1_UPLOAD_DIGEST: ${{ steps.off-full-upload.outputs.artifact-digest }}
+    - name: Retain measured off-full reference mirror
+      id: off-full-mirror
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-off-full-reference
+        path: |-
+          bootstrap-stage1-wasm-producer-evidence/off-reference.json
+          bootstrap-stage1-wasm-producer-evidence/off-full-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/source-manifest.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.off != 'FULL'
+    - name: Stage admitted enabled RAW at the existing bindgen input
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-input python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py raw-input 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-input 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.enabled == 'RAW'
+      env:
+        STAGE1_FEATURE: enabled
+    - name: Build the single missing enabled WASM
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --features manual_resolution_local_bootstrap >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-build 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.enabled == 'EMPTY'
+    - name: Check enabled raw source after
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-enabled-raw-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-enabled-raw-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.enabled == 'EMPTY'
+    - name: Package enabled raw public output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-package 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-raw-package
+      if: steps.selection.outputs.enabled == 'EMPTY'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: raw
+    - name: Retain enabled raw public output
+      id: enabled-raw-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-raw
+        path: ${{ steps.enabled-raw-package.outputs.paths }}
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.enabled == 'EMPTY'
+    - name: Pin actual enabled raw upload metadata
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-pins 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-raw-pins
+      if: steps.selection.outputs.enabled == 'EMPTY'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: raw
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_UPLOAD_ID: ${{ steps.enabled-raw-upload.outputs.artifact-id }}
+        STAGE1_UPLOAD_DIGEST: ${{ steps.enabled-raw-upload.outputs.artifact-digest }}
+    - name: Retain measured enabled-raw reference mirror
+      id: enabled-raw-mirror
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-raw-reference
+        path: |-
+          bootstrap-stage1-wasm-producer-evidence/enabled-reference.json
+          bootstrap-stage1-wasm-producer-evidence/enabled-raw-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/source-manifest.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.enabled == 'EMPTY'
+    - name: Bind the remaining enabled WASM
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-enabled" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-bindgen 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.enabled != 'FULL'
+    - name: Check enabled full source after
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-enabled-full-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-enabled-full-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.enabled != 'FULL'
+    - name: Package enabled full public output
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-full-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-full-package 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-full-package
+      if: steps.selection.outputs.enabled != 'FULL'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: full
+    - name: Retain enabled full public output
+      id: enabled-full-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-full
+        path: ${{ steps.enabled-full-package.outputs.paths }}
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.enabled != 'FULL'
+    - name: Pin actual enabled full upload metadata
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-full-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-full-pins 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: enabled-full-pins
+      if: steps.selection.outputs.enabled != 'FULL'
+      env:
+        STAGE1_FEATURE: enabled
+        STAGE1_KIND: full
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_UPLOAD_ID: ${{ steps.enabled-full-upload.outputs.artifact-id }}
+        STAGE1_UPLOAD_DIGEST: ${{ steps.enabled-full-upload.outputs.artifact-digest }}
+    - name: Retain measured enabled-full reference mirror
+      id: enabled-full-mirror
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-enabled-full-reference
+        path: |-
+          bootstrap-stage1-wasm-producer-evidence/enabled-reference.json
+          bootstrap-stage1-wasm-producer-evidence/enabled-full-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/source-manifest.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: steps.selection.outputs.enabled != 'FULL'
+    - name: Check final Stage1 WASM source
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: always() && steps.source-admission.outcome == 'success'
+    - name: Expose admitted two full WASM references
+      working-directory: candidate-source
+      run: |
+        python3 - 2>/dev/null <<'STAGE1_REFERENCES'
+        import json, os
+        from pathlib import Path
+        try:
+            root = Path(os.environ['MANUAL_EVIDENCE'])
+            with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+                reference = json.loads((root / 'off-reference.json').read_text())
+                assert reference['full'] is not None
+                output.write('off_reference=' + json.dumps(reference,separators=(',',':')) + '\n')
+                reference = json.loads((root / 'enabled-reference.json').read_text())
+                assert reference['full'] is not None
+                output.write('enabled_reference=' + json.dumps(reference,separators=(',',':')) + '\n')
+            print('{"complete_retained_references_available":true}')
+        except Exception:
+            print('{"error":"stage1-complete-reference-missing"}')
+            raise SystemExit(1)
+        STAGE1_REFERENCES
+      id: references
+    - name: Retain exact safe Stage1 evidence
+      id: evidence-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-wasm-producer-evidence
+        path: |-
+          bootstrap-stage1-wasm-producer-evidence/source-manifest.json
+          bootstrap-stage1-wasm-producer-evidence/selection.json
+          bootstrap-stage1-wasm-producer-evidence/tool-manifest.json
+          bootstrap-stage1-wasm-producer-evidence/native-reference.json
+          bootstrap-stage1-wasm-producer-evidence/native-admission.json
+          bootstrap-stage1-wasm-producer-evidence/off-reference.json
+          bootstrap-stage1-wasm-producer-evidence/off-admission.json
+          bootstrap-stage1-wasm-producer-evidence/off-raw-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/off-full-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/enabled-reference.json
+          bootstrap-stage1-wasm-producer-evidence/enabled-admission.json
+          bootstrap-stage1-wasm-producer-evidence/enabled-raw-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/enabled-full-descriptor.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-source-before.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-source-before-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-selection.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-selection-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-native-admission.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-native-admission-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-admission.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-admission-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-admission.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-admission-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-rust-tools.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-rust-tools-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-source-after.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-source-after-result.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-build.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-build-result.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-off-raw-source-after.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-off-raw-source-after-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-package.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-package-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-pins.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-pins-result.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-bindgen.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-bindgen-result.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-off-full-source-after.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-off-full-source-after-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-full-package.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-full-package-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-full-pins.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-full-pins-result.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-build.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-build-result.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-enabled-raw-source-after.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-enabled-raw-source-after-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-package.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-package-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-pins.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-pins-result.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-bindgen.json
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-bindgen-result.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-enabled-full-source-after.json
+          bootstrap-stage1-wasm-producer-evidence/wasm-enabled-full-source-after-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-package.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-package-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-pins.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-pins-result.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: always()
+    needs:
+    - stage1-native-producer
+    outputs:
+      off_reference: ${{ steps.references.outputs.off_reference }}
+      enabled_reference: ${{ steps.references.outputs.enabled_reference }}
+  stage1-validation-green:
+    if: github.repository == 'Makeinu1/phase' && github.repository_id == '1377698441' && github.event_name == 'push' && github.run_attempt == 1 && github.ref == 'refs/heads/experiment/manual-wasm-stage1-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      MANUAL_EXPECTED_SOURCE_SHA: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+      MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-stage1-validation-green-evidence
+      RUST_MIN_STACK: '16777216'
+      STAGE1_JOB_NAME: stage1-validation-green
+    steps:
+    - name: Checkout immutable Stage1 product source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+        path: candidate-source
+        persist-credentials: false
+    - name: Checkout immutable Stage1 validation source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        path: validation-source
+        persist-credentials: false
+    - name: Checkout immutable baseline source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ env.BOOTSTRAP_BASE_SHA }}
+        path: baseline-source
+        persist-credentials: false
+    - name: Admit clean immutable Stage1 sources
+      working-directory: candidate-source
+      run: |
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source 2>/dev/null
+      id: source-admission
+    - name: Capture Stage1 resource preflight
+      working-directory: candidate-source
+      run: |
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-native-target"
+        printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Select finite retained feature states
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      id: selection
+    - name: Admit protected baseline identity without building
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-baseline-identity python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py baseline-identity 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-baseline-identity 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Capture immutable baseline resource and source boundary
+      working-directory: candidate-source
+      run: |
+        cd ../baseline-source
+        export MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA"
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-source-before true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-source-before 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Admit exact proven retained OFF producer metadata
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-native-metadata python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py off-metadata 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-native-metadata 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      env:
+        GH_TOKEN: ${{ github.token }}
+    - name: Download only the admitted retained OFF archive
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        artifact-ids: '11438377287'
+        github-token: ${{ github.token }}
+        repository: Makeinu1/phase
+        run-id: '37518173142'
+        merge-multiple: true
+        path: ${{ runner.temp }}/bootstrap-native-archives
+    - name: Admit exact proven retained OFF archive bytes
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-native-archive-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py off-archive 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-native-archive-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Admit chained native archive and all native check boundaries
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_FEATURE: native
+        STAGE1_REFERENCE: ${{ needs.stage1-native-producer.outputs.native_reference }}
+        STAGE1_REQUIRE_FULL: 'true'
+    - name: Admit complete off runtime before any import
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_FEATURE: 'off'
+        STAGE1_REFERENCE: ${{ needs.stage1-wasm-producer.outputs.off_reference }}
+        STAGE1_REQUIRE_FULL: 'true'
+    - name: Admit complete enabled runtime before any import
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-admission 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE1_FEATURE: enabled
+        STAGE1_REFERENCE: ${{ needs.stage1-wasm-producer.outputs.enabled_reference }}
+        STAGE1_REQUIRE_FULL: 'true'
+    - name: Install pinned Stage1 Rust tools
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+      with:
+        toolchain: nightly-2026-04-19
+        rust-src-dir: candidate-source
+        cache: false
+        rustflags: ''
+        components: rustc-codegen-cranelift-preview
+    - name: Install pinned Stage1 nextest
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      with:
+        tool: cargo-nextest@0.9.146
+    - name: Verify actual Stage1 Rust tools
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tools 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Compare admitted producer tools with actual current native tools
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-current-tools-match python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py tools-match 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-current-tools-match 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Execute actual no-build native off collector
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-off-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tests 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-off-tests 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      env:
+        BOOTSTRAP_NATIVE_ARTIFACT: 'off'
+        BOOTSTRAP_NATIVE_TEST_COUNT: '10'
+    - name: Execute actual no-build native enabled collector
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-enabled-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tests 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-enabled-tests 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      env:
+        BOOTSTRAP_NATIVE_ARTIFACT: enabled
+        BOOTSTRAP_NATIVE_TEST_COUNT: '16'
+    - name: Verify complete generated declaration contract
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-declarations python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py declarations 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-declarations 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Install pinned consumer pnpm
+      uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+      with:
+        version: 9.15.9
+    - name: Install pinned consumer Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22.16.0
+    - name: Verify actual hosted tools without browser downloads
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py hosted-tools bash -euo pipefail 2>/dev/null <<'STAGE1_HOSTED_TOOLS'
+        exec 2>/dev/null
+        command -v google-chrome curl jq >/dev/null
+        driver_binary=$(command -v chromedriver || true)
+        if [ -z "$driver_binary" ] && [ -n "${CHROMEWEBDRIVER:-}" ]; then
+          driver_binary="$CHROMEWEBDRIVER/chromedriver"
+        fi
+        test -n "$driver_binary"
+        test -x "$driver_binary"
+        printf 'BOOTSTRAP_CHROMEDRIVER=%s\n' "$driver_binary" >> "$GITHUB_ENV"
+        test "$(node --version)" = v22.16.0
+        test "$(pnpm --version)" = 9.15.9
+        chrome_major=$(google-chrome --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+        driver_major=$("$driver_binary" --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+        test "$chrome_major" = "$driver_major"
+        test -z "${ENGINE_WASM_URL:-}"
+        printf '{"hosted_tools_verified":true}\n'
+        STAGE1_HOSTED_TOOLS
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" hosted-tools 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Install one frozen candidate client dependency tree
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-dependencies bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-dependencies 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Check full candidate client types
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-types bash -euo pipefail -c 'pnpm --dir client run type-check >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-types 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Lint full candidate client
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-lint bash -euo pipefail -c 'pnpm --dir client run lint >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-lint 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Check candidate protocol
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-protocol bash -euo pipefail -c 'pnpm --dir client run protocol:check >/dev/null 2>&1' 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-protocol 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Copy only the admitted ignored off runtime
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-runtime-copy python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py copy-runtime 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-runtime-copy 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Run all 102 selected adapter tests
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-adapter-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py adapter-tests 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-adapter-tests 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Run actual complete candidate enabled page
+      working-directory: candidate-source
+      run: |
+        exec 2>/dev/null
+        export BOOTSTRAP_CANDIDATE_ARTIFACT=enabled
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+        if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
+        # Existing hosted browser/driver inventory and direct documented W3C API:
+        # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
+        # https://developer.chrome.com/docs/chromedriver/get-started
+        # https://www.w3.org/TR/webdriver2/#execute-async-script
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail ../validation-source/scripts/ci/stage1-bootstrap-browser.sh
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-enabled-browser 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Run actual complete candidate off page
+      working-directory: candidate-source
+      run: |
+        exec 2>/dev/null
+        export BOOTSTRAP_CANDIDATE_ARTIFACT=off
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+        if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
+        # Existing hosted browser/driver inventory and direct documented W3C API:
+        # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
+        # https://developer.chrome.com/docs/chromedriver/get-started
+        # https://www.w3.org/TR/webdriver2/#execute-async-script
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail ../validation-source/scripts/ci/stage1-bootstrap-browser.sh
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-off-browser 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Check final current product source
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: always() && steps.source-admission.outcome == 'success'
+    - name: Check final immutable baseline source
+      working-directory: candidate-source
+      run: |
+        cd ../baseline-source
+        export MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA"
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-source-after true 2>/dev/null
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-source-after 2>/dev/null
+        projection_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: always() && steps.source-admission.outcome == 'success'
+    - name: Independently adjudicate complete Stage1 candidate GREEN
+      working-directory: candidate-source
+      run: |
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py green 2>/dev/null
+      if: always() && steps.source-admission.outcome == 'success'
+    - name: Retain exact safe Stage1 evidence
+      id: evidence-upload
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-stage1-validation-green-evidence
+        path: |-
+          bootstrap-stage1-validation-green-evidence/source-manifest.json
+          bootstrap-stage1-validation-green-evidence/selection.json
+          bootstrap-stage1-validation-green-evidence/producer-manifest.json
+          bootstrap-stage1-validation-green-evidence/archive-manifest.json
+          bootstrap-stage1-validation-green-evidence/tool-manifest.json
+          bootstrap-stage1-validation-green-evidence/native-reference.json
+          bootstrap-stage1-validation-green-evidence/native-admission.json
+          bootstrap-stage1-validation-green-evidence/off-reference.json
+          bootstrap-stage1-validation-green-evidence/enabled-reference.json
+          bootstrap-stage1-validation-green-evidence/off-admission.json
+          bootstrap-stage1-validation-green-evidence/enabled-admission.json
+          bootstrap-stage1-validation-green-evidence/enabled-native-descriptor.json
+          bootstrap-stage1-validation-green-evidence/enabled-checks-descriptor.json
+          bootstrap-stage1-validation-green-evidence/off-raw-descriptor.json
+          bootstrap-stage1-validation-green-evidence/off-full-descriptor.json
+          bootstrap-stage1-validation-green-evidence/enabled-raw-descriptor.json
+          bootstrap-stage1-validation-green-evidence/enabled-full-descriptor.json
+          bootstrap-stage1-validation-green-evidence/runner-off-error.json
+          bootstrap-stage1-validation-green-evidence/runner-enabled-error.json
+          bootstrap-stage1-validation-green-evidence/red-adjudication.json
+          bootstrap-stage1-validation-green-evidence/adapter-assertions.json
+          bootstrap-stage1-validation-green-evidence/baseline-terminal.json
+          bootstrap-stage1-validation-green-evidence/product-terminal.json
+          bootstrap-stage1-validation-green-evidence/baseline-source.txt
+          bootstrap-stage1-validation-green-evidence/served-artifacts.sha256
+          bootstrap-stage1-validation-green-evidence/stage1-source-before.json
+          bootstrap-stage1-validation-green-evidence/stage1-source-before-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-selection.json
+          bootstrap-stage1-validation-green-evidence/stage1-selection-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-baseline-identity.json
+          bootstrap-stage1-validation-green-evidence/stage1-baseline-identity-result.json
+          bootstrap-stage1-validation-green-evidence/baseline-source-before.json
+          bootstrap-stage1-validation-green-evidence/baseline-source-before-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-off-native-metadata.json
+          bootstrap-stage1-validation-green-evidence/stage1-off-native-metadata-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-off-native-archive-admission.json
+          bootstrap-stage1-validation-green-evidence/stage1-off-native-archive-admission-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-native-admission.json
+          bootstrap-stage1-validation-green-evidence/stage1-native-admission-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-off-admission.json
+          bootstrap-stage1-validation-green-evidence/stage1-off-admission-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-enabled-admission.json
+          bootstrap-stage1-validation-green-evidence/stage1-enabled-admission-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-rust-tools.json
+          bootstrap-stage1-validation-green-evidence/stage1-rust-tools-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-current-tools-match.json
+          bootstrap-stage1-validation-green-evidence/stage1-current-tools-match-result.json
+          bootstrap-stage1-validation-green-evidence/candidate-native-off-tests.json
+          bootstrap-stage1-validation-green-evidence/candidate-native-off-tests-result.json
+          bootstrap-stage1-validation-green-evidence/candidate-native-enabled-tests.json
+          bootstrap-stage1-validation-green-evidence/candidate-native-enabled-tests-result.json
+          bootstrap-stage1-validation-green-evidence/candidate-declarations.json
+          bootstrap-stage1-validation-green-evidence/candidate-declarations-result.json
+          bootstrap-stage1-validation-green-evidence/hosted-tools.json
+          bootstrap-stage1-validation-green-evidence/hosted-tools-result.json
+          bootstrap-stage1-validation-green-evidence/client-dependencies.json
+          bootstrap-stage1-validation-green-evidence/client-dependencies-result.json
+          bootstrap-stage1-validation-green-evidence/baseline-runtime-copy.json
+          bootstrap-stage1-validation-green-evidence/baseline-runtime-copy-result.json
+          bootstrap-stage1-validation-green-evidence/client-types.json
+          bootstrap-stage1-validation-green-evidence/client-types-result.json
+          bootstrap-stage1-validation-green-evidence/client-lint.json
+          bootstrap-stage1-validation-green-evidence/client-lint-result.json
+          bootstrap-stage1-validation-green-evidence/client-protocol.json
+          bootstrap-stage1-validation-green-evidence/client-protocol-result.json
+          bootstrap-stage1-validation-green-evidence/client-adapter-tests.json
+          bootstrap-stage1-validation-green-evidence/client-adapter-tests-result.json
+          bootstrap-stage1-validation-green-evidence/candidate-enabled-browser.json
+          bootstrap-stage1-validation-green-evidence/candidate-enabled-browser-result.json
+          bootstrap-stage1-validation-green-evidence/candidate-off-browser.json
+          bootstrap-stage1-validation-green-evidence/candidate-off-browser-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-source-after.json
+          bootstrap-stage1-validation-green-evidence/stage1-source-after-result.json
+          bootstrap-stage1-validation-green-evidence/baseline-source-after.json
+          bootstrap-stage1-validation-green-evidence/baseline-source-after-result.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+      if: always()
+    needs:
+    - stage1-native-producer
+    - stage1-wasm-producer
