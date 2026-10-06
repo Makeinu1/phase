@@ -13,6 +13,10 @@ wasm-opt = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Experimental admission only; never enables engine manual-resolution commands.
+manual_resolution_local_bootstrap = []
+
 [dependencies]
 engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }

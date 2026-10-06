@@ -1,4 +1,5 @@
 import initWasm, * as wasm from "@wasm/engine";
+import { WasmAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
 import { classifyInitFailure } from "../init-envelope";
 import { AdapterError, AdapterErrorCode } from "../types";
@@ -99,6 +100,7 @@ type AssertionCode =
   | "refusal-resident-preservation" | "card-db-load" | "malformed-match-seed" | "malformed-match-type"
   | "malformed-match-loop-detection" | "checkpoint-mode" | "limited-authority" | "served-wasm-identity"
   | "served-glue-identity" | "baseline-source-identity" | "source-identity" | "glue-identity"
+  | "experimental-contract"
   | "ordinary-decision" | "human-decision" | "issued-action" | "action-snapshot-change" | "action-recorded-once";
 
 class AssertionFailure extends Error {
@@ -403,10 +405,158 @@ async function ordinaryControls(endpoint: Endpoint): Promise<void> {
   await endpoint.reset();
 }
 
+// This separate actual module Worker reaches the WASM request decoder without
+// the production RPC allowlist intercepting its hostile fields first.
+async function wasmWorkerBoundary(): Promise<boolean> {
+  const moduleUrl = new URL("/src/wasm/engine_wasm.js", location.origin).href;
+  const source = `import init,* as wasm from ${JSON.stringify(moduleUrl)};
+    self.onmessage = async ({data}) => {
+      let passed = false;
+      try {
+        await init(); wasm.load_card_database(data.db);
+        const result = wasm.initialize_experimental_local_game(data.input);
+        if (result.error || wasm.experimental_local_actor() !== 0) throw new Error('fixed');
+        const before = JSON.stringify([wasm.get_game_state(),wasm.export_game_state_json(),wasm.export_replay_log()]);
+        for (const key of ['type','id','actor','authenticatedActor','owner','session','ticket','enrollment','worker','unknown']) {
+          const refused = wasm.initialize_experimental_local_game({...data.input,[key]:0});
+          if (refused.error !== true || wasm.experimental_local_actor() !== 0
+            || before !== JSON.stringify([wasm.get_game_state(),wasm.export_game_state_json(),wasm.export_replay_log()])) throw new Error('fixed');
+        }
+        if (wasm.initialize_experimental_local_game({...data.input,actor:1}).error !== true || wasm.experimental_local_actor() !== 0
+          || before !== JSON.stringify([wasm.get_game_state(),wasm.export_game_state_json(),wasm.export_replay_log()])) throw new Error('fixed');
+        for (const request of [null,[],42,new Date(),new Map(),new (class {})(),new Proxy({}, {getPrototypeOf(){throw new Error('fixed');}}),{...data.input,playerCount:'2'}]) {
+          if (wasm.initialize_experimental_local_game(request).error !== true || wasm.experimental_local_actor() !== 0
+            || before !== JSON.stringify([wasm.get_game_state(),wasm.export_game_state_json(),wasm.export_replay_log()])) throw new Error('fixed');
+        }
+        passed = true;
+      } catch { passed = false; }
+      self.postMessage(passed);
+    };`;
+  const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+  const worker = new Worker(url, { type: "module" });
+  try {
+    return await new Promise<boolean>((resolve) => {
+      worker.onmessage = ({ data }: MessageEvent<unknown>) => resolve(data === true);
+      worker.onerror = (event) => { event.preventDefault(); resolve(false); };
+      worker.postMessage({ db: dbText, input: validLimited });
+    });
+  } finally { worker.terminate(); URL.revokeObjectURL(url); }
+}
+
+async function candidateControls(enabled: boolean, namespace: RecordValue): Promise<void> {
+  const adapter = new WasmAdapter();
+  await adapter.initialize();
+  const engine = adapter.getEngineClient();
+  check(engine, "experimental-contract");
+  await engine.loadCardDb(dbText); adapter.cardDbLoaded = true;
+  const endpoint = workerEndpoint(engine);
+  const unchanged = async (operation: () => Promise<unknown>, owner: 0 | null) => {
+    const before = await endpoint.observe();
+    let refused = false;
+    try { await operation(); } catch { refused = true; }
+    check(refused && json(before) === json(await endpoint.observe())
+      && await adapter.experimentalLocalActor() === owner, "experimental-contract");
+  };
+  try {
+    await adapter.initializeGame(validLimited.deckData, limited, 2, undefined, 0);
+    check(await adapter.experimentalLocalActor() === null && await engine.experimentalLocalActor() === null, "experimental-contract");
+    if (!enabled) {
+      await runRow("feature_off_refusal", async () => {
+        await unchanged(() => adapter.initializeExperimentalLocalGame(validLimited), null);
+        const raw = engine as unknown as { request: <T>(message: RecordValue) => Promise<T> };
+        await unchanged(() => raw.request({ ...validLimited, type: "initializeExperimentalLocalGame" }), null);
+        check(await engine.experimentalLocalActor() === null, "experimental-contract");
+        return { refusalPreserved: true, verifierNull: true, ordinaryWorkerLoaded: true };
+      });
+    } else {
+      await runRow("experimental_local_admission", async () => {
+        await unchanged(() => adapter.initializeExperimentalLocalGame({ ...validLimited, formatConfig: { format: "Malformed" } }), null);
+        await adapter.initializeExperimentalLocalGame(validLimited);
+        check(await adapter.experimentalLocalActor() === 0 && await engine.experimentalLocalActor() === 0, "experimental-contract");
+        await unchanged(() => adapter.initializeExperimentalLocalGame({ ...validLimited, deckData: { player: "malformed" } }), 0);
+        return { explicitAdmission: true, ordinaryNeverAdmits: true, oldResidentPreserved: true, verifierReadOnly: true };
+      });
+      await runRow("experimental_strict_requests", async () => {
+        const raw = engine as unknown as { request: <T>(message: RecordValue) => Promise<T> };
+        for (const key of ["type", "id", "actor", "authenticatedActor", "owner", "session", "ticket", "enrollment", "worker", "unknown"]) {
+          await unchanged(() => adapter.initializeExperimentalLocalGame({ ...validLimited, [key]: 0 }), 0);
+          if (key !== "type" && key !== "id") {
+            await unchanged(() => raw.request({ ...validLimited, type: "initializeExperimentalLocalGame", [key]: 0 }), 0);
+          }
+        }
+        check(await wasmWorkerBoundary(), "experimental-contract");
+        return { adapterStrict: true, rawWorkerStrict: true, wasmBoundaryStrict: true, priorOwnerPreserved: true };
+      });
+      await runRow("experimental_lifecycle", async () => {
+        await unchanged(() => engine.restoreState("invalid"), 0);
+        const saved = await engine.exportState();
+        await engine.restoreState(saved);
+        check(await adapter.experimentalLocalActor() === null && await engine.experimentalLocalActor() === null, "experimental-contract");
+        await adapter.initializeExperimentalLocalGame(validLimited);
+        await adapter.initializeGame(validLimited.deckData, limited, 2, undefined, 0);
+        check(await adapter.experimentalLocalActor() === null, "experimental-contract");
+        await adapter.initializeExperimentalLocalGame(validLimited);
+        await adapter.setMultiplayerMode(true);
+        check(await adapter.experimentalLocalActor() === null && await engine.experimentalLocalActor() === null, "experimental-contract");
+        await adapter.setMultiplayerMode(false); await adapter.resetGameState();
+        await adapter.initializeMultiplayerHostGame(validLimited.deckData, limited, 2, undefined, 0);
+        await unchanged(() => adapter.initializeExperimentalLocalGame(validLimited), null);
+        await adapter.setMultiplayerMode(false); await adapter.resetGameState();
+        await adapter.initializeExperimentalLocalGame(validLimited); await adapter.resetGameState();
+        check(await engine.experimentalLocalActor() === null, "experimental-contract");
+        return { failedRestorePreserved: true, checkedRestoreRevoked: true, ordinaryRevoked: true, postureRevoked: true, hostRefused: true, resetRevoked: true };
+      });
+      await runRow("experimental_privacy_closed", async () => {
+        await adapter.initializeExperimentalLocalGame(validLimited);
+        const before = await endpoint.observe();
+        const filtered = await engine.getFilteredState(1);
+        const unseated = await engine.getFilteredState(7);
+        for (const value of [before, filtered, unseated]) {
+          const text = json(value);
+          check(!text.includes('"ticket"') && !text.includes('"experimental_local_owner"')
+            && !text.includes('"experimentalLocalOwner"') && !/"(?:local|owner)-[0-9a-f]{16}"/.test(text), "experimental-contract");
+        }
+        await unchanged(() => engine.submitAction(0, { type: "ManualResolutionDecision" } as never), 0);
+        check(["submit_manual_resolution", "register_manual_owner", "apply_manual_resolution", "lookup_manual_receipt", "restore_experimental_game"].every((name) => typeof namespace[name] !== "function"), "experimental-contract");
+        return { privateWireClean: true, manualMutationClosed: true, laterExportsAbsent: true };
+      });
+    }
+    await runRow("experimental_realm_fallback", async () => {
+      const bootstrap = namespace.initialize_experimental_local_game;
+      const verify = namespace.experimental_local_actor;
+      const before = await wasmEndpoint().observe();
+      if (enabled) {
+        check(typeof bootstrap === "function" && typeof verify === "function", "experimental-contract");
+        const refused = record(bootstrap(validLimited));
+        check(refused.error === true && verify() == null && json(before) === json(await wasmEndpoint().observe()), "experimental-contract");
+      }
+      const OriginalWorker = globalThis.Worker;
+      const fallback = new WasmAdapter();
+      try {
+        globalThis.Worker = class { constructor() { throw new Error("fixed fallback fixture"); } } as unknown as typeof Worker;
+        await fallback.initialize();
+      } finally { globalThis.Worker = OriginalWorker; }
+      try {
+        check(fallback.getEngineClient() === null, "experimental-contract");
+        fallback.cardDbLoaded = true;
+        await fallback.initializeGame(validLimited.deckData, limited, 2, undefined, 0);
+        const snapshot = await fallback.getSnapshot();
+        const action = snapshot.legalResult.actions.find((action) => action.type === "MulliganDecision" && action.data.choice.type === "Keep");
+        check(action, "experimental-contract"); await fallback.submitAction(action, 0);
+        const after = await fallback.getSnapshot();
+        check(json(snapshot.state) !== json(after.state), "experimental-contract");
+        let refused = false; try { await fallback.initializeExperimentalLocalGame(validLimited); } catch { refused = true; }
+        check(refused && await fallback.experimentalLocalActor() === null && json(after.state) === json((await fallback.getSnapshot()).state), "experimental-contract");
+      } finally { fallback.dispose(); }
+      return { mainThreadRefused: true, fallbackOrdinaryAction: true, fallbackExperimentalRefused: true };
+    });
+  } finally { adapter.dispose(); }
+}
+
 async function main(): Promise<void> {
   let client: EngineWorkerClient | undefined;
   try {
-    check(params.get("artifact") === "baseline", "checkpoint-mode");
+    check(["baseline", "enabled", "off"].includes(params.get("artifact") ?? ""), "checkpoint-mode");
     check(limited?.format === "Limited", "limited-authority");
     await runRow("artifact_identity", async () => {
       const wasmUrl = "/src/wasm/engine_wasm_bg.wasm";
@@ -468,9 +618,16 @@ async function main(): Promise<void> {
     };
     const missingExports = Object.entries(availability).filter(([, present]) => !present).map(([name]) => name);
     rows.push({
-      name: "experimental_availability", status: missingExports.length ? "fail" : "pass", evidence: availability,
-      error: missingExports.length ? "experimental-exports-absent" : undefined,
+      name: "experimental_availability", status: params.get("artifact") === "off" || !missingExports.length ? "pass" : "fail", evidence: availability,
+      error: params.get("artifact") !== "off" && missingExports.length ? "experimental-exports-absent" : undefined,
     });
+    if (params.get("artifact") !== "baseline") {
+      check(availability.initialize_experimental_local_game === (params.get("artifact") === "enabled")
+        && availability.experimental_local_actor === (params.get("artifact") === "enabled"), "experimental-contract");
+      await candidateControls(params.get("artifact") === "enabled", namespace);
+      window.manualWasmBootstrap.finish({ status: "pass", reason: "candidate-green", artifact: params.get("artifact"), rows });
+      return;
+    }
     window.manualWasmBootstrap.finish({
       status: "fail", reason: availability.initialize_experimental_local_game || availability.experimental_local_actor
         ? "unexpected-baseline-exports" : "expected-experimental-availability",
@@ -478,7 +635,7 @@ async function main(): Promise<void> {
     });
   } catch (error) {
     window.manualWasmBootstrap.finish({
-      status: "fail", reason: "incomplete-controls", artifact: "baseline",
+      status: "fail", reason: "incomplete-controls", artifact: params.get("artifact"),
       error: failureCode(error), caseId: activeCaseId, stage: activeStage, rows,
     });
   } finally {

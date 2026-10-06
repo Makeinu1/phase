@@ -42,7 +42,8 @@ jobs:
     if: >-
       github.repository == 'Makeinu1/phase' &&
       github.event.pull_request.head.repo.full_name == 'Makeinu1/phase' &&
-      github.event.pull_request.head.ref == 'experiment/manual-wasm-local-bootstrap'
+      github.event.pull_request.head.ref == 'experiment/manual-wasm-local-bootstrap' &&
+      github.event.pull_request.head.sha == '9e945088fd913f916687bd825f8217e24ac8541b'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -1368,3 +1369,767 @@ jobs:
             bootstrap-evidence/baseline-source-after.json
           if-no-files-found: warn
           retention-days: 7
+
+  stage1-green:
+    if: github.repository == 'Makeinu1/phase' && github.event.pull_request.head.repo.full_name == 'Makeinu1/phase' && github.event.pull_request.head.ref == 'experiment/manual-wasm-local-bootstrap'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BOOTSTRAP_CHECKPOINT_MODE: stage1-green
+      RUST_MIN_STACK: '16777216'
+    steps:
+    - name: Checkout immutable candidate source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        path: candidate-source
+        persist-credentials: false
+    - name: Checkout immutable baseline source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ env.BOOTSTRAP_BASE_SHA }}
+        path: baseline-source
+        persist-credentials: false
+    - name: Record clean immutable candidate and baseline sources
+      working-directory: candidate-source
+      run: |
+        mkdir -p "$MANUAL_EVIDENCE" "$RUNNER_TEMP/bootstrap-bindgen-off" "$RUNNER_TEMP/bootstrap-bindgen-enabled" "$RUNNER_TEMP/bootstrap-native-archives"
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-wasm-target"
+        printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+        python3 scripts/ci/manual-integration-guard.py candidate-source-before true
+        cd ../baseline-source
+        MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-source-before true
+        git rev-parse HEAD HEAD^{tree} > "$MANUAL_EVIDENCE/baseline-source.txt"
+        git -C ../candidate-source rev-parse HEAD HEAD^{tree} > "$MANUAL_EVIDENCE/candidate-source.txt"
+        sha256sum Cargo.lock client/pnpm-lock.yaml rust-toolchain.toml .cargo/config.toml > "$MANUAL_EVIDENCE/baseline-inputs.sha256"
+    - name: Verify fixed public source and recipe inputs
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py baseline-runtime-inputs python3 - 2>/dev/null <<'INPUTS'
+        import hashlib, json, os, re, subprocess
+        from pathlib import Path
+        try:
+            def profile_environment_matches(environment, expected):
+                return {name: value for name, value in environment.items()
+                        if name.startswith('CARGO_PROFILE_')} == expected
+            def fixed_flags_environment_matches(environment):
+                return 'RUSTFLAGS' not in environment and 'CARGO_ENCODED_RUSTFLAGS' not in environment
+            pins = {
+                'Cargo.lock': '5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0',
+                'client/pnpm-lock.yaml': 'bc13ba1f6de5efd5bc724d9945aa541136df1d6938a41c53768f76c7b36c4ea4',
+                'rust-toolchain.toml': '52562c175563386d0f9f19afafd2855662ef2590765204b35bd624de13fe67af',
+                '.cargo/config.toml': 'da039ac38eb9d43e236e9eb89c65ef30a149d0539ed7ebfb3ee8f1d78b383c66',
+            }
+            for source in [Path('.'), Path('../baseline-source')]:
+                assert all(hashlib.sha256((source / name).read_bytes()).hexdigest() == value
+                           for name, value in pins.items())
+            tree = subprocess.check_output(['git', '-C', '../baseline-source', 'rev-parse', 'HEAD^{tree}'],
+                                           stderr=subprocess.DEVNULL, text=True).strip()
+            assert tree == os.environ['BOOTSTRAP_BASE_TREE']
+            assert hashlib.sha256(Path('scripts/ci/manual-integration-guard.py').read_bytes()).hexdigest() == os.environ['BOOTSTRAP_GUARD_SHA256']
+            assert os.environ['GITHUB_REPOSITORY'] == 'Makeinu1/phase'
+            assert os.environ['GITHUB_REPOSITORY_ID'] == '1377698441'
+            assert os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
+            assert os.environ['CARGO_BUILD_JOBS'] == '1' and os.environ['CARGO_INCREMENTAL'] == '0'
+            assert profile_environment_matches(os.environ, {})
+            assert fixed_flags_environment_matches(os.environ)
+            assert not any(value for name, value in os.environ.items() if
+                           name in [
+                               'CARGO_BUILD_TARGET', 'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTDOC',
+                               'RUSTC', 'RUSTDOC', 'ENGINE_WASM_URL'])
+            if os.environ['BOOTSTRAP_CHECKPOINT_MODE'] == 'baseline-red':
+                for name, length in [
+                    ('BOOTSTRAP_PRODUCER_SHA', 40), ('BOOTSTRAP_PRODUCER_TREE', 40),
+                    ('BOOTSTRAP_PRODUCER_WORKFLOW_SHA256', 64), ('BOOTSTRAP_PRODUCER_GUARD_SHA256', 64),
+                    ('BOOTSTRAP_RUNTIME_ZIP_SHA256', 64), ('BOOTSTRAP_PROVENANCE_SHA256', 64),
+                ]:
+                    assert re.fullmatch('[a-f0-9]{' + str(length) + '}', os.environ[name])
+                assert os.environ['BOOTSTRAP_PRODUCER_GUARD_SHA256'] == os.environ['BOOTSTRAP_GUARD_SHA256']
+                for name in ['BOOTSTRAP_PRODUCER_RUN_ID', 'BOOTSTRAP_PRODUCER_RUN_ATTEMPT',
+                             'BOOTSTRAP_RUNTIME_ARTIFACT_ID', 'BOOTSTRAP_RUNTIME_ZIP_SIZE']:
+                    assert re.fullmatch('[1-9][0-9]*', os.environ[name])
+                files = json.loads(os.environ['BOOTSTRAP_RUNTIME_FILES'])
+                assert set(files) == {'engine_wasm.js', 'engine_wasm_bg.wasm', 'engine_wasm.d.ts', 'engine_wasm_bg.wasm.d.ts'}
+                assert all(set(value) == {'size', 'sha256'} and type(value['size']) is int and value['size'] > 0 and
+                           re.fullmatch('[a-f0-9]{64}', value['sha256']) for value in files.values())
+            print('{"runtime_inputs_verified":true}')
+        except Exception:
+            print('{"error":"runtime-pin-invalid"}')
+            raise SystemExit(1)
+        INPUTS
+    - name: Install pinned candidate Rust tools
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+      with:
+        toolchain: nightly-2026-04-19
+        components: rustfmt,clippy,rustc-codegen-cranelift-preview
+        target: wasm32-unknown-unknown
+        rust-src-dir: candidate-source
+        cache: false
+        rustflags: ''
+    - name: Install pinned nextest and bindgen
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      with:
+        tool: cargo-nextest@0.9.146,wasm-bindgen-cli@0.2.121
+    - name: Verify fixed candidate Rust recipe
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py candidate-rust-tools python3 - 2>/dev/null <<'PRODUCER_TOOLS'
+        import datetime, hashlib, os, re, subprocess, tomllib
+        from pathlib import Path
+        try:
+            def profile_environment_matches(environment, expected):
+                return {name: value for name, value in environment.items()
+                        if name.startswith('CARGO_PROFILE_')} == expected
+            def fixed_flags_environment_matches(environment):
+                return 'RUSTFLAGS' not in environment and 'CARGO_ENCODED_RUSTFLAGS' not in environment
+            def receipt_profile_matches(label, environment, expected):
+                return (label in expected and 'CARGO_PROFILE_DEV_DEBUG' in environment and
+                        environment['CARGO_PROFILE_DEV_DEBUG'] == expected[label])
+            expected_profile = {'CARGO_PROFILE_DEV_DEBUG': '0'}
+            producer_receipt_profiles = {
+                'candidate-source-before': None, 'baseline-source-before': None, 'baseline-runtime-inputs': None,
+                'producer-tools': '0', 'baseline-wasm-build': '0', 'baseline-bindgen': '0',
+                'candidate-source-after': '0', 'baseline-source-after': '0',
+            }
+            # Twenty fixed public assertions: eleven profile, six receipt, three flag; five positive/fifteen negative.
+            assert profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': '0', 'NON_PROFILE': ''}, expected_profile)
+            assert not profile_environment_matches({}, expected_profile)
+            assert not profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': ''}, expected_profile)
+            assert not profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': '1'}, expected_profile)
+            assert not profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': 0}, expected_profile)
+            assert not profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': '0', 'CARGO_PROFILE_WASM_DEV_OPT_LEVEL': ''}, expected_profile)
+            assert not profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': '0', 'CARGO_PROFILE_WASM_DEV_OPT_LEVEL': '2'}, expected_profile)
+            assert profile_environment_matches({}, {})
+            assert not profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': '0'}, {})
+            assert not profile_environment_matches({'CARGO_PROFILE_DEV_DEBUG': ''}, {})
+            assert not profile_environment_matches({'CARGO_PROFILE_WASM_DEV_OPT_LEVEL': ''}, {})
+            assert receipt_profile_matches('candidate-source-before', {'CARGO_PROFILE_DEV_DEBUG': None}, producer_receipt_profiles)
+            assert receipt_profile_matches('producer-tools', {'CARGO_PROFILE_DEV_DEBUG': '0'}, producer_receipt_profiles)
+            assert not receipt_profile_matches('producer-tools', {'CARGO_PROFILE_DEV_DEBUG': None}, producer_receipt_profiles)
+            assert not receipt_profile_matches('producer-tools', {'CARGO_PROFILE_DEV_DEBUG': ''}, producer_receipt_profiles)
+            assert not receipt_profile_matches('candidate-source-before', {'CARGO_PROFILE_DEV_DEBUG': '0'}, producer_receipt_profiles)
+            assert not receipt_profile_matches('unknown', {'CARGO_PROFILE_DEV_DEBUG': None}, producer_receipt_profiles)
+            assert fixed_flags_environment_matches({})
+            assert not fixed_flags_environment_matches({'RUSTFLAGS': ''})
+            assert not fixed_flags_environment_matches({'CARGO_ENCODED_RUSTFLAGS': ''})
+            assert profile_environment_matches(os.environ, expected_profile)
+            assert fixed_flags_environment_matches(os.environ)
+            assert os.environ['CARGO_BUILD_JOBS'] == '1' and os.environ['CARGO_INCREMENTAL'] == '0'
+            for source in [Path('.'), Path('../baseline-source')]:
+                manifest_bytes = (source / 'Cargo.toml').read_bytes()
+                assert hashlib.sha256(manifest_bytes).hexdigest() == '1821bf54554639dfa513d03a2a71e1503b445df42e62cde93e31b7e5289ea64a'
+                profiles = tomllib.loads(manifest_bytes.decode('utf-8'))['profile']
+                assert profiles['dev'] == {'opt-level': 0, 'debug': 'line-tables-only', 'split-debuginfo': 'unpacked',
+                                           'package': {'libmimalloc-sys': {'opt-level': 2}}}
+                assert profiles['wasm-dev'] == {'inherits': 'dev', 'opt-level': 2, 'codegen-backend': 'llvm'}
+                config_bytes = (source / '.cargo/config.toml').read_bytes()
+                assert hashlib.sha256(config_bytes).hexdigest() == 'da039ac38eb9d43e236e9eb89c65ef30a149d0539ed7ebfb3ee8f1d78b383c66'
+                config = tomllib.loads(config_bytes.decode('utf-8'))
+                assert config['target'] == {'wasm32-unknown-unknown': {
+                    'rustflags': ['-C', 'link-arg=-z', '-C', 'link-arg=stack-size=16777216']}}
+                assert config['env'] == {'RUST_MIN_STACK': '16777216'}
+            assert os.environ['CARGO_TARGET_DIR'] == str(Path(os.environ['RUNNER_TEMP']) / 'bootstrap-wasm-target')
+            baseline = Path('../baseline-source').resolve()
+            fixed_config = (baseline / '.cargo/config.toml').resolve()
+            assert not (baseline / '.cargo/config').exists() and not (baseline / '.cargo/config').is_symlink()
+            cargo_home = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+            if not cargo_home.is_absolute():
+                cargo_home = baseline / cargo_home
+            loaded_configs = set()
+            for directory in [baseline / '.cargo', *(parent / '.cargo' for parent in baseline.parents), cargo_home]:
+                legacy, modern = directory / 'config', directory / 'config.toml'
+                selected = legacy if legacy.exists() or legacy.is_symlink() else modern
+                if selected.exists() or selected.is_symlink():
+                    assert selected.is_file()
+                    loaded_configs.add(selected.resolve())
+            assert fixed_config in loaded_configs
+            for selected in loaded_configs - {fixed_config}:
+                config = tomllib.loads(selected.read_text(encoding='utf-8'))
+                assert not {'profile', 'include', 'target', 'paths', 'source', 'unstable'} & set(config)
+                build = config.get('build', {})
+                environment = config.get('env', {})
+                assert isinstance(build, dict) and isinstance(environment, dict)
+                assert not {'rustc', 'rustdoc', 'rustc-wrapper', 'rustc-workspace-wrapper', 'rustflags', 'rustdocflags',
+                            'target', 'jobs', 'incremental', 'target-dir'} & set(build)
+                assert not any(name.startswith('CARGO_PROFILE_') or name.startswith('CARGO_TARGET_') or name in {
+                    'RUSTC', 'RUSTDOC', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER',
+                    'RUST_MIN_STACK', 'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTDOC', 'CARGO_BUILD_RUSTC_WRAPPER',
+                    'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_RUSTFLAGS', 'CARGO_BUILD_RUSTDOCFLAGS',
+                    'CARGO_BUILD_TARGET', 'CARGO_BUILD_JOBS', 'CARGO_BUILD_INCREMENTAL', 'CARGO_BUILD_TARGET_DIR',
+                    'CARGO_INCREMENTAL', 'CARGO_TARGET_DIR', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',
+                } for name in environment)
+            def read(argv):
+                return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True).strip()
+            active = read(['rustup', 'show', 'active-toolchain']).split()[0]
+            assert active == 'nightly-2026-04-19-x86_64-unknown-linux-gnu'
+            verbose = read(['rustc', '-Vv'])
+            assert verbose == read(['rustup', 'run', 'nightly-2026-04-19', 'rustc', '-Vv'])
+            fields = dict(line.split(': ', 1) for line in verbose.splitlines()[1:])
+            assert set(fields) == {'binary', 'commit-hash', 'commit-date', 'host', 'release', 'LLVM version'}
+            assert fields['binary'] == 'rustc' and fields['host'] == 'x86_64-unknown-linux-gnu'
+            assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+-nightly', fields['release'])
+            assert re.fullmatch('[a-f0-9]{40}', fields['commit-hash'])
+            assert datetime.date.fromisoformat(fields['commit-date']) <= datetime.date(2026, 4, 19)
+            assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+', fields['LLVM version'])
+            cargo = read(['cargo', '-V'])
+            assert cargo == read(['rustup', 'run', 'nightly-2026-04-19', 'cargo', '-V'])
+            assert re.fullmatch(r'cargo [0-9]+[.][0-9]+[.][0-9]+-nightly \([a-f0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)', cargo)
+            assert read(['wasm-bindgen', '--version']) == 'wasm-bindgen 0.2.121'
+            assert 'wasm32-unknown-unknown' in read(['rustup', 'target', 'list', '--installed']).splitlines()
+            print('{"producer_tools_verified":true}')
+        except Exception:
+            print('{"error":"runtime-provenance-mismatch"}')
+            raise SystemExit(1)
+        PRODUCER_TOOLS
+    - name: Check exact Rust formatting
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs >/dev/null 2>&1'
+    - name: Install pinned consumer pnpm
+      uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+      with:
+        version: 9.15.9
+    - name: Install pinned consumer Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22.16.0
+    - name: Verify actual hosted tools without browser downloads
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py hosted-tools bash -euo pipefail <<'TOOLS'
+        exec 2>/dev/null
+        command -v google-chrome curl jq >/dev/null
+        driver_binary=$(command -v chromedriver || true)
+        if [ -z "$driver_binary" ] && [ -n "${CHROMEWEBDRIVER:-}" ]; then
+          driver_binary="$CHROMEWEBDRIVER/chromedriver"
+        fi
+        test -n "$driver_binary"
+        test -x "$driver_binary"
+        printf 'BOOTSTRAP_CHROMEDRIVER=%s\n' "$driver_binary" >> "$GITHUB_ENV"
+        test "$(node --version)" = v22.16.0
+        test "$(pnpm --version)" = 9.15.9
+        chrome_major=$(google-chrome --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+        driver_major=$("$driver_binary" --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+        test "$chrome_major" = "$driver_major"
+        test -z "${ENGINE_WASM_URL:-}"
+        printf '{"hosted_tools_verified":true}\n'
+        TOOLS
+    - name: Install one frozen candidate client dependency tree
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py client-dependencies \
+          bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile >/dev/null 2>&1'
+    - name: Check full candidate client types
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py client-types \
+          bash -euo pipefail -c 'pnpm --dir client run type-check >/dev/null 2>&1'
+    - name: Lint full candidate client
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py client-lint \
+          bash -euo pipefail -c 'pnpm --dir client run lint >/dev/null 2>&1'
+    - name: Check candidate protocol
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py client-protocol \
+          bash -euo pipefail -c 'pnpm --dir client run protocol:check >/dev/null 2>&1'
+    - name: Archive and run the two native lib configurations sequentially
+      working-directory: candidate-source
+      run: |
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-native-target"
+        for artifact in off enabled; do
+          count=10
+          if [ "$artifact" = enabled ]; then count=16; fi
+          export BOOTSTRAP_NATIVE_ARTIFACT="$artifact" BOOTSTRAP_NATIVE_TEST_COUNT="$count"
+          python3 scripts/ci/manual-integration-guard.py "candidate-native-$artifact-archive" bash -euo pipefail -c '
+            features=(); if [ "$BOOTSTRAP_NATIVE_ARTIFACT" = enabled ]; then features=(--features manual_resolution_local_bootstrap); fi
+            cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\"cranelift\"" -p engine-wasm --lib --no-default-features "${features[@]}" --archive-file "$RUNNER_TEMP/bootstrap-native-archives/$BOOTSTRAP_NATIVE_ARTIFACT.tar.zst" >/dev/null 2>&1'
+          python3 scripts/ci/manual-integration-guard.py "candidate-native-$artifact-tests" python3 - 2>/dev/null <<'NATIVE'
+        import json, os, re, subprocess
+        from pathlib import Path
+        artifact = os.environ['BOOTSTRAP_NATIVE_ARTIFACT']; count = int(os.environ['BOOTSTRAP_NATIVE_TEST_COUNT'])
+        result = subprocess.run(['cargo-nextest', 'nextest', 'run', '--profile', 'ci',
+            '--archive-file', str(Path(os.environ['RUNNER_TEMP']) / f'bootstrap-native-archives/{artifact}.tar.zst'),
+            '--workspace-remap', str(Path.cwd()), '--extract-to', str(Path(os.environ['RUNNER_TEMP']) / f'bootstrap-native-{artifact}'),
+            '-E', 'test(ordinary_initializer_preservation_tests) | test(experimental_local_bootstrap_tests) | test(engine_claim_guard_tests)',
+            '--status-level', 'all', '--final-status-level', 'all'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', result.stdout)
+        ordinary = ['ordinary_initializer_preservation_tests::defaults_are_installed_with_trusted_seed_and_redacted_viewer', 'ordinary_initializer_preservation_tests::configured_deck_install_and_all_preparation_refusals_preserve_local_resident', 'ordinary_initializer_preservation_tests::host_preparation_refusals_never_install_or_claim', 'ordinary_initializer_preservation_tests::occupied_refusals_are_typed_and_preserve_both_directions', 'ordinary_initializer_preservation_tests::successful_ordinary_install_invalidates_previous_authority_and_cache', 'engine_claim_guard_tests::a_multiplayer_host_is_refused_when_the_engine_already_holds_a_game', 'engine_claim_guard_tests::a_multiplayer_host_may_claim_an_empty_engine', 'engine_claim_guard_tests::a_local_game_is_refused_while_a_multiplayer_host_owns_the_engine', 'engine_claim_guard_tests::a_local_game_may_still_replace_another_local_game', 'engine_claim_guard_tests::only_a_multiplayer_host_claims_the_engine']
+        experimental = ['experimental_local_bootstrap_tests::admission_is_explicit_and_verification_never_mints', 'experimental_local_bootstrap_tests::failed_bootstrap_preserves_ordinary_and_experimental_residents', 'experimental_local_bootstrap_tests::verifier_checks_actual_resident_seat_session_and_posture', 'experimental_local_bootstrap_tests::checked_restore_failure_preserves_and_success_revokes', 'experimental_local_bootstrap_tests::ordinary_supersession_clear_and_host_cannot_admit', 'experimental_local_bootstrap_tests::private_binding_is_absent_from_save_viewer_and_replay']
+        expected = set(ordinary + (experimental if artifact == 'enabled' else []))
+        pass_names = re.findall(r'^\s*PASS\s+\[[^\]]+\]\s+(?:\([0-9]+/[0-9]+\)\s+)?\S+\s+(\S+)\s*$', text, re.M)
+        seen = set(re.findall(r'^\s*(?:PASS|FAIL|ABORT|TIMEOUT)\s+\[[^\]]+\]\s+(?:\([0-9]+/[0-9]+\)\s+)?\S+\s+(\S+)\s*$', text, re.M)) & expected
+        passed = (result.returncode == 0 and len(pass_names) == count and set(pass_names) == expected
+            and re.search(rf'Summary[^\n]*\b{count} tests run: {count} passed\b', text) is not None)
+        path = Path(os.environ['MANUAL_EVIDENCE']) / 'red-adjudication.json'
+        value = json.loads(path.read_text()) if path.exists() else {}
+        value.setdefault('native_tests', {})[artifact] = {'selected': count, 'executed': len(seen), 'passed': bool(passed)}
+        filtered = re.search(r'Summary[^\n]*\b([0-9]+) skipped\b', text)
+        value.setdefault('native_filter_counts', {})[artifact] = int(filtered.group(1)) if filtered else None
+        path.write_text(json.dumps(value) + '\n'); print(json.dumps({'native_selected_tests_passed': bool(passed), 'selected': count}))
+        raise SystemExit(0 if passed else 1)
+        NATIVE
+         done
+        python3 scripts/ci/manual-integration-guard.py candidate-clippy bash -euo pipefail -c 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\"cranelift\"" -- -D warnings >/dev/null 2>&1'
+    - name: Build and bind exactly two candidate WASM configurations sequentially
+      working-directory: candidate-source
+      run: |
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-wasm-target"
+        for artifact in off enabled; do
+          export BOOTSTRAP_CANDIDATE_ARTIFACT="$artifact"
+          python3 scripts/ci/manual-integration-guard.py "candidate-wasm-$artifact-build" bash -euo pipefail -c '
+            features=(); if [ "$BOOTSTRAP_CANDIDATE_ARTIFACT" = enabled ]; then features=(--features manual_resolution_local_bootstrap); fi
+            cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features "${features[@]}" >/dev/null 2>&1'
+          python3 scripts/ci/manual-integration-guard.py "candidate-wasm-$artifact-bindgen" bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1'
+        done
+        python3 scripts/ci/manual-integration-guard.py candidate-declarations python3 - 2>/dev/null <<'DECL'
+        import json, os, re
+        from pathlib import Path
+        root = Path(os.environ['RUNNER_TEMP'])
+        off = (root / 'bootstrap-bindgen-off/engine_wasm.d.ts').read_text(); on = (root / 'bootstrap-bindgen-enabled/engine_wasm.d.ts').read_text()
+        names = lambda text: set(re.findall(r'^export function ([A-Za-z0-9_]+)\(', text, re.M))
+        expected = {'initialize_experimental_local_game', 'experimental_local_actor'}
+        passed = (off == Path('client/src/wasm/engine_wasm.d.ts').read_text() and names(on) - names(off) == expected
+            and not names(off) - names(on) and not names(off) & expected
+            and 'export function initialize_experimental_local_game(request: any): any;' in on
+            and 'export function experimental_local_actor(): number | undefined;' in on)
+        path = Path(os.environ['MANUAL_EVIDENCE']) / 'red-adjudication.json'
+        value = json.loads(path.read_text()); value['declarations_verified'] = passed; path.write_text(json.dumps(value) + '\n')
+        print(json.dumps({'declarations_verified': passed})); raise SystemExit(0 if passed else 1)
+        DECL
+    - name: Copy ignored candidate off runtime for checks
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py baseline-runtime-copy bash -euo pipefail <<'COPY'
+        cp "$RUNNER_TEMP/bootstrap-bindgen-off/engine_wasm.js" client/src/wasm/engine_wasm.js
+        cp "$RUNNER_TEMP/bootstrap-bindgen-off/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+        COPY
+    - name: Run all 102 selected adapter tests
+      working-directory: candidate-source
+      run: |
+        # Pinned Vitest 4.1.0's JSON reporter writes to stdout when outputFile
+        # is absent. Raw report/failure text stays in memory; stderr is discarded.
+        # https://github.com/vitest-dev/vitest/blob/v4.1.0/packages/vitest/src/node/reporters/json.ts
+        python3 scripts/ci/manual-integration-guard.py client-adapter-tests python3 - 2>/dev/null <<'TESTS'
+        import json, os, subprocess
+        from pathlib import Path
+        summary = {'runner_exit_code': None, 'report_valid': False, 'all_selected_tests_passed': False}
+        result = None
+        try:
+            result = subprocess.run([
+                'pnpm', '--dir', 'client', 'exec', 'vitest', 'run', '--config', 'vitest.config.ts',
+                '--pool=forks', '--isolate', '--maxWorkers=1', '--no-file-parallelism',
+                '--coverage.enabled=false', '--reporter=json', '--silent=true',
+                'src/adapter/__tests__/engine-worker.test.ts',
+                'src/adapter/__tests__/engine-worker-client.test.ts',
+                'src/adapter/__tests__/wasm-adapter.test.ts',
+            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, encoding='utf-8', errors='replace',
+                env={**os.environ, 'NO_COLOR': '1', 'FORCE_COLOR': '0'})
+            summary['runner_exit_code'] = result.returncode
+            report = json.loads(result.stdout)
+            statuses = [case['status'] for file in report['testResults'] for case in file['assertionResults']]
+            counts = {status: statuses.count(status) for status in ['passed', 'failed', 'skipped', 'pending', 'todo', 'disabled']}
+            valid = (len(report['testResults']) == 3 and len(statuses) > 0 and
+                     sum(counts.values()) == len(statuses) == report['numTotalTests'] and
+                     counts['passed'] == report['numPassedTests'] and counts['failed'] == report['numFailedTests'])
+            if valid:
+                summary.update(report_valid=True, tests_total=len(statuses),
+                               tests_executed=counts['passed'] + counts['failed'],
+                               tests_passed=counts['passed'], tests_failed=counts['failed'],
+                               tests_skipped=counts['skipped'], tests_pending=counts['pending'],
+                               tests_todo=counts['todo'], tests_disabled=counts['disabled'],
+                               all_selected_tests_passed=result.returncode == 0 and counts['passed'] == len(statuses))
+        except Exception:
+            summary['error'] = 'adapter-report-unavailable'
+        Path(os.environ['MANUAL_EVIDENCE'], 'adapter-assertions.json').write_text(json.dumps(summary) + '\n')
+        print(json.dumps(summary))
+        code = result.returncode if result is not None else 1
+        if code == 0 and not summary['all_selected_tests_passed']:
+            code = 1
+        raise SystemExit(code if code >= 0 else 128 - code)
+        TESTS
+    - name: Run actual candidate enabled page
+      working-directory: candidate-source
+      run: |
+        export BOOTSTRAP_CANDIDATE_ARTIFACT=enabled
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+        if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
+        # Existing hosted browser/driver inventory and direct documented W3C API:
+        # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
+        # https://developer.chrome.com/docs/chromedriver/get-started
+        # https://www.w3.org/TR/webdriver2/#execute-async-script
+        python3 scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail <<'BROWSER'
+        # Raw W3C replies and session IDs stay in shell memory. Neither server
+        # output nor browser/performance/driver logs are recorded, even on failure.
+        exec 2>/dev/null
+        session_id=''
+        vite_pid=''
+        driver_pid=''
+        cleanup() {
+          if [ -n "$session_id" ]; then
+            curl --silent --max-time 10 -X DELETE "http://127.0.0.1:9515/session/$session_id" \
+              >/dev/null || true
+          fi
+          if [ -n "$vite_pid" ]; then kill "$vite_pid" 2>/dev/null || true; fi
+          if [ -n "$driver_pid" ]; then kill "$driver_pid" 2>/dev/null || true; fi
+        }
+        trap cleanup EXIT
+        trap 'printf "{\"error\":\"browser-command-failed\"}\n"' ERR
+        TELEMETRY_URL='' pnpm --dir client dev --host 127.0.0.1 --port 5173 --strictPort \
+          >/dev/null 2>&1 &
+        vite_pid=$!
+        CHROME_LOG_FILE=/dev/null "$BOOTSTRAP_CHROMEDRIVER" --port=9515 --log-path=/dev/null \
+          >/dev/null 2>&1 &
+        driver_pid=$!
+        # One bounded startup interval and one preflight request; no polling or retry.
+        sleep 5
+        kill -0 "$vite_pid" "$driver_pid"
+        driver_status=$(curl --fail --silent --max-time 10 http://127.0.0.1:9515/status)
+        printf '%s' "$driver_status" | jq -e '.value.ready == true' >/dev/null
+        served_glue_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm.js \
+          | sha256sum | cut -d ' ' -f 1)
+        served_wasm_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm_bg.wasm \
+          | sha256sum | cut -d ' ' -f 1)
+        wasm_hash=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | cut -d ' ' -f 1)
+        glue_hash=$(sha256sum client/src/wasm/engine_wasm.js | cut -d ' ' -f 1)
+        test "$served_wasm_hash" = "$wasm_hash"
+        printf '%s  served-engine-glue\n%s  served-engine-wasm\n' "$served_glue_hash" "$served_wasm_hash" \
+          > "$MANUAL_EVIDENCE/served-artifacts.sha256"
+        baseline_tree=$(git -C ../baseline-source rev-parse HEAD^{tree})
+        candidate_tree=$(git rev-parse HEAD^{tree})
+        url="http://127.0.0.1:5173/manual-resolution-wasm-worker.html?artifact=$BOOTSTRAP_CANDIDATE_ARTIFACT&baseline_sha=$BOOTSTRAP_BASE_SHA&candidate_sha=$MANUAL_EXPECTED_SOURCE_SHA&baseline_tree=$baseline_tree&candidate_tree=$candidate_tree&wasm_sha256=$wasm_hash&glue_sha256=$glue_hash&served_glue_sha256=$served_glue_hash"
+        session_response=$(jq -n --arg binary "$(command -v google-chrome)" \
+          '{capabilities:{alwaysMatch:{browserName:"chrome","goog:chromeOptions":{binary:$binary,args:["--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-logging","--log-level=3"]},"goog:loggingPrefs":{browser:"OFF",performance:"OFF"}}}}' \
+          | curl --fail --silent --max-time 60 -H 'Content-Type: application/json' \
+            --data-binary @- http://127.0.0.1:9515/session)
+        session_id=$(printf '%s' "$session_response" \
+          | jq -er '.value.sessionId | select(type == "string" and test("^[a-zA-Z0-9-]+$"))')
+        timeouts_response=$(jq -n '{script:130000,pageLoad:60000,implicit:0}' \
+          | curl --fail --silent --max-time 10 -H 'Content-Type: application/json' \
+            --data-binary @- "http://127.0.0.1:9515/session/$session_id/timeouts")
+        printf '%s' "$timeouts_response" | jq -e '.value == null' >/dev/null
+        navigation_response=$(jq -n --arg url "$url" '{url:$url}' \
+          | curl --fail --silent --max-time 65 -H 'Content-Type: application/json' \
+            --data-binary @- "http://127.0.0.1:9515/session/$session_id/url")
+        printf '%s' "$navigation_response" | jq -e '.value == null' >/dev/null
+        terminal_response=$(jq -n '{script:"const done = arguments[arguments.length - 1]; window.manualWasmBootstrap.completionPromise.then(done);",args:[]}' \
+          | curl --fail --silent --max-time 140 -H 'Content-Type: application/json' \
+            --data-binary @- "http://127.0.0.1:9515/session/$session_id/execute/async")
+        # Select allowlisted fields before the first write. Unexpected values
+        # become fixed invalid codes, never raw transport or application text.
+        printf '%s' "$terminal_response" | jq -c '
+          def fixed($values): . as $value | if ($values | index($value)) != null then $value else "invalid" end;
+          def boolean: if type == "boolean" then . else null end;
+          def hash($length): if type == "string" and test("^[a-f0-9]{" + ($length | tostring) + "}$") then . else null end;
+          def error_code: if . == null then null else . as $code | if ([
+            "boundary-object","artifact-fetch","worker-error-type","observation-failure",
+            "ordinary-init-rejected","ordinary-init-envelope","ordinary-init-events","worker-result",
+            "ordinary-install","viewer-rng-redaction","default-seed","default-player-count","default-format",
+            "default-match-type","default-loop-detection","wasm-refusal-envelope","wasm-refusal-reasons",
+            "wasm-refusal-reason-type","wasm-refusal-class","wasm-bracket-discriminator",
+            "wasm-occupied-discriminator","wasm-refusal-classifier","worker-refusal","worker-refusal-class",
+            "worker-bracket-discriminator","worker-occupied-discriminator","client-error-type","client-error-code",
+            "refusal-resident-preservation","card-db-load","malformed-match-seed","malformed-match-type",
+            "malformed-match-loop-detection","checkpoint-mode","limited-authority","served-wasm-identity",
+            "served-glue-identity","baseline-source-identity","source-identity","glue-identity",
+            "ordinary-decision","human-decision","issued-action","action-snapshot-change","action-recorded-once",
+            "boundary-failure","experimental-exports-absent","experimental-contract","page-deadline","page-error","page-rejection"
+          ] | index($code)) != null then $code else "invalid-error" end end;
+          def control_id: if type == "string" and test("^(wasm-shell|production-worker)\\.(local|host)\\.(resident_without_database|missing_database|omitted_defaults|null_defaults|undeclared_four_seats|malformed_match_fallback|valid_limited|all_cedh_bracket_reach|cedh_bracket_refusal|occupied_direction|resident_for_(local|host)_occupied|(valid_limited_for_)?(malformed_format|format_player_count|malformed_deck|player_deck_validation|opponent_deck_validation|empty_library_after_load))$") then . else "invalid-case" end;
+          def diagnostic_case($row): if . == null then null
+            elif $row == "ordinary_worker_action" and . == "production-worker.local.issued_action_reach" then .
+            else control_id end;
+          def stage: if . == null then null else fixed([
+            "row","initialize","observe","viewer-redaction","trusted-defaults","default-fields",
+            "refusal","resident-preservation","ordinary-action"
+          ]) end;
+          .value | {status:(.status | fixed(["pass","fail"])),
+            reason:(.reason | fixed(["candidate-green","expected-experimental-availability","unexpected-baseline-exports","incomplete-controls","timeout","uncaught-error","unhandled-rejection"])),
+            artifact:(.artifact | fixed(["enabled","off"])), error:(.error | error_code),
+            caseId:(.rows[-1].name as $row | .caseId | diagnostic_case($row)), stage:(.stage | stage),
+            rows:[(.rows // [])[] | {name:(.name | fixed(["artifact_identity","ordinary_initializer_preservation","ordinary_worker_action","experimental_availability","experimental_local_admission","experimental_strict_requests","experimental_lifecycle","experimental_privacy_closed","experimental_realm_fallback","feature_off_refusal"])),
+              status:(.status | fixed(["pass","fail","pending"])), error:(.error | error_code),
+              caseId:(.name as $row | .caseId | diagnostic_case($row)), stage:(.stage | stage),
+              evidence:(if .name == "artifact_identity" then .evidence | {
+                wasmHash:(.wasmHash | hash(64)), servedGlueHash:(.servedGlueHash | hash(64)),
+                supplied:{candidate_sha:(.supplied.candidate_sha | hash(40)), baseline_sha:(.supplied.baseline_sha | hash(40)),
+                  candidate_tree:(.supplied.candidate_tree | hash(40)), baseline_tree:(.supplied.baseline_tree | hash(40)),
+                  glue_sha256:(.supplied.glue_sha256 | hash(64))}}
+              elif .name == "ordinary_initializer_preservation" then [(.evidence // [])[] | {
+                name:(.name | control_id), status:(.status | fixed(["pass"])), evidence:{
+                  reachGuard:(if .evidence.reachGuard == null then null else .evidence.reachGuard | control_id end),
+                  initializationAccepted:(.evidence.initializationAccepted | boolean), stateInstalled:(.evidence.stateInstalled | boolean),
+                  replayInstalled:(.evidence.replayInstalled | boolean), defaultsMatched:(.evidence.defaultsMatched | boolean),
+                  viewerRngRedacted:(.evidence.viewerRngRedacted | boolean), trustedSeedPreserved:(.evidence.trustedSeedPreserved | boolean),
+                  refusalClassMatched:(.evidence.refusalClassMatched | boolean), typedDiscriminatorsMatched:(.evidence.typedDiscriminatorsMatched | boolean),
+                  clientCodeMatched:(.evidence.clientCodeMatched | boolean), residentPreserved:(.evidence.residentPreserved | boolean)}}]
+              elif .name == "ordinary_worker_action" then .evidence | {
+                ordinaryDecisionReached:(.ordinaryDecisionReached | boolean), humanDecisionIssued:(.humanDecisionIssued | boolean),
+                engineIssuedAction:(.engineIssuedAction | boolean), snapshotChanged:(.snapshotChanged | boolean),
+                replayRecordedOnce:(.replayRecordedOnce | boolean), recordedActionCount:(if .recordedActionCount == 1 then 1 else null end)}
+              elif .name == "experimental_availability" then .evidence | {
+                initialize_experimental_local_game:(.initialize_experimental_local_game | boolean), experimental_local_actor:(.experimental_local_actor | boolean)}
+              else .evidence | with_entries(select(.key | IN("explicitAdmission","ordinaryNeverAdmits","oldResidentPreserved","verifierReadOnly","adapterStrict","rawWorkerStrict","wasmBoundaryStrict","priorOwnerPreserved","failedRestorePreserved","checkedRestoreRevoked","ordinaryRevoked","postureRevoked","hostRefused","resetRevoked","privateWireClean","manualMutationClosed","laterExportsAbsent","mainThreadRefused","fallbackOrdinaryAction","fallbackExperimentalRefused","refusalPreserved","verifierNull","ordinaryWorkerLoaded"))) | map_values(boolean) end)}]}' > "$MANUAL_EVIDENCE/product-terminal.json"
+        jq -c '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
+          (if (.evidence | type) == "array" then (.evidence | length) else null end)}]}' \
+          "$MANUAL_EVIDENCE/product-terminal.json"
+        jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null
+        python3 - <<'SAVE'
+        import json, os
+        from pathlib import Path
+        root = Path(os.environ['MANUAL_EVIDENCE']); path = root / 'baseline-terminal.json'
+        value = json.loads(path.read_text()) if path.exists() else {}
+        value[os.environ['BOOTSTRAP_CANDIDATE_ARTIFACT']] = json.loads((root / 'product-terminal.json').read_text())
+        path.write_text(json.dumps(value) + '\n')
+        SAVE
+        BROWSER
+    - name: Run actual candidate off page
+      working-directory: candidate-source
+      run: |
+        export BOOTSTRAP_CANDIDATE_ARTIFACT=off
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
+        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+        if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
+        # Existing hosted browser/driver inventory and direct documented W3C API:
+        # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
+        # https://developer.chrome.com/docs/chromedriver/get-started
+        # https://www.w3.org/TR/webdriver2/#execute-async-script
+        python3 scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail <<'BROWSER'
+        # Raw W3C replies and session IDs stay in shell memory. Neither server
+        # output nor browser/performance/driver logs are recorded, even on failure.
+        exec 2>/dev/null
+        session_id=''
+        vite_pid=''
+        driver_pid=''
+        cleanup() {
+          if [ -n "$session_id" ]; then
+            curl --silent --max-time 10 -X DELETE "http://127.0.0.1:9515/session/$session_id" \
+              >/dev/null || true
+          fi
+          if [ -n "$vite_pid" ]; then kill "$vite_pid" 2>/dev/null || true; fi
+          if [ -n "$driver_pid" ]; then kill "$driver_pid" 2>/dev/null || true; fi
+        }
+        trap cleanup EXIT
+        trap 'printf "{\"error\":\"browser-command-failed\"}\n"' ERR
+        TELEMETRY_URL='' pnpm --dir client dev --host 127.0.0.1 --port 5173 --strictPort \
+          >/dev/null 2>&1 &
+        vite_pid=$!
+        CHROME_LOG_FILE=/dev/null "$BOOTSTRAP_CHROMEDRIVER" --port=9515 --log-path=/dev/null \
+          >/dev/null 2>&1 &
+        driver_pid=$!
+        # One bounded startup interval and one preflight request; no polling or retry.
+        sleep 5
+        kill -0 "$vite_pid" "$driver_pid"
+        driver_status=$(curl --fail --silent --max-time 10 http://127.0.0.1:9515/status)
+        printf '%s' "$driver_status" | jq -e '.value.ready == true' >/dev/null
+        served_glue_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm.js \
+          | sha256sum | cut -d ' ' -f 1)
+        served_wasm_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm_bg.wasm \
+          | sha256sum | cut -d ' ' -f 1)
+        wasm_hash=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | cut -d ' ' -f 1)
+        glue_hash=$(sha256sum client/src/wasm/engine_wasm.js | cut -d ' ' -f 1)
+        test "$served_wasm_hash" = "$wasm_hash"
+        printf '%s  served-engine-glue\n%s  served-engine-wasm\n' "$served_glue_hash" "$served_wasm_hash" \
+          > "$MANUAL_EVIDENCE/served-artifacts.sha256"
+        baseline_tree=$(git -C ../baseline-source rev-parse HEAD^{tree})
+        candidate_tree=$(git rev-parse HEAD^{tree})
+        url="http://127.0.0.1:5173/manual-resolution-wasm-worker.html?artifact=$BOOTSTRAP_CANDIDATE_ARTIFACT&baseline_sha=$BOOTSTRAP_BASE_SHA&candidate_sha=$MANUAL_EXPECTED_SOURCE_SHA&baseline_tree=$baseline_tree&candidate_tree=$candidate_tree&wasm_sha256=$wasm_hash&glue_sha256=$glue_hash&served_glue_sha256=$served_glue_hash"
+        session_response=$(jq -n --arg binary "$(command -v google-chrome)" \
+          '{capabilities:{alwaysMatch:{browserName:"chrome","goog:chromeOptions":{binary:$binary,args:["--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-logging","--log-level=3"]},"goog:loggingPrefs":{browser:"OFF",performance:"OFF"}}}}' \
+          | curl --fail --silent --max-time 60 -H 'Content-Type: application/json' \
+            --data-binary @- http://127.0.0.1:9515/session)
+        session_id=$(printf '%s' "$session_response" \
+          | jq -er '.value.sessionId | select(type == "string" and test("^[a-zA-Z0-9-]+$"))')
+        timeouts_response=$(jq -n '{script:130000,pageLoad:60000,implicit:0}' \
+          | curl --fail --silent --max-time 10 -H 'Content-Type: application/json' \
+            --data-binary @- "http://127.0.0.1:9515/session/$session_id/timeouts")
+        printf '%s' "$timeouts_response" | jq -e '.value == null' >/dev/null
+        navigation_response=$(jq -n --arg url "$url" '{url:$url}' \
+          | curl --fail --silent --max-time 65 -H 'Content-Type: application/json' \
+            --data-binary @- "http://127.0.0.1:9515/session/$session_id/url")
+        printf '%s' "$navigation_response" | jq -e '.value == null' >/dev/null
+        terminal_response=$(jq -n '{script:"const done = arguments[arguments.length - 1]; window.manualWasmBootstrap.completionPromise.then(done);",args:[]}' \
+          | curl --fail --silent --max-time 140 -H 'Content-Type: application/json' \
+            --data-binary @- "http://127.0.0.1:9515/session/$session_id/execute/async")
+        # Select allowlisted fields before the first write. Unexpected values
+        # become fixed invalid codes, never raw transport or application text.
+        printf '%s' "$terminal_response" | jq -c '
+          def fixed($values): . as $value | if ($values | index($value)) != null then $value else "invalid" end;
+          def boolean: if type == "boolean" then . else null end;
+          def hash($length): if type == "string" and test("^[a-f0-9]{" + ($length | tostring) + "}$") then . else null end;
+          def error_code: if . == null then null else . as $code | if ([
+            "boundary-object","artifact-fetch","worker-error-type","observation-failure",
+            "ordinary-init-rejected","ordinary-init-envelope","ordinary-init-events","worker-result",
+            "ordinary-install","viewer-rng-redaction","default-seed","default-player-count","default-format",
+            "default-match-type","default-loop-detection","wasm-refusal-envelope","wasm-refusal-reasons",
+            "wasm-refusal-reason-type","wasm-refusal-class","wasm-bracket-discriminator",
+            "wasm-occupied-discriminator","wasm-refusal-classifier","worker-refusal","worker-refusal-class",
+            "worker-bracket-discriminator","worker-occupied-discriminator","client-error-type","client-error-code",
+            "refusal-resident-preservation","card-db-load","malformed-match-seed","malformed-match-type",
+            "malformed-match-loop-detection","checkpoint-mode","limited-authority","served-wasm-identity",
+            "served-glue-identity","baseline-source-identity","source-identity","glue-identity",
+            "ordinary-decision","human-decision","issued-action","action-snapshot-change","action-recorded-once",
+            "boundary-failure","experimental-exports-absent","experimental-contract","page-deadline","page-error","page-rejection"
+          ] | index($code)) != null then $code else "invalid-error" end end;
+          def control_id: if type == "string" and test("^(wasm-shell|production-worker)\\.(local|host)\\.(resident_without_database|missing_database|omitted_defaults|null_defaults|undeclared_four_seats|malformed_match_fallback|valid_limited|all_cedh_bracket_reach|cedh_bracket_refusal|occupied_direction|resident_for_(local|host)_occupied|(valid_limited_for_)?(malformed_format|format_player_count|malformed_deck|player_deck_validation|opponent_deck_validation|empty_library_after_load))$") then . else "invalid-case" end;
+          def diagnostic_case($row): if . == null then null
+            elif $row == "ordinary_worker_action" and . == "production-worker.local.issued_action_reach" then .
+            else control_id end;
+          def stage: if . == null then null else fixed([
+            "row","initialize","observe","viewer-redaction","trusted-defaults","default-fields",
+            "refusal","resident-preservation","ordinary-action"
+          ]) end;
+          .value | {status:(.status | fixed(["pass","fail"])),
+            reason:(.reason | fixed(["candidate-green","expected-experimental-availability","unexpected-baseline-exports","incomplete-controls","timeout","uncaught-error","unhandled-rejection"])),
+            artifact:(.artifact | fixed(["enabled","off"])), error:(.error | error_code),
+            caseId:(.rows[-1].name as $row | .caseId | diagnostic_case($row)), stage:(.stage | stage),
+            rows:[(.rows // [])[] | {name:(.name | fixed(["artifact_identity","ordinary_initializer_preservation","ordinary_worker_action","experimental_availability","experimental_local_admission","experimental_strict_requests","experimental_lifecycle","experimental_privacy_closed","experimental_realm_fallback","feature_off_refusal"])),
+              status:(.status | fixed(["pass","fail","pending"])), error:(.error | error_code),
+              caseId:(.name as $row | .caseId | diagnostic_case($row)), stage:(.stage | stage),
+              evidence:(if .name == "artifact_identity" then .evidence | {
+                wasmHash:(.wasmHash | hash(64)), servedGlueHash:(.servedGlueHash | hash(64)),
+                supplied:{candidate_sha:(.supplied.candidate_sha | hash(40)), baseline_sha:(.supplied.baseline_sha | hash(40)),
+                  candidate_tree:(.supplied.candidate_tree | hash(40)), baseline_tree:(.supplied.baseline_tree | hash(40)),
+                  glue_sha256:(.supplied.glue_sha256 | hash(64))}}
+              elif .name == "ordinary_initializer_preservation" then [(.evidence // [])[] | {
+                name:(.name | control_id), status:(.status | fixed(["pass"])), evidence:{
+                  reachGuard:(if .evidence.reachGuard == null then null else .evidence.reachGuard | control_id end),
+                  initializationAccepted:(.evidence.initializationAccepted | boolean), stateInstalled:(.evidence.stateInstalled | boolean),
+                  replayInstalled:(.evidence.replayInstalled | boolean), defaultsMatched:(.evidence.defaultsMatched | boolean),
+                  viewerRngRedacted:(.evidence.viewerRngRedacted | boolean), trustedSeedPreserved:(.evidence.trustedSeedPreserved | boolean),
+                  refusalClassMatched:(.evidence.refusalClassMatched | boolean), typedDiscriminatorsMatched:(.evidence.typedDiscriminatorsMatched | boolean),
+                  clientCodeMatched:(.evidence.clientCodeMatched | boolean), residentPreserved:(.evidence.residentPreserved | boolean)}}]
+              elif .name == "ordinary_worker_action" then .evidence | {
+                ordinaryDecisionReached:(.ordinaryDecisionReached | boolean), humanDecisionIssued:(.humanDecisionIssued | boolean),
+                engineIssuedAction:(.engineIssuedAction | boolean), snapshotChanged:(.snapshotChanged | boolean),
+                replayRecordedOnce:(.replayRecordedOnce | boolean), recordedActionCount:(if .recordedActionCount == 1 then 1 else null end)}
+              elif .name == "experimental_availability" then .evidence | {
+                initialize_experimental_local_game:(.initialize_experimental_local_game | boolean), experimental_local_actor:(.experimental_local_actor | boolean)}
+              else .evidence | with_entries(select(.key | IN("explicitAdmission","ordinaryNeverAdmits","oldResidentPreserved","verifierReadOnly","adapterStrict","rawWorkerStrict","wasmBoundaryStrict","priorOwnerPreserved","failedRestorePreserved","checkedRestoreRevoked","ordinaryRevoked","postureRevoked","hostRefused","resetRevoked","privateWireClean","manualMutationClosed","laterExportsAbsent","mainThreadRefused","fallbackOrdinaryAction","fallbackExperimentalRefused","refusalPreserved","verifierNull","ordinaryWorkerLoaded"))) | map_values(boolean) end)}]}' > "$MANUAL_EVIDENCE/product-terminal.json"
+        jq -c '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
+          (if (.evidence | type) == "array" then (.evidence | length) else null end)}]}' \
+          "$MANUAL_EVIDENCE/product-terminal.json"
+        jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null
+        python3 - <<'SAVE'
+        import json, os
+        from pathlib import Path
+        root = Path(os.environ['MANUAL_EVIDENCE']); path = root / 'baseline-terminal.json'
+        value = json.loads(path.read_text()) if path.exists() else {}
+        value[os.environ['BOOTSTRAP_CANDIDATE_ARTIFACT']] = json.loads((root / 'product-terminal.json').read_text())
+        path.write_text(json.dumps(value) + '\n')
+        SAVE
+        BROWSER
+    - name: Check immutable source after candidate execution
+      if: always()
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py candidate-source-after true
+        cd ../baseline-source
+        MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-source-after true
+    - name: Independently adjudicate complete Stage1 candidate GREEN
+      if: always()
+      working-directory: candidate-source
+      run: |
+        python3 - 2>/dev/null <<'GREEN'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path(os.environ['MANUAL_EVIDENCE'])
+        def load(name):
+            try: return json.loads((root / name).read_text())
+            except Exception: return {}
+        value = load('red-adjudication.json'); terminals = load('baseline-terminal.json'); adapter = load('adapter-assertions.json')
+        complete = value.get('declarations_verified') is True
+        complete &= value.get('native_tests') == {'off': {'selected': 10, 'executed': 10, 'passed': True}, 'enabled': {'selected': 16, 'executed': 16, 'passed': True}}
+        complete &= adapter.get('report_valid') is True and adapter.get('all_selected_tests_passed') is True and adapter.get('runner_exit_code') == 0
+        complete &= all(adapter.get(key) == 102 for key in ['tests_total', 'tests_executed', 'tests_passed'])
+        complete &= all(adapter.get(key) == 0 for key in ['tests_failed', 'tests_skipped', 'tests_pending', 'tests_todo', 'tests_disabled'])
+        labels = ['candidate-source-before','baseline-source-before','baseline-runtime-inputs','candidate-rust-tools','candidate-format',
+            'candidate-native-off-archive','candidate-native-off-tests','candidate-native-enabled-archive','candidate-native-enabled-tests',
+            'candidate-clippy','candidate-wasm-off-build','candidate-wasm-off-bindgen','candidate-wasm-enabled-build','candidate-wasm-enabled-bindgen',
+            'candidate-declarations','hosted-tools','client-dependencies','baseline-runtime-copy','client-types','client-lint','client-protocol','client-adapter-tests',
+            'candidate-enabled-browser','candidate-off-browser','candidate-source-after','baseline-source-after']
+        records = {}
+        for label in labels:
+            record = load(label + '.json'); records[label] = record
+            before = label in ['candidate-source-before','baseline-source-before','baseline-runtime-inputs']
+            expected_sha = os.environ['BOOTSTRAP_BASE_SHA'] if label.startswith('baseline-source-') else os.environ['MANUAL_EXPECTED_SOURCE_SHA']
+            complete &= bool(record and record.get('source_sha') == expected_sha and record.get('label') == label
+                and record.get('exit_code') == record.get('effective_exit') == 0 and record.get('stop_reason') is None and record.get('source_unchanged') is True
+                and record.get('environment', {}).get('CARGO_PROFILE_DEV_DEBUG') == (None if before else '0')
+                and record.get('guard') == {'working_set_bytes':13*1024**3,'disk_free_min_bytes':4*1024**3,'sample_interval_seconds':1,'timeout_seconds':1500})
+        for artifact in ['enabled','off']:
+            terminal = terminals.get(artifact, {}); rows = terminal.get('rows', [])
+            extra = ['experimental_local_admission','experimental_strict_requests','experimental_lifecycle','experimental_privacy_closed','experimental_realm_fallback'] if artifact == 'enabled' else ['feature_off_refusal','experimental_realm_fallback']
+            complete &= terminal.get('status') == 'pass' and terminal.get('reason') == 'candidate-green' and terminal.get('artifact') == artifact
+            complete &= [row.get('name') for row in rows] == ['artifact_identity','ordinary_initializer_preservation','ordinary_worker_action','experimental_availability',*extra]
+            complete &= all(row.get('status') == 'pass' and all(row.get(key) is None for key in ['error','caseId','stage']) for row in rows)
+            if len(rows) != 4 + len(extra): complete = False; continue
+            complete &= rows[3].get('evidence') == {'initialize_experimental_local_game': artifact == 'enabled','experimental_local_actor': artifact == 'enabled'}
+            controls = rows[1].get('evidence', [])
+            names = {control.get('name') for control in controls}
+            complete &= len(controls) == 90 and len(names) == 90 and 'invalid-case' not in names
+            complete &= all(control.get('status') == 'pass' for control in controls)
+            for control in controls:
+                assertions = control.get('evidence', {})
+                reach_guard = assertions.get('reachGuard')
+                complete &= reach_guard is None or reach_guard in names
+                if reach_guard is None:
+                    complete &= all(assertions.get(key) is True for key in [
+                        'initializationAccepted', 'stateInstalled', 'replayInstalled'])
+                else:
+                    complete &= all(assertions.get(key) is True for key in [
+                        'refusalClassMatched', 'typedDiscriminatorsMatched', 'residentPreserved'])
+                name = control.get('name', '')
+                if name.rsplit('.', 1)[-1] in ['omitted_defaults', 'null_defaults', 'undeclared_four_seats', 'malformed_match_fallback']:
+                    complete &= all(assertions.get(key) is True for key in [
+                        'defaultsMatched', 'viewerRngRedacted', 'trustedSeedPreserved'])
+                if name.startswith('production-worker.') and name.rsplit('.', 1)[-1] in ['cedh_bracket_refusal', 'occupied_direction']:
+                    complete &= assertions.get('clientCodeMatched') is True
+            complete &= rows[2].get('evidence') == {
+                'ordinaryDecisionReached': True, 'humanDecisionIssued': True, 'engineIssuedAction': True,
+                'snapshotChanged': True, 'replayRecordedOnce': True, 'recordedActionCount': 1}
+            observed = rows[0].get('evidence', {}); supplied = observed.get('supplied', {})
+            complete &= supplied.get('candidate_sha') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] and supplied.get('candidate_tree') == records['candidate-source-before'].get('source_tree')
+            artifact_dir = Path(os.environ['RUNNER_TEMP']) / ('bootstrap-bindgen-' + artifact)
+            complete &= observed.get('wasmHash') == hashlib.sha256((artifact_dir / 'engine_wasm_bg.wasm').read_bytes()).hexdigest()
+            complete &= supplied.get('glue_sha256') == hashlib.sha256((artifact_dir / 'engine_wasm.js').read_bytes()).hexdigest()
+            expected_keys = {'experimental_local_admission': ['explicitAdmission', 'ordinaryNeverAdmits', 'oldResidentPreserved', 'verifierReadOnly'], 'experimental_strict_requests': ['adapterStrict', 'rawWorkerStrict', 'wasmBoundaryStrict', 'priorOwnerPreserved'], 'experimental_lifecycle': ['failedRestorePreserved', 'checkedRestoreRevoked', 'ordinaryRevoked', 'postureRevoked', 'hostRefused', 'resetRevoked'], 'experimental_privacy_closed': ['privateWireClean', 'manualMutationClosed', 'laterExportsAbsent'], 'experimental_realm_fallback': ['mainThreadRefused', 'fallbackOrdinaryAction', 'fallbackExperimentalRefused'], 'feature_off_refusal': ['refusalPreserved', 'verifierNull', 'ordinaryWorkerLoaded']}
+            for row in rows[4:]: complete &= row.get('evidence') == {key: True for key in expected_keys[row['name']]}
+        value.update(checkpoint_mode='stage1-green', product_green=bool(complete), qualifying_baseline_red=False, adapter_assertions=adapter, commands=records)
+        (root / 'red-adjudication.json').write_text(json.dumps(value) + '\n')
+        print(json.dumps({'product_green': bool(complete), 'native_selected_total':26,'adapter_selected_total':102}))
+        with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary: summary.write('Stage1 candidate GREEN: ' + str(bool(complete)).lower() + '. Native selected:26. Adapter selected:102.\n')
+        raise SystemExit(0 if complete else 1)
+        GREEN
+    - name: Upload exact safe evidence allowlist
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-baseline-red-evidence
+        path: |
+          bootstrap-evidence/baseline-source.txt
+          bootstrap-evidence/candidate-source.txt
+          bootstrap-evidence/baseline-inputs.sha256
+          bootstrap-evidence/baseline-artifacts.sha256
+          bootstrap-evidence/served-artifacts.sha256
+          bootstrap-evidence/adapter-assertions.json
+          bootstrap-evidence/baseline-terminal.json
+          bootstrap-evidence/red-adjudication.json
+          bootstrap-evidence/candidate-source-before.json
+          bootstrap-evidence/baseline-source-before.json
+          bootstrap-evidence/hosted-tools.json
+          bootstrap-evidence/client-dependencies.json
+          bootstrap-evidence/client-types.json
+          bootstrap-evidence/client-lint.json
+          bootstrap-evidence/client-protocol.json
+          bootstrap-evidence/baseline-wasm-build.json
+          bootstrap-evidence/baseline-bindgen.json
+          bootstrap-evidence/baseline-runtime-copy.json
+          bootstrap-evidence/client-adapter-tests.json
+          bootstrap-evidence/baseline-browser.json
+          bootstrap-evidence/candidate-source-after.json
+          bootstrap-evidence/baseline-source-after.json
+        if-no-files-found: warn
+        retention-days: 7

@@ -279,3 +279,35 @@ describe("EngineWorkerClient structured action rejections", () => {
     });
   });
 });
+
+
+describe("EngineWorkerClient experimental Local", () => {
+  it("forwards only the valid payload with its own envelope", async () => {
+    const client = new EngineWorkerClient();
+    const fields = { deckData: null, seed: 42, formatConfig: null, matchConfig: null, playerCount: 2, firstPlayer: 0 };
+    const pending = client.initializeExperimentalLocalGame(fields);
+    const worker = currentWorker();
+    expect(worker.posted[0]).toEqual({ ...fields, type: "initializeExperimentalLocalGame", id: 0 });
+    worker.replyResult(0, { events: [], log_entries: [] });
+    await expect(pending).resolves.toEqual({ events: [], log_entries: [] }); client.dispose();
+  });
+  it("rejects hostile fields including caller envelope fields before posting", async () => {
+    const client = new EngineWorkerClient();
+    for (const key of ["type", "id", "actor", "authenticatedActor", "owner", "session", "ticket", "enrollment", "worker", "unknown"]) {
+      await expect(client.initializeExperimentalLocalGame({ seed: 42, [key]: 0 })).rejects.toThrow("Invalid experimental Local request");
+    }
+    for (const request of [new Date(), new Map(), new (class {})()]) {
+      await expect(client.initializeExperimentalLocalGame(request as never)).rejects.toThrow("Invalid experimental Local request");
+    }
+    expect(currentWorker().posted).toHaveLength(0); client.dispose();
+  });
+  it("normalizes the primitive verifier without granting another seat", async () => {
+    const client = new EngineWorkerClient(); const worker = currentWorker();
+    for (const value of [0, 1, null, undefined]) {
+      const pending = client.experimentalLocalActor(); const last = worker.posted[worker.posted.length - 1];
+      expect(last.type).toBe("experimentalLocalActor"); worker.replyResult(last.id as number, value);
+      await expect(pending).resolves.toBe(value === 0 ? 0 : null);
+    }
+    client.dispose();
+  });
+});
