@@ -85,7 +85,7 @@ const dbText = JSON.stringify({
 const limited = formatMetadata("Limited")?.default_config;
 const validLimited: Inputs = {
   deckData: decks(), seed: 117, formatConfig: limited,
-  matchConfig: { match_type: "Bo1", loop_detection: "Off" }, playerCount: 2, firstPlayer: 0,
+  matchConfig: { match_type: "Bo1", loop_detection: { type: "Off" } }, playerCount: 2, firstPlayer: 0,
 };
 
 type AssertionCode =
@@ -267,8 +267,9 @@ function assertDefaults(observation: Observation, format: "Standard" | "FreeForA
   check(state.players.length === count && header.player_count === count, "default-player-count");
   check(state.format_config?.format === format && record(header.format_config).format === format, "default-format");
   check(state.match_config?.match_type === "Bo1" && match.match_type === "Bo1", "default-match-type");
-  // Off is intentionally elided by the engine's existing serde contract.
-  check((state.loop_detection ?? "Off") === "Off" && (match.loop_detection ?? "Off") === "Off", "default-loop-detection");
+  // MatchConfig elides Off; the runtime field remains a tagged enum.
+  check(record(state.loop_detection).type === "Off"
+    && (match.loop_detection === undefined || record(match.loop_detection).type === "Off"), "default-loop-detection");
 }
 
 async function refusal(
@@ -350,7 +351,9 @@ async function ordinaryControls(endpoint: Endpoint): Promise<void> {
         check(trustedState.rng_seed === 42 && header.seed === 42, "malformed-match-seed");
         activeStage = "default-fields";
         check(state.match_config?.match_type === "Bo1" && record(header.match_config).match_type === "Bo1", "malformed-match-type");
-        check((state.loop_detection ?? "Off") === "Off" && (record(header.match_config).loop_detection ?? "Off") === "Off", "malformed-match-loop-detection");
+        check(record(state.loop_detection).type === "Off"
+          && (record(header.match_config).loop_detection === undefined
+            || record(record(header.match_config).loop_detection).type === "Off"), "malformed-match-loop-detection");
       } else {
         assertDefaults(observation, fixture.format, fixture.count);
       }
