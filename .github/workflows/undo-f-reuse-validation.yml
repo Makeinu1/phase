@@ -292,3 +292,70 @@ jobs:
           path: rtc-evidence
           if-no-files-found: warn
           retention-days: 7
+
+  single-host-ui:
+    # No dependency on RTC/native/WASM job outcomes; immutable runtime reused.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 03b13eccaa6823ed41a0832044c33fb1821187e9
+          path: frontend
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Verify the same compiled WASM input without building an engine
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/single-host-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py ui-wasm-input \
+            python3 ../control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/ui-wasm-payload" "$GITHUB_WORKSPACE/ui-reused-inputs/wasm.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/ui-wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+      - name: Install only the pinned frontend's frozen dependencies
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/single-host-ui-evidence
+        run: |
+          test "$(git -C ../frontend rev-parse HEAD)" = 03b13eccaa6823ed41a0832044c33fb1821187e9
+          python3 ../control/scripts/ci/undo-f-guard.py ui-client-dependencies \
+            pnpm --dir ../frontend/client install --frozen-lockfile
+      - name: Single host consent, disabled Undo and real private Worker close
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/single-host-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py single-host-ui \
+            node ../control/scripts/ci/undo-f-single-host-ui.mjs \
+            "$GITHUB_WORKSPACE/frontend/client" "$GITHUB_WORKSPACE/ui-wasm-payload" \
+            crates/engine-wasm/src/fixtures/host-precast-card-data.json "$F_EVIDENCE"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-single-host-ui-evidence
+          path: single-host-ui-evidence
+          if-no-files-found: warn
+          retention-days: 7
