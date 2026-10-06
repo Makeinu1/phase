@@ -1,0 +1,149 @@
+name: Fork Undo capacity real WASM validation
+
+on:
+  push:
+    branches: [experiment/undo-capacity-limits]
+    paths:
+      - .github/workflows/undo-capacity-wasm-validation.yml
+      - scripts/ci/undo-capacity-wasm-guard.py
+      - scripts/ci/undo-capacity-wasm-manifest.py
+      - scripts/ci/undo-capacity-wasm-functional.mjs
+      - scripts/ci/undo-capacity-wasm-node.mjs
+      - scripts/ci/undo-capacity-wasm-browser.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-undo-capacity-wasm-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CAPACITY_SOURCE_SHA: f48a0d6ee0b143e4ec15b482249a70c932f7bde5
+  CARGO_BUILD_JOBS: '1'
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  wasm-build:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      manifest: ${{ steps.manifest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.CAPACITY_SOURCE_SHA }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: nightly-2026-04-19
+          target: wasm32-unknown-unknown
+          rust-src-dir: source
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+      - name: Guarded fixed-source WASM build
+        working-directory: source
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/undo-capacity-wasm-target
+          WASM_EVIDENCE: ${{ github.workspace }}/wasm-build-evidence
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/wasm-payload"
+          bash scripts/check-parser-combinators.sh e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+          python3 ../control/scripts/ci/undo-capacity-wasm-guard.py wasm-engine-build \
+            cargo build --locked --jobs 1 --verbose --package engine-wasm \
+            --target wasm32-unknown-unknown --profile tool \
+            --config profile.tool.opt-level=0 --config profile.tool.debug=0 \
+            --config profile.tool.incremental=false --config 'profile.tool.lto="off"' \
+            --config profile.tool.codegen-units=16
+          python3 ../control/scripts/ci/undo-capacity-wasm-guard.py wasm-bindgen \
+            wasm-bindgen --target web --out-name engine_wasm \
+            --out-dir "$GITHUB_WORKSPACE/wasm-payload" \
+            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/tool/engine_wasm.wasm"
+          grep -F 'link-arg=stack-size=16777216' "$WASM_EVIDENCE/wasm-engine-build.log"
+          printf '%s\n' '{"type":"module"}' > "$GITHUB_WORKSPACE/wasm-payload/package.json"
+      - name: Pin artifact contents and provenance
+        id: manifest
+        working-directory: source
+        run: |
+          SHA=$(python3 ../control/scripts/ci/undo-capacity-wasm-manifest.py create "$GITHUB_WORKSPACE/wasm-payload")
+          printf 'sha256=%s\n' "$SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: wasm-artifact
+        with:
+          name: undo-capacity-real-wasm
+          path: wasm-payload
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Record artifact and manifest identities
+        run: |
+          printf 'artifact-id=%s\nartifact-digest=%s\nmanifest-sha256=%s\n' \
+            '${{ steps.wasm-artifact.outputs.artifact-id }}' \
+            '${{ steps.wasm-artifact.outputs.artifact-digest }}' \
+            '${{ steps.manifest.outputs.sha256 }}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: undo-capacity-wasm-build-evidence
+          path: wasm-build-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  wasm-test:
+    needs: wasm-build
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.CAPACITY_SOURCE_SHA }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: undo-capacity-real-wasm
+          path: wasm-payload
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Verify identities and run Node then one Chrome Worker
+        working-directory: source
+        env:
+          WASM_EVIDENCE: ${{ github.workspace }}/wasm-test-evidence
+          MANIFEST_SHA: ${{ needs.wasm-build.outputs.manifest }}
+        run: |
+          python3 ../control/scripts/ci/undo-capacity-wasm-manifest.py verify "$GITHUB_WORKSPACE/wasm-payload" "$MANIFEST_SHA"
+          python3 ../control/scripts/ci/undo-capacity-wasm-guard.py node-functional \
+            node ../control/scripts/ci/undo-capacity-wasm-node.mjs "$GITHUB_WORKSPACE/wasm-payload" \
+            crates/engine-wasm/src/fixtures/host-precast-card-data.json
+          python3 ../control/scripts/ci/undo-capacity-wasm-guard.py chrome-functional \
+            node ../control/scripts/ci/undo-capacity-wasm-browser.mjs "$GITHUB_WORKSPACE/wasm-payload" \
+            "$WASM_EVIDENCE" crates/engine-wasm/src/fixtures/host-precast-card-data.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: undo-capacity-wasm-functional-evidence
+          path: wasm-test-evidence
+          if-no-files-found: warn
+          retention-days: 7
