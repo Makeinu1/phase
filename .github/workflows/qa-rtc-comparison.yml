@@ -11,13 +11,15 @@ jobs:
   rtc-comparison:
     if: github.repository == 'Makeinu1/phase'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        timeout-minutes: 2
         with:
           path: control
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        timeout-minutes: 2
         with:
           ref: eea2145f7421535981b282d1e139ba632854dc9e
           path: baseline
@@ -26,12 +28,15 @@ jobs:
             client
             scripts
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        timeout-minutes: 2
         with:
           node-version: '22'
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        timeout-minutes: 2
         with:
           version: '9.15.9'
       - name: Prepare pinned dependencies and unchanged QA artifact
+        timeout-minutes: 7
         shell: bash
         run: |
           python3 -m venv "$RUNNER_TEMP/rtc-python"
@@ -44,6 +49,7 @@ jobs:
             --prepare-only --root "$RUNNER_TEMP/wpt-rtc-control" \
             --output-dir "$GITHUB_WORKSPACE/rtc-preparation"
       - name: Fixed nine fresh browsers (no adaptive retry)
+        timeout-minutes: 21
         shell: bash
         run: |
           "$RUNNER_TEMP/rtc-python/bin/python" control/scripts/qa_rtc_comparison.py \
@@ -52,6 +58,7 @@ jobs:
             --browser-path /usr/bin/google-chrome \
             --output-dir "$GITHUB_WORKSPACE/rtc-evidence"
       - name: Preserve every trial including failures
+        timeout-minutes: 3
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -165,10 +165,16 @@ def main():
             require(sys.platform == "linux" and args.browser_path and Path(args.browser_path).is_file(), "standard Linux browser required")
             result["playwrightVersion"] = importlib.metadata.version("playwright")
             require(result["playwrightVersion"] == "1.62.0", "Playwright version mismatch")
+            result["stage"] = "browser-version"
+            result["browserVersionProbe"] = {"state": "unknown", "exitCode": None, "stdout": "", "stderr": ""}
             version = subprocess.run([args.browser_path, "--version"], capture_output=True, text=True, timeout=10)
+            result["browserVersionProbe"] = {
+                "state": "observed", "exitCode": version.returncode,
+                "stdout": version.stdout[:1024], "stderr": version.stderr[:1024],
+            }
+            result["browserExecutableVersion"] = version.stdout.strip()[:1024]
             require(version.returncode == 0 and version.stdout.strip() == "Google Chrome " + CHROME_VERSION,
                     "browser executable version mismatch")
-            result["browserExecutableVersion"] = version.stdout.strip()
             write_json(args.output_dir / "run-contract.json", {
                 "wptCommit": WPT_COMMIT, "case": args.case, "inputs": result["inputs"],
                 "deadlineMs": args.deadline_ms, "expectedBrowser": CHROME_VERSION,
