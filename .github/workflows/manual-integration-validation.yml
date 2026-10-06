@@ -1,0 +1,309 @@
+name: Fork Manual integration validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [experiment/manual-ui-clean]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  MANUAL_SOURCE_SHA: 2ea90812ed16f701c6257353493a3665f000cff0
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '1'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  # Prepared two-configuration design: the caller must resolve the compile budget
+  # before publishing this workflow. Each configuration is compiled once.
+  native:
+    if: >-
+      github.repository == 'Makeinu1/phase' &&
+      github.event.pull_request.head.repo.full_name == 'Makeinu1/phase' &&
+      github.event.pull_request.head.ref == 'experiment/manual-integration-actions'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/manual-integration-native-target
+      MANUAL_EVIDENCE: ${{ github.workspace }}/native-evidence
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.MANUAL_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - name: Record control and immutable source identities
+        working-directory: source
+        run: |
+          git -C ../control rev-parse HEAD
+          git rev-parse HEAD
+          sha256sum Cargo.lock client/pnpm-lock.yaml rust-toolchain.toml
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: nightly-2026-04-19
+          components: rustfmt,clippy,rustc-codegen-cranelift-preview
+          target: wasm32-unknown-unknown
+          rust-src-dir: source
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Record native tools and prepare archive directories
+        id: native-setup
+        working-directory: source
+        run: |
+          rustc -Vv
+          cargo -V
+          cargo-nextest --version
+          mkdir -p "$GITHUB_WORKSPACE/native-payload" "$CARGO_TARGET_DIR" \
+            "$RUNNER_TEMP/manual-integration-enabled" "$RUNNER_TEMP/manual-integration-disabled"
+          test -w "$RUNNER_TEMP/manual-integration-enabled"
+          test -w "$RUNNER_TEMP/manual-integration-disabled"
+      - name: Archive Manual enabled configuration once
+        id: enabled-archive
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py native-enabled-archive \
+            cargo nextest archive --locked --cargo-verbose --profile ci \
+            --config profile.test.debug=0 --config profile.test.incremental=false \
+            --config 'profile.test.codegen-backend="cranelift"' \
+            --package phase-engine --test manual_resolution_prototype \
+            --no-default-features --features manual_resolution_prototype \
+            --archive-file "$GITHUB_WORKSPACE/native-payload/enabled.tar.zst"
+      - name: Run all 28 enabled tests without compilation
+        id: enabled-tests
+        if: >-
+          !cancelled() && steps.enabled-archive.outcome == 'success' &&
+          steps.enabled-archive.outputs.guard_stopped == 'false'
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py native-enabled-tests \
+            cargo-nextest nextest run --profile ci \
+            --archive-file "$GITHUB_WORKSPACE/native-payload/enabled.tar.zst" \
+            --workspace-remap "$GITHUB_WORKSPACE/source" \
+            --extract-to "$RUNNER_TEMP/manual-integration-enabled" \
+            --status-level all --final-status-level all
+      - name: Archive Manual disabled configuration once
+        id: disabled-archive
+        if: >-
+          !cancelled() && steps.native-setup.outcome == 'success' &&
+          steps.enabled-archive.outputs.guard_stopped == 'false' &&
+          (steps.enabled-tests.outcome == 'skipped' ||
+           steps.enabled-tests.outputs.guard_stopped == 'false')
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py native-disabled-archive \
+            cargo nextest archive --locked --cargo-verbose --profile ci \
+            --config profile.test.debug=0 --config profile.test.incremental=false \
+            --config 'profile.test.codegen-backend="cranelift"' \
+            --package phase-engine --test manual_resolution_prototype \
+            --no-default-features \
+            --archive-file "$GITHUB_WORKSPACE/native-payload/disabled.tar.zst"
+      - name: Run both disabled restore tests without compilation
+        id: disabled-tests
+        if: >-
+          !cancelled() && steps.disabled-archive.outcome == 'success' &&
+          steps.disabled-archive.outputs.guard_stopped == 'false'
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py native-disabled-tests \
+            cargo-nextest nextest run --profile ci \
+            --archive-file "$GITHUB_WORKSPACE/native-payload/disabled.tar.zst" \
+            --workspace-remap "$GITHUB_WORKSPACE/source" \
+            --extract-to "$RUNNER_TEMP/manual-integration-disabled" \
+            --status-level all --final-status-level all
+      - name: Publish native results and verify actual test counts
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          evidence = Path(os.environ['MANUAL_EVIDENCE'])
+          expected = {'native-enabled-tests': 28, 'native-disabled-tests': 2}
+          labels = ['native-enabled-archive', 'native-enabled-tests',
+                    'native-disabled-archive', 'native-disabled-tests']
+          rows = ['| Command | Result | Child exit | Effective exit | Stop reason |',
+                  '| --- | --- | --- | --- | --- |']
+          incomplete = False
+          for label in labels:
+              path = evidence / (label + '.json')
+              if not path.is_file():
+                  rows.append(f'| {label} | NOT RUN | — | — | no command record; inspect setup/preceding step |')
+                  incomplete = True
+                  continue
+              record = json.loads(path.read_text())
+              print(json.dumps(record, indent=2))
+              log_path = evidence / (label + '.log')
+              log = log_path.read_text(errors='replace') if log_path.is_file() else ''
+              print(log)
+              result = 'SUCCEEDED' if record['effective_exit'] == 0 else 'FAILED'
+              if record['exit_code'] is None:
+                  result = 'NOT RUN'
+              if result == 'SUCCEEDED' and label in expected:
+                  count = expected[label]
+                  text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', log)
+                  if not re.search(rf'Summary[^\n]*\b{count} tests run: {count} passed, 0 skipped\b', text):
+                      result = 'INCOMPLETE fixture selection: expected ' + str(count)
+              incomplete |= result != 'SUCCEEDED'
+              rows.append(f"| {label} | {result} | {record['exit_code']} | {record['effective_exit']} | {record['stop_reason']} |")
+          rows.append('Real WASM, production UI board, synchronous substitute rollback, browser/RTC, and readiness: NOT RUN / INCOMPLETE.')
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write('\n'.join(rows) + '\n')
+          print('\n'.join(rows))
+          raise SystemExit(1 if incomplete else 0)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: manual-integration-native-evidence
+          path: |
+            native-evidence/*.log
+            native-evidence/*.jsonl
+            native-evidence/*.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  frontend:
+    if: >-
+      github.repository == 'Makeinu1/phase' &&
+      github.event.pull_request.head.repo.full_name == 'Makeinu1/phase' &&
+      github.event.pull_request.head.ref == 'experiment/manual-integration-actions'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MANUAL_EVIDENCE: ${{ github.workspace }}/frontend-evidence
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.MANUAL_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - name: Record control and immutable source identities
+        working-directory: source
+        run: |
+          git -C ../control rev-parse HEAD
+          git rev-parse HEAD
+          sha256sum Cargo.lock client/pnpm-lock.yaml rust-toolchain.toml
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.16.0
+      - name: Record frontend tools
+        working-directory: source
+        run: |
+          node --version
+          pnpm --version
+      - name: Install frozen client dependencies
+        id: client-dependencies
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py client-dependencies \
+            pnpm --dir client install --frozen-lockfile
+      - name: Run all three Manual UI test files (53 tests)
+        id: manual-ui-tests
+        if: >-
+          !cancelled() && steps.client-dependencies.outcome == 'success' &&
+          steps.client-dependencies.outputs.guard_stopped == 'false'
+        working-directory: source
+        run: |
+          pnpm --dir client exec vitest --version
+          python3 ../control/scripts/ci/manual-integration-guard.py manual-ui-tests \
+            pnpm --dir client exec vitest run --config vitest.config.ts \
+            --pool=forks --isolate --maxWorkers=1 --no-file-parallelism \
+            --coverage.enabled=false --reporter=verbose \
+            src/adapter/experimental/__tests__/manual-resolution-receipts.test.ts \
+            src/components/sandbox/__tests__/ManualResolutionReceiptUi.test.tsx \
+            src/components/sandbox/__tests__/ManualResolutionSandbox.test.tsx
+      - name: Check full client types
+        id: client-types
+        if: >-
+          !cancelled() && steps.manual-ui-tests.outputs.guard_stopped == 'false'
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py client-types \
+            pnpm --dir client run type-check
+      - name: Lint the full client
+        id: client-lint
+        if: >-
+          !cancelled() && steps.client-types.outputs.guard_stopped == 'false'
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py client-lint \
+            pnpm --dir client run lint
+      - name: Check protocol version separately
+        id: client-protocol
+        if: >-
+          !cancelled() && steps.client-lint.outputs.guard_stopped == 'false'
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/manual-integration-guard.py client-protocol \
+            pnpm --dir client run protocol:check
+      - name: Publish frontend results and verify actual UI test counts
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          evidence = Path(os.environ['MANUAL_EVIDENCE'])
+          labels = ['client-dependencies', 'manual-ui-tests', 'client-types',
+                    'client-lint', 'client-protocol']
+          rows = ['| Command | Result | Child exit | Effective exit | Stop reason |',
+                  '| --- | --- | --- | --- | --- |']
+          incomplete = False
+          for label in labels:
+              path = evidence / (label + '.json')
+              if not path.is_file():
+                  rows.append(f'| {label} | NOT RUN | — | — | no command record; inspect setup/preceding step |')
+                  incomplete = True
+                  continue
+              record = json.loads(path.read_text())
+              print(json.dumps(record, indent=2))
+              log_path = evidence / (label + '.log')
+              log = log_path.read_text(errors='replace') if log_path.is_file() else ''
+              print(log)
+              result = 'SUCCEEDED' if record['effective_exit'] == 0 else 'FAILED'
+              if record['exit_code'] is None:
+                  result = 'NOT RUN'
+              if result == 'SUCCEEDED' and label == 'manual-ui-tests':
+                  text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', log)
+                  if not (re.search(r'\bTest Files\s+3 passed\s+\(3\)', text) and
+                          re.search(r'\bTests\s+53 passed\s+\(53\)', text)):
+                      result = 'INCOMPLETE fixture selection: expected 3 files / 53 tests'
+              incomplete |= result != 'SUCCEEDED'
+              rows.append(f"| {label} | {result} | {record['exit_code']} | {record['effective_exit']} | {record['stop_reason']} |")
+          rows.append('Coverage collection/gate, real WASM, production UI board, synchronous substitute rollback, browser/RTC, and readiness: NOT RUN / INCOMPLETE.')
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write('\n'.join(rows) + '\n')
+          print('\n'.join(rows))
+          raise SystemExit(1 if incomplete else 0)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: manual-integration-frontend-evidence
+          path: |
+            frontend-evidence/*.log
+            frontend-evidence/*.jsonl
+            frontend-evidence/*.json
+          if-no-files-found: warn
+          retention-days: 1
