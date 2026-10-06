@@ -5084,6 +5084,8 @@ export interface EngineAdapter {
   restoreState(state: PersistedGameState): void | Promise<void>;
   /** Trusted local persistence snapshot, when this adapter owns the engine. */
   exportPersistenceState?(): Promise<string>;
+  /** Exact trusted export bytes; local engine decodes and validates the envelope. */
+  restoreTrustedState?(stateJson: string): Promise<void>;
   dispose(): void;
 
   /**

@@ -979,9 +979,14 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async restoreState(state: PersistedGameState): Promise<void> {
     this.assertInitialized("restoreState");
+    await this.restoreTrustedState(JSON.stringify(state));
+  }
+
+  /** Preserve engine-exported integers and private runtime without JS decoding. */
+  async restoreTrustedState(json: string): Promise<void> {
+    this.assertInitialized("restoreTrustedState");
     this.hostUndoObservationGeneration = Symbol();
     await this.requireCardDb();
-    const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
     this.invalidateAiDecisionDiagnostics();

@@ -44,6 +44,7 @@ const getViewerTransitionSnapshotJs = vi.hoisted(() => vi.fn());
 const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
+const restoreGameStateJs = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
@@ -62,6 +63,7 @@ vi.mock("@wasm/engine", () => ({
   set_multiplayer_mode: setMultiplayerModeJs,
   clear_game_state: clearGameStateJs,
   canonicalCardNames: canonicalCardNamesJs,
+  restore_game_state: restoreGameStateJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -889,6 +891,33 @@ describe("WasmAdapter", () => {
   });
 
   describe("restoreState", () => {
+    it("passes trusted raw unsafe integers unchanged to the worker after loading the DB", async () => {
+      await adapter.initialize();
+      const raw = ' { "u64":18446744073709551615,"u128":340282366920938463463374607431768211455 }\n';
+      await adapter.restoreTrustedState(raw);
+      expect(mockWorkerClient.restoreState).toHaveBeenCalledExactlyOnceWith(raw);
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.restoreState.mock.invocationCallOrder[0]);
+    });
+
+    it("preserves trusted raw bytes on the existing main-thread fallback queue", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("fixture fallback"));
+      await adapter.initialize();
+      const raw = ' { "u64":18446744073709551615,"u128":340282366920938463463374607431768211455 }\n';
+      await adapter.restoreTrustedState(raw);
+      expect(restoreGameStateJs).toHaveBeenCalledExactlyOnceWith(raw);
+      expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+      adapter.dispose();
+    });
+
+    it("does not bypass initialization or failed card DB loading for raw restore", async () => {
+      await expect(adapter.restoreTrustedState("{}")).rejects.toThrow(AdapterError);
+      await adapter.initialize();
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("boom"));
+      await expect(adapter.restoreTrustedState("{}")).rejects.toThrow("Card database failed to load");
+      expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+    });
+
     it("serializes state to JSON and posts to worker", async () => {
       await adapter.initialize();
 
