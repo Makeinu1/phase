@@ -5,7 +5,7 @@ import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import { AdapterErrorCode } from "../types";
 import type { DraftPlayerView } from "../draft-adapter";
-import type { GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
+import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
   InteractionId,
@@ -468,6 +468,59 @@ describe("ServerDraftAdapter", () => {
   describe("Issue #9319 pending submission reply ownership", () => {
     beforeEach(() => {
       enterAcceptedFullMatch(adapter, ws);
+    });
+
+    it("settles accepted ActionNoOp and releases the next Action and Interaction", async () => {
+      const pendingStates: boolean[] = [];
+      adapter.onEvent((event) => {
+        if (event.type === "actionPendingChanged") pendingStates.push(event.pending);
+      });
+
+      const zeroCountCreate: GameAction = {
+        type: "Debug",
+        data: {
+          type: "CreateCard",
+          data: {
+            card_name: "Lightning Bolt",
+            owner: 0,
+            zone: "Hand",
+            run_etb: false,
+            nonlegendary: false,
+            creation_kind: "Card",
+            count: 0,
+          },
+        },
+      };
+      const noOpPending = trackRejection(adapter.submitAction(zeroCountCreate, 0));
+      expect(JSON.parse(ws.send.mock.calls[0][0] as string)).toEqual({
+        type: "Action",
+        data: { action: zeroCountCreate },
+      });
+
+      receive(ws, "ActionNoOp", undefined);
+      const noOpOutcome = await noOpPending();
+
+      const actionPending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+      deliverOwnershipStateUpdate(ws, "reply-after-noop-action");
+      const actionOutcome = await actionPending();
+
+      const interactionPending = trackRejection(
+        adapter.submitInteraction(interactionSubmission("after-noop"), 0),
+      );
+      deliverOwnershipStateUpdate(ws, "reply-after-noop-interaction");
+      const interactionOutcome = await interactionPending();
+
+      expect.soft(noOpOutcome).toMatchObject({
+        resolvedWith: { events: [], log_entries: [] },
+      });
+      expect.soft(actionOutcome).toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-after-noop-action" }] },
+      });
+      expect.soft(interactionOutcome).toMatchObject({
+        resolvedWith: { events: [{ marker: "reply-after-noop-interaction" }] },
+      });
+      expect.soft(submissionTypes(ws)).toEqual(["Action", "Action", "Interaction"]);
+      expect.soft(pendingStates).toEqual([true, false, true, false, true, false]);
     });
 
     it("issue #9319 Action then Interaction keeps the first StateUpdate with its owner", async () => {

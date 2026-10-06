@@ -979,6 +979,16 @@ export class ServerDraftAdapter implements EngineAdapter {
         break;
       }
 
+      case "ActionNoOp": {
+        this.emit({ type: "actionPendingChanged", pending: false });
+        if (this.pendingResolve) {
+          this.pendingResolve({ events: [], log_entries: [] });
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        break;
+      }
+
       case "ManaPaymentPreview": {
         const data = msg.data as { request_id: number; source_ids: ObjectId[] };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
