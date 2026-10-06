@@ -1649,7 +1649,7 @@ function GamePageContent({
         flexZone="actionRail"
         scaleKey="actionRail"
         resizeCorner="bl"
-        className="fixed z-30 flex flex-col items-end gap-1.5 max-lg:portrait:w-full max-lg:portrait:flex-row max-lg:portrait:items-end max-lg:portrait:justify-between max-lg:portrait:gap-2"
+        className="pointer-events-none fixed z-30 flex flex-col items-end gap-1.5 max-lg:portrait:w-full max-lg:portrait:flex-row max-lg:portrait:items-end max-lg:portrait:justify-between max-lg:portrait:gap-2"
         style={{
           bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
           right: "calc(env(safe-area-inset-right) + var(--game-edge-right) + var(--game-right-rail-offset, 0px))",
@@ -1660,7 +1660,7 @@ function GamePageContent({
         {!isSpectatorMode && (
           <div
             data-mobile-action-left
-            className="hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0"
+            className="pointer-events-none hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0 [&>*]:pointer-events-auto"
           >
             <div className="flex flex-col gap-1 max-lg:gap-1">
               <MobilePhaseChip className="w-full" />
@@ -1675,7 +1675,7 @@ function GamePageContent({
         )}
         <div
           data-mobile-action-right
-          className="flex flex-col items-end gap-1.5 max-lg:min-w-0 max-lg:portrait:items-stretch lg:items-end"
+          className="pointer-events-none flex flex-col items-end gap-1.5 max-lg:min-w-0 max-lg:portrait:items-stretch lg:items-end [&>*]:pointer-events-auto"
         >
           {showFlowHelpNudge && <FlowHelpNudge />}
           {showSandboxToolsNudge && <SandboxToolsNudge />}
