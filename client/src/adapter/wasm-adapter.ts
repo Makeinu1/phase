@@ -1284,11 +1284,16 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     if (!claimed && this.installedHostLease !== null) return;
     if (claimed && owner && this.installedHostLease?.owner !== owner) return;
     if (claimed && owner && this.engine) {
+      // A private executor owns no state that must survive this session.
+      // Termination releases its runtime even if the release RPC cannot respond.
+      if (sharedAdapter !== this) {
+        this.dispose();
+        return;
+      }
       const lease = this.installedHostLease!;
       await this.engine.releaseHostSession(lease.key);
       if (this.installedHostLease === lease) {
         this.installedHostLease = null;
-        if (sharedAdapter !== this) this.dispose();
       }
       return;
     }

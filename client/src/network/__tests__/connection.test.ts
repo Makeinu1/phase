@@ -69,7 +69,7 @@ vi.mock("peerjs", () => {
 import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, TURN_CREDENTIALS_URL, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
 import { resolveTurnCredentialsUrl } from "../../config/turnCredentials";
 import { peerTransportFactory } from "../transport";
-import type { PeerTransportFactory, TransportPeer, TransportPeerOptions } from "../transport";
+import type { PeerTransportFactory, TransportConnection, TransportPeer, TransportPeerOptions } from "../transport";
 
 import { getDiagnosticHistory } from "../../services/troubleshooting";
 
@@ -471,6 +471,100 @@ describe("joinRoom", () => {
     peerState.emitPeer("open");
     const host = await hosting;
     host.destroy();
+  });
+});
+
+describe("hostRoom guest delivery", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ iceServers: [{ urls: "turn:turn.example.org:3478", username: "user", credential: "credential" }] }),
+    })));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  async function openHost() {
+    const creations: FakeTransportCreation[] = [];
+    const hosting = hostRoom(undefined, {
+      preferredRoomCode: "ABCDE",
+      transportFactory: makeFakeTransportFactory(creations),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const handle = creations[0].handle;
+    const peerOn = vi.spyOn(handle.peer, "on");
+    handle.emit("open");
+    return { host: await hosting, handle, peerOn };
+  }
+
+  it("delivers each distinct connection once despite repeated open events", async () => {
+    const { host, handle } = await openHost();
+    const received: TransportConnection[] = [];
+    host.onGuestConnected((conn) => received.push(conn));
+    const first = handle.peer.connect("guest-one", PEER_CONNECT_OPTIONS);
+    const second = handle.peer.connect("guest-two", PEER_CONNECT_OPTIONS);
+    handle.emit("connection", first);
+    handle.emit("connection", second);
+    handle.connections[0].emit("open");
+    handle.connections[0].emit("open");
+    handle.connections[1].emit("open");
+    handle.connections[1].emit("open");
+
+    expect(received).toEqual([first, second]);
+    host.destroy();
+  });
+
+  it("buffers an opened connection once before subscription and does not redeliver it", async () => {
+    const { host, handle } = await openHost();
+    const conn = handle.peer.connect("guest", PEER_CONNECT_OPTIONS);
+    handle.emit("connection", conn);
+    handle.connections[0].emit("open");
+    handle.connections[0].emit("open");
+    const received: TransportConnection[] = [];
+    const unsubscribe = host.onGuestConnected((opened) => received.push(opened));
+
+    expect(received).toEqual([conn]);
+    unsubscribe();
+    handle.connections[0].emit("open");
+    host.onGuestConnected((opened) => received.push(opened));
+    expect(received).toEqual([conn]);
+    host.destroy();
+  });
+
+  it("closes a pending connection that opens after destruction without delivering it", async () => {
+    const { host, handle } = await openHost();
+    const received = vi.fn();
+    host.onGuestConnected(received);
+    const conn = handle.peer.connect("guest", PEER_CONNECT_OPTIONS);
+    handle.emit("connection", conn);
+    host.destroy();
+    handle.connections[0].emit("open");
+
+    expect(conn.close).toHaveBeenCalledTimes(1);
+    expect(received).not.toHaveBeenCalled();
+  });
+
+  it("closes a queued connection event delivered after destruction without admitting it", async () => {
+    const { host, handle, peerOn } = await openHost();
+    const received = vi.fn();
+    host.onGuestConnected(received);
+    const conn = handle.peer.connect("late-guest", PEER_CONNECT_OPTIONS);
+    // Model an event already queued by the transport before peer.destroy removes listeners.
+    const queuedConnection = peerOn.mock.calls.find(([event]) => event === "connection")![1] as (conn: TransportConnection) => void;
+    host.destroy();
+    queuedConnection(conn);
+    handle.connections[0].emit("open");
+
+    expect(conn.close).toHaveBeenCalledTimes(1);
+    expect(received).not.toHaveBeenCalled();
   });
 });
 

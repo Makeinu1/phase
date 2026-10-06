@@ -604,7 +604,7 @@ export async function hostRoom(
   maintainSignaling(peer);
   traceP2P("Host", "peer-open-final", { peerId, roomCode });
 
-  // Multi-fire connection handler: every guest gets wrapped on `open`.
+  // Accept multiple guests, but deliver each connection only on its first open.
   peer.on("connection", (conn) => {
     traceP2P("Host", "peer-connection", {
       peerId,
@@ -614,7 +614,7 @@ export async function hostRoom(
       try { conn.close(); } catch { /* best-effort */ }
       return;
     }
-    conn.on("open", () => {
+    conn.once("open", () => {
       traceP2P("Host", "conn-open", {
         peerId,
         connOpen: conn.open,
