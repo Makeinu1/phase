@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  MANUAL_SOURCE_SHA: 5fbd380a24eee151103328465f980e492209ae18
+  MANUAL_SOURCE_SHA: 1c6c3f43b7db49111058fbf8247fc144714c739f
   CARGO_INCREMENTAL: '0'
   CARGO_BUILD_JOBS: '1'
   CARGO_TERM_COLOR: never
@@ -220,7 +220,7 @@ jobs:
         run: |
           python3 ../control/scripts/ci/manual-integration-guard.py client-dependencies \
             pnpm --dir client install --frozen-lockfile
-      - name: Run all three Manual UI test files (53 tests)
+      - name: Run all three Manual UI test files (65 tests)
         id: manual-ui-tests
         if: >-
           !cancelled() && steps.client-dependencies.outcome == 'success' &&
@@ -288,8 +288,8 @@ jobs:
               if result == 'SUCCEEDED' and label == 'manual-ui-tests':
                   text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', log)
                   if not (re.search(r'\bTest Files\s+3 passed\s+\(3\)', text) and
-                          re.search(r'\bTests\s+53 passed\s+\(53\)', text)):
-                      result = 'INCOMPLETE fixture selection: expected 3 files / 53 tests'
+                          re.search(r'\bTests\s+65 passed\s+\(65\)', text)):
+                      result = 'INCOMPLETE fixture selection: expected 3 files / 65 tests'
               incomplete |= result != 'SUCCEEDED'
               rows.append(f"| {label} | {result} | {record['exit_code']} | {record['effective_exit']} | {record['stop_reason']} |")
           rows.append('Coverage collection/gate, real WASM, production UI board, synchronous substitute rollback, browser/RTC, and readiness: NOT RUN / INCOMPLETE.')
