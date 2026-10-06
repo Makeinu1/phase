@@ -64,7 +64,11 @@ function makePort(
   reconcile = vi.fn<ManualResolutionCommandPort["reconcileManualResolution"]>()
     .mockImplementation(async (request) => indeterminateReconciliation(request, "Still waiting for an authoritative answer.")),
 ): ManualResolutionCommandPort {
-  return { submitManualResolutionCommand: submit, reconcileManualResolution: reconcile };
+  return {
+    getUnresolvedManualResolutionRequest: () => null,
+    submitManualResolutionCommand: submit,
+    reconcileManualResolution: reconcile,
+  };
 }
 
 interface HarnessProps {

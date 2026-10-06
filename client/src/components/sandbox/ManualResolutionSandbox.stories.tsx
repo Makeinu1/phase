@@ -35,6 +35,7 @@ function createLocalMockPortFactory(
   setLastAction: (value: string) => void,
 ): ManualResolutionCommandPortFactory {
   return (scope): ManualResolutionCommandPort => ({
+    getUnresolvedManualResolutionRequest: () => null,
     async submitManualResolutionCommand(request: ManualResolutionRequest) {
       const { command } = request;
       if (
