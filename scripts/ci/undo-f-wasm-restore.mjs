@@ -80,7 +80,7 @@ try {
   const binding = engine.host_precast_undo_status().binding;
   engine.enable_host_precast_undo(binding);
   stage = "cast-and-checkpoint";
-  const castResult = submit(0, { ...cast, data: { ...cast.data, payment_mode: "Auto" } });
+  const castResult = submit(0, cast);
   const armed = engine.host_precast_undo_status();
   const post = state();
   check(armed.phase === "Armed" && armed.receipt && castResult.events.some(event => event.type === "SpellCast"), "real-cast-checkpoint");
@@ -105,7 +105,7 @@ try {
   stage = "one-use-refusal";
   refusal(binding, armed.receipt);
   stage = "recast-old-receipt-refusal";
-  submit(0, { ...cast, data: { ...cast.data, payment_mode: "Auto" } });
+  submit(0, cast);
   const recast = engine.host_precast_undo_status();
   check(recast.phase === "Armed" && recast.receipt !== armed.receipt, "fresh-recast-receipt");
   refusal(binding, armed.receipt);
