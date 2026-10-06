@@ -418,7 +418,8 @@ def admit():
         assert reference['archive' if native else 'raw'] is not None
         if os.environ['STAGE1_REQUIRE_FULL'] == 'true': assert reference['checks' if native else 'full'] is not None
         descriptors = {}
-        for key,record in reference.items():
+        for key in ('archive','checks') if native else ('raw','full'):
+            record = reference[key]
             if record is None: continue
             kind = 'native' if key == 'archive' else key; selected_feature = 'enabled' if native else feature
             assert set(record) == {'kind','feature','producer','artifact','manifest_sha256','files'}
