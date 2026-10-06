@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 
-const [client, wasm, fixture, serverPackages, evidence] = process.argv.slice(2).map(x => path.resolve(x));
+const [client, wasm, draft, fixture, serverPackages, evidence] = process.argv.slice(2).map(x => path.resolve(x));
 const frontendSha = "03b13eccaa6823ed41a0832044c33fb1821187e9";
 const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -15,6 +15,7 @@ const git = (...args) => execFileSync("git", ["-C", client, ...args], { encoding
 await mkdir(evidence, { recursive: true });
 const result = { frontendSha, engineSha, workflowSha: process.env.GITHUB_SHA,
   scope: "real full App + isolated contexts + loopback PeerJS/native RTC; one host cast; pointer Undo",
+  stagesPassed: [],
   guestCast: "NOT RUN", safari: "NOT RUN", memoryReclamation: "NOT RUN" };
 let stage = "verify-inputs", category = "setup";
 let vite, chrome, server, socket;
@@ -43,6 +44,23 @@ try {
     const digest = hash(await readFile(path.join(wasm, name))); assert(digest === manifest.files[name].sha256, "runtime file differs");
     result.runtimeHashes[name] = digest; await copyFile(path.join(wasm, name), path.join(client, "src/wasm", name));
   }
+  const draftRaw = await readFile(path.join(draft, "manifest.json")), draftManifest = JSON.parse(draftRaw);
+  result.draftManifestSha256 = hash(draftRaw);
+  assert(result.draftManifestSha256 === "6a0043113fd25b7f2a0499ac570aabee51ea9e0ba74523309cc3f4e6fbb805a0" && draftManifest.source_sha === engineSha
+    && draftManifest.workflow_sha === "eac6c9be9b1e0f1b9406506017c195f1107b6437", "draft producer manifest differs");
+  assert(Object.keys(manifest.input_sha256).every(key => manifest.input_sha256[key] === draftManifest.input_sha256[key])
+    && JSON.stringify(manifest.tool_versions) === JSON.stringify(draftManifest.tool_versions), "draft and engine compiled inputs differ");
+  const draftFiles = ["draft_wasm.js", "draft_wasm.d.ts", "draft_wasm_bg.wasm", "draft_wasm_bg.wasm.d.ts", "package.json", "provenance.json"];
+  assert(Object.keys(draftManifest.files).sort().join() === draftFiles.sort().join(), "draft file inventory differs");
+  result.draftRuntimeHashes = {};
+  for (const name of draftFiles) {
+    const bytes = await readFile(path.join(draft, name)), digest = hash(bytes), expected = draftManifest.files[name];
+    assert(bytes.length === expected.bytes && digest === expected.sha256, "draft paired file differs");
+    result.draftRuntimeHashes[name] = digest;
+    if (name === "draft_wasm.js" || name === "draft_wasm_bg.wasm") await copyFile(path.join(draft, name), path.join(client, "src/wasm", name));
+  }
+  await copyFile(path.join(draft, "manifest.json"), path.join(evidence, "draft-input-manifest.json"));
+  await copyFile(path.join(draft, "provenance.json"), path.join(evidence, "draft-input-provenance.json"));
   const harness = path.join(path.dirname(fileURLToPath(import.meta.url)), "undo-f-two-seat-bootstrap.ts");
   result.harnessSha256 = hash(await readFile(harness)); result.fixtureSha256 = hash(await readFile(fixture));
   assert(result.fixtureSha256 === "4e3ca5348602f8f7ea762a27c36cfade8ed6fade547eefa279714dfd166cea66", "official fixture pin differs");
@@ -131,6 +149,11 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     await cdp("Page.navigate", { url: "http://127.0.0.1:5188/multiplayer" }, sessionId);
   }
   const { host, guest } = pages;
+  stage = "full-app-startup";
+  for (const page of [host, guest]) {
+    await page.wait("window.__twoSeatQa && document.getElementById('root')?.childElementCount>0 && [...document.querySelectorAll('input[type=checkbox]')].some(n=>n.closest('label')?.textContent.includes('I agree that the host'))", 90);
+  }
+  result.stagesPassed.push("full-app-startup");
   stage = "full-app-consent";
   for (const page of [host, guest]) {
     await page.wait("window.__twoSeatQa && [...document.querySelectorAll('input[type=checkbox]')].some(n=>n.closest('label')?.textContent.includes('I agree that the host'))", 90);
@@ -139,6 +162,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     await page.click(consent); await page.wait("window.__twoSeatQa.status().agreed===true");
   }
   result.bothRealConsentChecked = true;
+  result.stagesPassed.push("both-real-consent");
   stage = "host-app-setup";
   await host.click(host.button("Host Game"));
   await host.wait("document.querySelector('button[aria-label=Format]')");
@@ -175,6 +199,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   }
   assert((await host.evaluate("window.__twoSeatQa.status().seat")) === 0 && (await guest.evaluate("window.__twoSeatQa.status().seat")) === 1, "real seat assignment mismatch");
   result.realTwoSeatAppConnected = true;
+  result.stagesPassed.push("real-two-seat-pairing");
   category = "setup"; stage = "ordinary-app-actions";
   let reached = false, steps = 0;
   for (; steps < 500; steps++) {
@@ -184,6 +209,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   }
   assert(reached, "ordinary host cast not reached"); result.setupSteps = steps;
   assert(await host.evaluate("window.__twoSeatQa.prepareCast()"), "pre-floating semantic mana setup failed");
+  result.stagesPassed.push("ordinary-app-actions");
   category = "product"; stage = "host-pointer-cast";
   const castPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(castPoint, "Bears hand card pointer unavailable");
   await host.point(castPoint.x, castPoint.y, true);
@@ -191,6 +217,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   assert(await host.evaluate("window.__twoSeatQa.recordCast()"), "real app cast snapshot missing");
   await guest.wait("window.__twoSeatQa.status().stackCount===1");
   const beforeRevision = await guest.evaluate("window.__twoSeatQa.status().lastStateRevision");
+  result.stagesPassed.push("host-pointer-cast");
   const undo = host.button("Sandbox pre-cast Undo");
   await host.wait(`(()=>{const b=${undo};return b&&!b.disabled;})()`);
   await host.cropControl(undo, "host-armed-undo-control.png");
@@ -199,6 +226,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   await host.wait("window.__twoSeatQa.restoreWitness()", 30);
   await guest.wait("window.__twoSeatQa.status().stackCount===0 && !window.__twoSeatQa.status().blocked", 30);
   const h = await host.evaluate("window.__twoSeatQa.status()"), g = await guest.evaluate("window.__twoSeatQa.status()");
+  assert(h.safeErrors.length === 0 && g.safeErrors.length === 0, "seat observation or transport errors present");
   assert(h.wire.filter(x => x.direction === "send" && x.type === "state_update").map(x => x.phase).join() === "adopted,released", "host phase ordering failed");
   assert(g.wire.filter(x => x.direction === "send" && x.type === "state_ack").map(x => x.phase).join() === "adopted,released", "guest exact ACK ordering failed");
   assert(h.wire.filter(x => x.direction === "receive" && x.type === "state_ack").map(x => x.phase).join() === "adopted,released"
@@ -215,11 +243,15 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   assert(await host.evaluate("window.__twoSeatQa.publicState()") === await guest.evaluate("window.__twoSeatQa.publicState()"), "public board differs after restore");
   assert(g.privateProjectionChecks > 0 && g.privateProjectionOk && await guest.evaluate("window.__twoSeatQa.privacy()"), "guest projection privacy failed");
   result.restore = { host: h, guest: g, beforeRevision, publicBoardEqual: true, guestRedaction: true };
+  result.stagesPassed.push("pointer-undo-exact-acks-restore-privacy");
   await host.cropControl(undo, "host-restored-undo-control.png");
   stage = "next-legal-pointer-cast";
   const nextPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(nextPoint, "restored hand card pointer unavailable");
   await host.point(nextPoint.x, nextPoint.y, true);
   await host.wait("window.__twoSeatQa.status().stackCount===1"); await guest.wait("window.__twoSeatQa.status().stackCount===1");
+  const finalHost = await host.evaluate("window.__twoSeatQa.status()"), finalGuest = await guest.evaluate("window.__twoSeatQa.status()");
+  assert(finalHost.safeErrors.length === 0 && finalGuest.safeErrors.length === 0, "seat observation or transport errors present before success");
+  result.stagesPassed.push("next-legal-pointer-cast");
   result.nextLegalCast = true; result.pass = true; stage = "complete";
   git("diff", "--exit-code");
   await cdp("Browser.close").catch(() => {});
@@ -229,6 +261,16 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   result.lastObservation = {};
   for (const [role, page] of Object.entries(pages)) {
     try { result.lastObservation[role] = await page.evaluate("window.__twoSeatQa?.status() ?? null"); } catch {}
+  }
+  const safeErrors = Object.values(result.lastObservation).flatMap(x => x?.safeErrors ?? []);
+  if (safeErrors.includes("wire-observer-failed")) {
+    result.failureCategory = "observation"; result.failureCode = "WIRE_OBSERVATION_INCOMPLETE";
+  } else if (safeErrors.length > 0) {
+    result.failureCategory = "communication"; result.failureCode = "REAL_TRANSPORT_ERROR";
+  } else if (viteLog.includes('Failed to resolve import "@wasm/draft"')) {
+    result.failureCode = "REAL_DRAFT_INPUT_MISSING";
+  } else {
+    result.failureCode = category.toUpperCase() + (cause.qaDeadline ? "_STAGE_DEADLINE" : "_ASSERTION_OR_DRIVER_FAILURE");
   }
   // Never serialize raw page exceptions, frames, hands, library, keys or receipts.
 } finally {

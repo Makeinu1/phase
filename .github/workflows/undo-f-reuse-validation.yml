@@ -403,6 +403,17 @@ jobs:
             "$GITHUB_WORKSPACE/pair-wasm-payload" "$GITHUB_WORKSPACE/pair-reused-inputs/wasm.zip"
           python3 ../control/scripts/ci/undo-f-manifest.py verify \
             "$GITHUB_WORKSPACE/pair-wasm-payload" f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 "$F_PRODUCER_SHA"
+      - name: Verify the exact newly generated draft input without rebuilding
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py pair-draft-input \
+            python3 ../control/scripts/ci/undo-f-draft-artifact.py draft \
+            "$GITHUB_WORKSPACE/pair-draft-payload" "$GITHUB_WORKSPACE/pair-reused-inputs/draft.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/pair-draft-payload" 6a0043113fd25b7f2a0499ac570aabee51ea9e0ba74523309cc3f4e6fbb805a0 eac6c9be9b1e0f1b9406506017c195f1107b6437
       - name: Install pinned frontend dependencies and an ephemeral official loopback PeerServer
         working-directory: source
         env:
@@ -423,7 +434,7 @@ jobs:
           python3 ../control/scripts/ci/undo-f-guard.py two-seat-ui \
             node ../control/scripts/ci/undo-f-two-seat-ui.mjs \
             "$GITHUB_WORKSPACE/frontend/client" "$GITHUB_WORKSPACE/pair-wasm-payload" \
-            crates/engine-wasm/src/fixtures/host-precast-card-data.json \
+            "$GITHUB_WORKSPACE/pair-draft-payload" crates/engine-wasm/src/fixtures/host-precast-card-data.json \
             "$RUNNER_TEMP/pair-peer-server" "$F_EVIDENCE"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()

@@ -66,7 +66,7 @@ function observe(conn: TransportConnection) {
           wire.push({ type: m.type, direction, phase: m.undoSync.phase, revision: m.revision,
             blocked: atSend, exactTransaction: undoIdentity === m.undoSync.undoId && undoRevision === m.undoSync.revision });
         }
-      } catch { safeErrors.push("wire-observation-decode"); }
+      } catch { safeErrors.push("wire-observer-failed"); }
     };
     if (direction === "send") sent = sent.then(run); else received = received.then(run);
   };
