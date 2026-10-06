@@ -867,11 +867,13 @@ use engine::types::zones::Zone;
 #[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
 mod enabled_baseline_tests {
     use super::*;
-    use engine::game::engine::apply;
+    use engine::game::engine::{apply, EngineError};
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
-        TargetFilter,
+        AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
+        FilterProp, ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter,
+        TypedFilter,
     };
+    use engine::types::game_state::{PersistedRestoreError, StackEntryKind};
     use engine::types::replacements::ReplacementEvent;
     use engine::types::zones::EtbTapState;
 
@@ -1686,77 +1688,570 @@ mod enabled_baseline_tests {
     #[test]
     fn rejects_unsupported_resolution_hooks_before_taking_over() {
         let p0 = PlayerId(0);
+        let source_scope_error = "manual resolution supports only an owned, controlled, ordinary hand-cast instant or sorcery without paid Buyback or an exile rider";
         for keyword in [
-            Keyword::Cipher,
-            Keyword::Paradigm,
-            Keyword::Rebound,
-            Keyword::Epic,
+            None,
+            Some(Keyword::Cipher),
+            Some(Keyword::Paradigm),
+            Some(Keyword::Rebound),
+            Some(Keyword::Epic),
         ] {
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            let spell = scenario
-                .add_spell_to_hand_from_oracle(p0, "Hook Prototype", true, "You gain 3 life.")
-                .with_mana_cost(ManaCost::zero())
-                .id();
-            let mut builder = scenario.build();
-            let mut runner = builder.cast(spell).commit();
-            let stack_entry_id = runner.state().stack.back().expect("cast is on stack").id;
-            runner
-                .state_mut()
-                .objects
-                .get_mut(&spell)
-                .expect("spell object exists")
-                .keywords
-                .push(keyword);
-
-            assert!(runner
-                .act(GameAction::DesignateManualResolution { stack_entry_id })
-                .is_err());
-            assert_eq!(trusted_resolution_version(runner.state()), 4);
-            assert!(matches!(
-                runner.state().waiting_for,
-                WaitingFor::Priority { player } if player == p0
-            ));
+            for is_instant in [true, false] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let mut card = scenario.add_spell_to_hand_from_oracle(
+                    p0,
+                    "Hook Prototype",
+                    is_instant,
+                    "You gain 3 life.",
+                );
+                card.with_mana_cost(ManaCost::zero());
+                if let Some(keyword) = &keyword {
+                    card.with_keyword(keyword.clone());
+                }
+                let spell = card.id();
+                let mut runner = scenario.build();
+                runner.cast(spell).commit();
+                let stack_entry_id = runner.state().stack.back().expect("cast is on stack").id;
+                let before = runner.state().clone();
+                let result =
+                    runner.act(GameAction::DesignateManualResolution { stack_entry_id });
+                if keyword.is_some() {
+                    assert!(matches!(
+                        result,
+                        Err(EngineError::InvalidAction(reason)) if reason == source_scope_error
+                    ));
+                    assert_eq!(runner.state(), &before);
+                    assert_eq!(trusted_resolution_version(runner.state()), 4);
+                } else {
+                    result.expect("the same ordinary spell without a hook reaches designation");
+                    assert_eq!(
+                        runner.state().manual_resolution_designation,
+                        Some(stack_entry_id)
+                    );
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { player } if player == p0
+                ));
+            }
         }
     }
 
     #[test]
     fn rejects_paid_buyback_before_taking_over() {
         let p0 = PlayerId(0);
+        let source_scope_error = "manual resolution supports only an owned, controlled, ordinary hand-cast instant or sorcery without paid Buyback or an exile rider";
+        for has_buyback in [false, true] {
+            for (context_paid, facts_paid) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let mut card = scenario.add_spell_to_hand_from_oracle(
+                    p0,
+                    "Buyback Prototype",
+                    true,
+                    "You gain 3 life.",
+                );
+                card.with_mana_cost(ManaCost::zero());
+                if has_buyback {
+                    card.with_keyword(Keyword::Buyback(BuybackCost::Mana(ManaCost::zero())));
+                }
+                let spell = card.id();
+                let mut runner = scenario.build();
+                if context_paid || facts_paid {
+                    runner.cast(spell).accept_optional().commit();
+                } else {
+                    runner.cast(spell).decline_optional().commit();
+                }
+                let stack_entry_id = runner.state().stack.back().expect("cast is on stack").id;
+                let StackEntryKind::Spell {
+                    ability: Some(ability),
+                    ..
+                } = &mut runner
+                    .state_mut()
+                    .stack
+                    .back_mut()
+                    .expect("cast is on stack")
+                    .kind
+                else {
+                    panic!("synthetic instant has a resolved spell ability");
+                };
+                ability.context.additional_cost_paid = context_paid;
+                runner
+                    .state_mut()
+                    .stack_paid_facts
+                    .entry(stack_entry_id)
+                    .or_default()
+                    .additional_cost_paid = facts_paid;
+
+                let before = runner.state().clone();
+                let result =
+                    runner.act(GameAction::DesignateManualResolution { stack_entry_id });
+                if has_buyback && (context_paid || facts_paid) {
+                    assert!(matches!(
+                        result,
+                        Err(EngineError::InvalidAction(reason)) if reason == source_scope_error
+                    ));
+                    assert_eq!(runner.state(), &before);
+                    assert_eq!(trusted_resolution_version(runner.state()), 4);
+                } else {
+                    result.expect("unpaid Buyback or paid facts without Buyback remain eligible");
+                    assert_eq!(
+                        runner.state().manual_resolution_designation,
+                        Some(stack_entry_id)
+                    );
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { player } if player == p0
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effective_resolution_hooks_follow_live_grants_and_removals() {
+        let p0 = PlayerId(0);
+        let source_scope_error = "manual resolution supports only an owned, controlled, ordinary hand-cast instant or sorcery without paid Buyback or an exile rider";
+        for keyword in [
+            Keyword::Cipher,
+            Keyword::Paradigm,
+            Keyword::Rebound,
+            Keyword::Epic,
+        ] {
+            for printed in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let source = scenario.add_creature(p0, "Keyword Source", 1, 1).id();
+                let mut card = scenario.add_spell_to_hand_from_oracle(
+                    p0,
+                    "Effective Hook Prototype",
+                    true,
+                    "You gain 3 life.",
+                );
+                card.with_mana_cost(ManaCost::zero());
+                if printed {
+                    card.with_keyword(keyword.clone());
+                }
+                let spell = card.id();
+                let mut runner = scenario.build();
+                runner.cast(spell).commit();
+                let stack_entry_id = runner.state().stack.back().expect("cast is on stack").id;
+                assert_eq!(stack_entry_id, spell);
+                let StackEntryKind::Spell {
+                    casting_variant, ..
+                } = &runner.state().stack.back().expect("cast is on stack").kind
+                else {
+                    panic!("fixture reaches the spell-entry eligibility branch");
+                };
+                assert!(casting_variant.is_normal());
+                let baseline = runner.state().clone();
+                for apply_effect in [false, true] {
+                    let mut runner = GameRunner::from_state(baseline.clone());
+                    if apply_effect {
+                        let modification = if printed {
+                            ContinuousModification::RemoveKeyword {
+                                keyword: keyword.clone(),
+                            }
+                        } else {
+                            ContinuousModification::AddKeyword {
+                                keyword: keyword.clone(),
+                            }
+                        };
+                        runner.state_mut().add_transient_continuous_effect(
+                            source,
+                            p0,
+                            Duration::UntilEndOfTurn,
+                            TargetFilter::SpecificObject { id: stack_entry_id },
+                            vec![modification],
+                            None,
+                        );
+                    }
+                    let object = &runner.state().objects[&stack_entry_id];
+                    assert_eq!(object.zone, Zone::Stack);
+                    assert_eq!(object.owner, p0);
+                    assert_eq!(object.controller, p0);
+                    assert_eq!(object.cast_from_zone, Some(Zone::Hand));
+                    assert_eq!(object.keywords.contains(&keyword), printed);
+                    assert_eq!(object.base_keywords.contains(&keyword), printed);
+                    let before = runner.state().clone();
+                    let result =
+                        runner.act(GameAction::DesignateManualResolution { stack_entry_id });
+                    if printed != apply_effect {
+                        assert!(matches!(
+                            result,
+                            Err(EngineError::InvalidAction(reason)) if reason == source_scope_error
+                        ));
+                        assert_eq!(runner.state(), &before);
+                    } else {
+                        result.expect("hook-free sibling reaches manual designation");
+                        assert_eq!(
+                            runner.state().manual_resolution_designation,
+                            Some(stack_entry_id)
+                        );
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::Priority { player } if player == p0
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effective_buyback_uses_paid_facts_and_exact_keyword_identity() {
+        let p0 = PlayerId(0);
+        let buyback = Keyword::Buyback(BuybackCost::Mana(ManaCost::zero()));
+        let source_scope_error = "manual resolution supports only an owned, controlled, ordinary hand-cast instant or sorcery without paid Buyback or an exile rider";
+        for (printed_keyword, facts_paid, modification, rejected) in [
+            (
+                None,
+                true,
+                Some(ContinuousModification::AddKeyword {
+                    keyword: buyback.clone(),
+                }),
+                [false, true],
+            ),
+            (
+                None,
+                false,
+                Some(ContinuousModification::AddKeyword {
+                    keyword: buyback.clone(),
+                }),
+                [false, false],
+            ),
+            (
+                Some(buyback.clone()),
+                true,
+                Some(ContinuousModification::RemoveKeyword {
+                    keyword: buyback.clone(),
+                }),
+                [true, false],
+            ),
+            (Some(Keyword::Banding), true, None, [false, false]),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario.add_creature(p0, "Buyback Source", 1, 1).id();
+            let mut card = scenario.add_spell_to_hand_from_oracle(
+                p0,
+                "Effective Buyback Prototype",
+                true,
+                "You gain 3 life.",
+            );
+            card.with_mana_cost(ManaCost::zero());
+            if let Some(keyword) = &printed_keyword {
+                card.with_keyword(keyword.clone());
+            }
+            let spell = card.id();
+            let mut runner = scenario.build();
+            runner.cast(spell).decline_optional().commit();
+            let stack_entry_id = runner.state().stack.back().expect("cast is on stack").id;
+            let StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            } = &mut runner
+                .state_mut()
+                .stack
+                .back_mut()
+                .expect("cast is on stack")
+                .kind
+            else {
+                panic!("synthetic instant has a resolved spell ability");
+            };
+            ability.context.additional_cost_paid = false;
+            runner
+                .state_mut()
+                .stack_paid_facts
+                .entry(stack_entry_id)
+                .or_default()
+                .additional_cost_paid = facts_paid;
+            let baseline = runner.state().clone();
+            for (apply_effect, reject) in [false, true].into_iter().zip(rejected) {
+                if apply_effect && modification.is_none() {
+                    continue;
+                }
+                let mut runner = GameRunner::from_state(baseline.clone());
+                if apply_effect {
+                    runner.state_mut().add_transient_continuous_effect(
+                        source,
+                        p0,
+                        Duration::UntilEndOfTurn,
+                        TargetFilter::SpecificObject { id: stack_entry_id },
+                        vec![modification.clone().expect("grant or removal case")],
+                        None,
+                    );
+                }
+                assert_eq!(
+                    runner.state().objects[&stack_entry_id].keywords,
+                    baseline.objects[&stack_entry_id].keywords
+                );
+                let before = runner.state().clone();
+                let result =
+                    runner.act(GameAction::DesignateManualResolution { stack_entry_id });
+                if reject {
+                    assert!(matches!(
+                        result,
+                        Err(EngineError::InvalidAction(reason)) if reason == source_scope_error
+                    ));
+                    assert_eq!(runner.state(), &before);
+                } else {
+                    result.expect(
+                        "unpaid or removed Buyback and unrelated Unknown-kind keywords remain eligible",
+                    );
+                    assert_eq!(
+                        runner.state().manual_resolution_designation,
+                        Some(stack_entry_id)
+                    );
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { player } if player == p0
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effective_hook_grants_are_scoped_to_the_selected_recipient() {
+        let source_scope_error = "manual resolution supports only an owned, controlled, ordinary hand-cast instant or sorcery without paid Buyback or an exile rider";
+        let p0 = PlayerId(0);
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let spell = scenario
-            .add_spell_to_hand_from_oracle(p0, "Buyback Prototype", true, "You gain 3 life.")
+        let sources = [
+            scenario.add_creature(p0, "First Keyword Source", 1, 1).id(),
+            scenario.add_creature(p0, "Second Keyword Source", 1, 1).id(),
+        ];
+        let decoy = scenario
+            .add_spell_to_hand(p0, "Decoy Stack Spell", true)
             .with_mana_cost(ManaCost::zero())
             .id();
-        let mut builder = scenario.build();
-        let mut runner = builder.cast(spell).commit();
+        let candidate = scenario
+            .add_spell_to_hand(p0, "Candidate Stack Spell", true)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(decoy).commit();
+        let decoy_entry = runner.state().stack.back().expect("decoy is on stack").id;
+        runner.cast(candidate).commit();
+        let stack_entry_id = runner.state().stack.back().expect("candidate is on stack").id;
+        for source in sources {
+            runner.state_mut().add_transient_continuous_effect(
+                source,
+                p0,
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: decoy_entry },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Rebound,
+                }],
+                None,
+            );
+        }
+        let baseline = runner.state().clone();
+        for affected in [decoy_entry, stack_entry_id] {
+            let mut runner = GameRunner::from_state(baseline.clone());
+            if affected == stack_entry_id {
+                runner.state_mut().transient_continuous_effects[0].affected =
+                    TargetFilter::SpecificObject { id: affected };
+            }
+            assert_eq!(runner.state().stack.len(), 2);
+            assert!(sources
+                .iter()
+                .all(|id| runner.state().objects[id].zone == Zone::Battlefield));
+            assert!(!runner.state().objects[&stack_entry_id]
+                .keywords
+                .contains(&Keyword::Rebound));
+            let before = runner.state().clone();
+            let result =
+                runner.act(GameAction::DesignateManualResolution { stack_entry_id });
+            if affected == stack_entry_id {
+                assert!(matches!(
+                    result,
+                    Err(EngineError::InvalidAction(reason)) if reason == source_scope_error
+                ));
+                assert_eq!(runner.state(), &before);
+            } else {
+                result.expect("two grants to the decoy do not veto the selected candidate");
+                assert_eq!(
+                    runner.state().manual_resolution_designation,
+                    Some(stack_entry_id)
+                );
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { player } if player == p0
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn effective_hook_static_uses_the_source_controller() {
+        let source_scope_error = "manual resolution supports only an owned, controlled, ordinary hand-cast instant or sorcery without paid Buyback or an exile rider";
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature(p1, "Controller Keyword Source", 1, 1)
+            .with_static_definition(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Stack],
+                            }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Rebound,
+                    }]),
+            )
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(p0, "Controller Candidate", true)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).commit();
+        let stack_entry_id = runner.state().stack.back().expect("cast is on stack").id;
+        let baseline = runner.state().clone();
+        for source_controller in [p1, p0] {
+            let mut runner = GameRunner::from_state(baseline.clone());
+            let source_object = runner
+                .state_mut()
+                .objects
+                .get_mut(&source)
+                .expect("source is live");
+            source_object.controller = source_controller;
+            source_object.base_controller = Some(source_controller);
+            assert_eq!(runner.state().objects[&stack_entry_id].owner, p0);
+            assert_eq!(runner.state().objects[&stack_entry_id].controller, p0);
+            assert!(!runner.state().objects[&stack_entry_id]
+                .keywords
+                .contains(&Keyword::Rebound));
+            let before = runner.state().clone();
+            let result =
+                runner.act(GameAction::DesignateManualResolution { stack_entry_id });
+            if source_controller == p0 {
+                assert!(matches!(
+                    result,
+                    Err(EngineError::InvalidAction(reason)) if reason == source_scope_error
+                ));
+                assert_eq!(runner.state(), &before);
+            } else {
+                result.expect("the opponent's source-relative grant does not affect P0's spell");
+                assert_eq!(
+                    runner.state().manual_resolution_designation,
+                    Some(stack_entry_id)
+                );
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { player } if player == p0
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn effective_hook_is_revalidated_for_manual_actions_and_checked_restore() {
+        let p0 = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature(p0, "Live Revalidation Source", 1, 1).id();
+        let spell = scenario
+            .add_spell_to_hand(p0, "Live Revalidation Spell", true)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).commit();
         let stack_entry_id = runner.state().stack.back().expect("cast is on stack").id;
         runner
-            .state_mut()
-            .objects
-            .get_mut(&spell)
-            .expect("spell object exists")
-            .keywords
-            .push(Keyword::Buyback(BuybackCost::Mana(ManaCost::zero())));
-        let entry = runner
-            .state_mut()
-            .stack
-            .back_mut()
-            .expect("cast is on stack");
-        let engine::types::game_state::StackEntryKind::Spell {
-            ability: Some(ability),
-            ..
-        } = &mut entry.kind
-        else {
-            panic!("synthetic instant is a spell entry");
-        };
-        ability.context.additional_cost_paid = true;
-
-        assert!(runner
             .act(GameAction::DesignateManualResolution { stack_entry_id })
-            .is_err());
-        assert_eq!(trusted_resolution_version(runner.state()), 4);
+            .expect("ordinary hand-cast spell is eligible before the grant");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("first player passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("second player enters manual wait");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManualResolution { player, stack_entry_id: id }
+                if player == p0 && id == stack_entry_id
+        ));
+        let baseline = runner.state().clone();
+        let valid_wire = serde_json::to_value(PersistedGameState::capture(baseline.clone()))
+            .expect("valid manual wait serializes before the grant");
+        runner.state_mut().add_transient_continuous_effect(
+            source,
+            p0,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: stack_entry_id },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Rebound,
+            }],
+            None,
+        );
+        assert!(!runner.state().objects[&stack_entry_id]
+            .keywords
+            .contains(&Keyword::Rebound));
+        for (action, reason) in [
+            (
+                GameAction::ApplyManualLifeLoss {
+                    stack_entry_id,
+                    amount: 1,
+                },
+                "manual life loss source is no longer eligible",
+            ),
+            (
+                GameAction::FinishManualResolution { stack_entry_id },
+                "the designated source is no longer eligible for manual Finish",
+            ),
+        ] {
+            let mut control = GameRunner::from_state(baseline.clone());
+            let result = control
+                .act(action.clone())
+                .expect("the pre-grant manual action succeeds");
+            if matches!(&action, GameAction::ApplyManualLifeLoss { .. }) {
+                assert_eq!(control.state().players[p0.0 as usize].life, 19);
+                assert!(matches!(
+                    control.state().waiting_for,
+                    WaitingFor::ManualResolution { stack_entry_id: id, .. } if id == stack_entry_id
+                ));
+            } else {
+                assert_eq!(stack_resolved_count(&result.events, stack_entry_id), 1);
+                assert_eq!(control.state().objects[&spell].zone, Zone::Graveyard);
+                assert_eq!(control.state().manual_resolution_designation, None);
+            }
+            let before = runner.state().clone();
+            assert!(matches!(
+                runner.act(action),
+                Err(EngineError::InvalidAction(error)) if error == reason
+            ));
+            assert_eq!(runner.state(), &before);
+        }
+        let restored = serde_json::from_value::<PersistedGameState>(valid_wire.clone())
+            .expect("unchanged manual save decodes")
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .expect("unchanged manual save passes checked restore")
+            .finalize_immediately()
+            .expect("valid restore finalizes");
+        assert_eq!(restored.manual_resolution_designation, Some(stack_entry_id));
+        assert_eq!(restored.waiting_for, baseline.waiting_for);
+        let mut granted_wire = valid_wire;
+        granted_wire["state"]["transient_continuous_effects"] =
+            serde_json::to_value(&runner.state().transient_continuous_effects)
+                .expect("the same typed grant serializes independently of invalid manual state");
+        let decoded = serde_json::from_value::<PersistedGameState>(granted_wire)
+            .expect("granted manual save decodes before checked admission");
+        assert!(matches!(
+            decoded.prepare_for_restore(PersistedRestoreFinalization::Immediate),
+            Err(PersistedRestoreError::UnsupportedFormat(reason))
+                if reason == "manual-resolution designation is outside the supported source scope"
+        ));
     }
 
     #[test]

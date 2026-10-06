@@ -13355,14 +13355,15 @@ impl GameState {
         {
             return false;
         }
-        let has_buyback = object
-            .keywords
+        let effective_keywords =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(self, entry.id);
+        let has_buyback = effective_keywords
             .iter()
             .any(|keyword| matches!(keyword, Keyword::Buyback(_)));
         // Manual Finish deliberately suppresses the spell's instruction
         // chain. Reject keywords whose resolution-time work lives outside that
         // chain so a manual designation cannot silently omit their hooks.
-        let has_unsupported_resolution_hook = object.keywords.iter().any(|keyword| {
+        let has_unsupported_resolution_hook = effective_keywords.iter().any(|keyword| {
             matches!(
                 keyword,
                 Keyword::Cipher | Keyword::Paradigm | Keyword::Rebound | Keyword::Epic
