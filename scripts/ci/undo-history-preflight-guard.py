@@ -1,4 +1,4 @@
-"""One 30s preflight command, followed by bounded cleanup of its owned group."""
+"""One finite preflight command, followed by bounded cleanup of its owned group."""
 import datetime
 import json
 import os
@@ -9,12 +9,13 @@ import sys
 import time
 
 stage, directory, *argv = sys.argv[1:]
-assert stage in {"input-public-exports", "browser-CDP-capability"} and argv
+deadlines = {"input-public-exports": 30, "browser-CDP-capability": 30, "QA-module-load": 60}
+assert stage in deadlines and argv
 evidence = Path(directory)
 evidence.mkdir(parents=True, exist_ok=True)
 receipt = evidence / "process-exit.json"
 assert not receipt.exists(), "do not retry a recorded preflight"
-record = {"stage": stage, "deadlineSeconds": 30, "cleanupWaitSecondsPerSignal": 5,
+record = {"stage": stage, "deadlineSeconds": deadlines[stage], "cleanupWaitSecondsPerSignal": 5,
           "noRetry": True, "startedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
 process = None
 stop_signal = None
@@ -63,7 +64,7 @@ try:
     with (evidence / "process.log").open("w") as log:
         process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         record["ownedPgid"] = process.pid
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + deadlines[stage]
         while process.poll() is None and not stop_signal and time.monotonic() < deadline:
             time.sleep(0.1)
         record["deadlineExceeded"] = process.poll() is None and not stop_signal

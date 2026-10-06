@@ -19,6 +19,8 @@ jobs:
     permissions:
       contents: read
       actions: read
+    env:
+      F_DRAFT_PAYLOAD: ${{ github.workspace }}/draft-payload
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -53,9 +55,36 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/adapter-evidence/provenance"
           cp "$GITHUB_WORKSPACE/retained-inputs/wasm.provenance.json" "$GITHUB_WORKSPACE/adapter-evidence/provenance/"
           cp "$GITHUB_WORKSPACE/wasm-payload/manifest.json" "$GITHUB_WORKSPACE/adapter-evidence/provenance/wasm-manifest.json"
+      - name: Verify existing same-source draft input and provenance
+        id: draft_input
+        if: ${{ !cancelled() && steps.input.outcome == 'success' }}
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F_EVIDENCE: ${{ github.workspace }}/adapter-evidence/draft-input
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py adapter-draft-input \
+            python3 ../control/scripts/ci/undo-f-draft-artifact.py draft \
+            "$F_DRAFT_PAYLOAD" "$GITHUB_WORKSPACE/reused-inputs/draft.zip"
+          python3 ../control/scripts/ci/undo-f-manifest.py verify \
+            "$F_DRAFT_PAYLOAD" 6a0043113fd25b7f2a0499ac570aabee51ea9e0ba74523309cc3f4e6fbb805a0 eac6c9be9b1e0f1b9406506017c195f1107b6437
+          python3 - <<'PY'
+          import json, os, pathlib
+          draft = pathlib.Path(os.environ['F_DRAFT_PAYLOAD'])
+          engine = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'wasm-payload'
+          a, b = [json.loads((p / 'manifest.json').read_text()) for p in [draft, engine]]
+          provenance = json.loads((draft / 'provenance.json').read_text())
+          assert a['source_sha'] == b['source_sha'] == os.environ['F_SOURCE_SHA']
+          assert a['input_sha256'] == b['input_sha256'] and a['tool_versions'] == b['tool_versions']
+          assert provenance['source_tree'] == 'fa41bb9de9b7d87fe9813bf0f6b8ec3423a3b350'
+          evidence = pathlib.Path(os.environ['F_EVIDENCE'])
+          for name in ['manifest.json', 'provenance.json']:
+              (evidence / name).write_bytes((draft / name).read_bytes())
+          (evidence / 'same-source.json').write_text(json.dumps({'pass': True, 'sourceSha': a['source_sha'], 'sourceTree': provenance['source_tree'], 'sameInputHashes': True, 'sameToolVersions': True, 'newBuild': False}, indent=2) + '\n')
+          PY
       - name: Lightweight fixed binding public-export selfcheck
         id: public_api
-        if: ${{ !cancelled() && steps.input.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.draft_input.outcome == 'success' }}
         working-directory: source
         run: |
           python3 ../control/scripts/ci/undo-history-preflight-guard.py input-public-exports \
@@ -83,8 +112,18 @@ jobs:
         if: ${{ !cancelled() && steps.browser.outcome == 'success' && steps.pnpm.outcome == 'success' }}
         working-directory: control/client
         run: pnpm install --frozen-lockfile
+      - name: QA module dependency selfcheck before engine campaign
+        id: module
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: source
+        run: |
+          python3 ../control/scripts/ci/undo-history-preflight-guard.py QA-module-load \
+            "$GITHUB_WORKSPACE/adapter-evidence/module-selfcheck" \
+            node ../control/scripts/ci/undo-history-adapter-run.mjs \
+            "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
+            "$GITHUB_WORKSPACE/adapter-evidence/module-selfcheck" --module-selfcheck-only
       - name: Normal module Worker history faults and conditional heap observations
-        if: ${{ !cancelled() && steps.browser.outcome == 'success' && steps.dependencies.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.module.outcome == 'success' }}
         working-directory: source
         run: |
           F_EVIDENCE="$GITHUB_WORKSPACE/adapter-evidence/guard" \
