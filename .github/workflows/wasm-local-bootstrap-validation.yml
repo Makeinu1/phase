@@ -2,7 +2,7 @@ name: Fork Local Worker bootstrap validation
 
 on:
   push:
-    branches: [experiment/manual-wasm-native-off-diagnostic]
+    branches: [experiment/manual-wasm-native-off-diagnostic, experiment/manual-wasm-native-off-reuse-diagnostic]
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [experiment/manual-integration-actions]
@@ -2529,3 +2529,329 @@ jobs:
             'product_green': False}))
         raise SystemExit(0 if archive.get('archive_uploaded') is True and evidence == 'success' else 1)
         OFF_RETENTION
+
+  native-off-reuse-diagnostic:
+    if: >-
+      github.repository == 'Makeinu1/phase' && github.repository_id == '1377698441' &&
+      github.event_name == 'push' && github.run_attempt == 1 &&
+      github.ref == 'refs/heads/experiment/manual-wasm-native-off-reuse-diagnostic'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      MANUAL_EXPECTED_SOURCE_SHA: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+      MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-native-off-reuse-evidence
+      RUST_MIN_STACK: '16777216'
+      BOOTSTRAP_NATIVE_ARTIFACT: 'off'
+      BOOTSTRAP_NATIVE_TEST_COUNT: '10'
+    steps:
+    - name: Checkout exact retained archive product source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+        path: candidate-source
+        persist-credentials: false
+    - name: Checkout reuse workflow event source separately
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        path: diagnostic-workflow-source
+        persist-credentials: false
+    - name: Admit immutable reuse sources and exact existing scripts
+      id: source-admission
+      working-directory: candidate-source
+      run: |
+        python3 - 2>/dev/null <<'REUSE_SOURCE'
+        import ast, hashlib, json, os, re, subprocess
+        from pathlib import Path
+        try:
+            def git(source, *args):
+                return subprocess.check_output(['git', '-C', str(source), *args], stderr=subprocess.DEVNULL, text=True).strip()
+            source = Path('.'); workflow_source = Path('../diagnostic-workflow-source')
+            workflow_path = '.github/workflows/wasm-local-bootstrap-validation.yml'
+            event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+            assert os.environ['GITHUB_REPOSITORY'] == event['repository']['full_name'] == 'Makeinu1/phase'
+            assert os.environ['GITHUB_REPOSITORY_ID'] == str(event['repository']['id']) == '1377698441'
+            assert os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['GITHUB_RUN_ATTEMPT'] == '1'
+            assert os.environ['GITHUB_REF'] == event['ref'] == 'refs/heads/experiment/manual-wasm-native-off-reuse-diagnostic'
+            assert event['deleted'] is False and event['after'] == os.environ['GITHUB_SHA']
+            assert re.fullmatch('[a-f0-9]{40}', os.environ['GITHUB_SHA'])
+            assert os.environ['GITHUB_WORKFLOW_SHA'] == os.environ['GITHUB_SHA']
+            assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == '4fa56ded3a65431ce3f5f943dafaff979a40255f'
+            assert git(source, 'rev-parse', 'HEAD^{tree}') == 'f41d9e32a31aaa7ed653d24991226c3c92c51316'
+            assert git(workflow_source, 'rev-parse', 'HEAD') == os.environ['GITHUB_SHA']
+            assert git(source, 'status', '--porcelain') == git(workflow_source, 'status', '--porcelain') == ''
+            pins = {
+                'Cargo.lock': '5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0',
+                'client/pnpm-lock.yaml': 'bc13ba1f6de5efd5bc724d9945aa541136df1d6938a41c53768f76c7b36c4ea4',
+                'rust-toolchain.toml': '52562c175563386d0f9f19afafd2855662ef2590765204b35bd624de13fe67af',
+                'Cargo.toml': '1821bf54554639dfa513d03a2a71e1503b445df42e62cde93e31b7e5289ea64a',
+                '.cargo/config.toml': 'da039ac38eb9d43e236e9eb89c65ef30a149d0539ed7ebfb3ee8f1d78b383c66',
+                '.config/nextest.toml': 'ad466230f2659e95584196fbd2e554cfa3c2345313a103a82847d91e9f9a34db',
+                'crates/engine-wasm/Cargo.toml': 'e70ecac5eb259cd3dd9fa6e0d38e6a346ced035fec727af3fdfed8a650f1f469',
+                'scripts/ci/manual-integration-guard.py': '71becc084429d70cb200717e8bb2a299b33dc8c4aedfec8a4bf3e21d3536a814',
+            }
+            assert pins['scripts/ci/manual-integration-guard.py'] == os.environ['BOOTSTRAP_GUARD_SHA256']
+            assert all(hashlib.sha256((source / name).read_bytes()).hexdigest() == digest for name, digest in pins.items())
+            original = (source / workflow_path).read_text(); current = (workflow_source / workflow_path).read_text()
+            assert hashlib.sha256(original.encode()).hexdigest() == '22a55f54c40772ad369de5edc5ec5ba4dd63d37dbf614761bc8da0023aaf98cd'
+            def body(workflow, marker, count):
+                opening = "<<'" + marker + "'\n"; closing = '        ' + marker + '\n'
+                assert workflow.count(opening) == workflow.count(closing) == 1
+                lines = workflow.split(opening, 1)[1].split(closing, 1)[0].splitlines(keepends=True)
+                assert len(lines) == count and all(line.startswith('        ') for line in lines)
+                return ''.join(line[8:] for line in lines)
+            native = body(original, 'NATIVE', 35)
+            assert native == body(current, 'NATIVE', 35)
+            scripts = {'collector': (native, 'cbbd22b60f2f4b6630748bb277fe75c89d4df68ef1edc96e76fe008db0a223e4'),
+                'tools': (body(current, 'OFF_TOOLS', 136), '395795de836078fee7b495933739223264c28384f95b8d3bb94315b34795c1f5')}
+            for name, (script, digest) in scripts.items():
+                assert hashlib.sha256(script.encode()).hexdigest() == digest
+                ast.parse(script)
+                (Path(os.environ['RUNNER_TEMP']) / ('bootstrap-native-off-' + name + '.py')).write_text(script)
+            assert {key: value for key, value in os.environ.items() if key.startswith('CARGO_PROFILE_')} == {}
+            assert 'RUSTFLAGS' not in os.environ and 'CARGO_ENCODED_RUSTFLAGS' not in os.environ
+            root = Path(os.environ['MANUAL_EVIDENCE']); root.mkdir(parents=True, exist_ok=True)
+            value = {'source_sha': os.environ['MANUAL_EXPECTED_SOURCE_SHA'], 'source_tree': git(source, 'rev-parse', 'HEAD^{tree}'),
+                'workflow_sha': os.environ['GITHUB_WORKFLOW_SHA'], 'workflow_tree': git(workflow_source, 'rev-parse', 'HEAD^{tree}'),
+                'source_workflow_sha256': hashlib.sha256(original.encode()).hexdigest(),
+                'workflow_sha256': hashlib.sha256(current.encode()).hexdigest(),
+                'collector_sha256': scripts['collector'][1], 'tools_script_sha256': scripts['tools'][1],
+                'input_sha256': pins, 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': 1}
+            (root / 'source-manifest.json').write_text(json.dumps(value) + '\n')
+            print('{"native_off_reuse_source_admitted":true}')
+        except Exception:
+            print('{"error":"native-off-reuse-source-refused"}')
+            raise SystemExit(1)
+        REUSE_SOURCE
+    - name: Capture resource preflight before tooling or artifact download
+      working-directory: candidate-source
+      run: |
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-native-target"
+        printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+        python3 scripts/ci/manual-integration-guard.py native-reuse-source-before true 2>/dev/null
+    - name: Admit exact retained producer and artifact metadata
+      working-directory: candidate-source
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-reuse-metadata python3 - 2>/dev/null <<'REUSE_METADATA'
+        import datetime, json, os, urllib.request
+        from pathlib import Path
+        try:
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, status, message, headers, newurl): return None
+            def api(path):
+                request = urllib.request.Request('https://api.github.com/repos/Makeinu1/phase/' + path,
+                    headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+                        'X-GitHub-Api-Version': '2026-03-10'})
+                with urllib.request.build_opener(NoRedirect()).open(request, timeout=60) as response:
+                    content = response.read(2 * 1024**2 + 1)
+                    assert len(content) <= 2 * 1024**2
+                    return json.loads(content)
+            run = api('actions/runs/37518173142/attempts/1')
+            assert run['id'] == 37518173142 and run['run_attempt'] == 1
+            assert run['repository']['id'] == run['head_repository']['id'] == 1377698441
+            assert run['repository']['full_name'] == run['head_repository']['full_name'] == 'Makeinu1/phase'
+            assert run['head_sha'] == '2743c9441a7a770d3b88dbb7487a284f7649655b'
+            assert run['head_commit']['tree_id'] == '3255ea22df350bed2d601482383d06ad550bdac4'
+            assert run['path'] == '.github/workflows/wasm-local-bootstrap-validation.yml'
+            assert run['event'] == 'push' and run['head_branch'] == 'experiment/manual-wasm-native-off-diagnostic'
+            assert run['status'] == 'completed' and run['conclusion'] == 'failure'
+            metadata = api('actions/artifacts/11438377287'); producer = metadata['workflow_run']
+            assert metadata['id'] == 11438377287 and metadata['name'] == 'local-worker-bootstrap-native-off-diagnostic-archive'
+            assert metadata['size_in_bytes'] == 46399076 and type(metadata['size_in_bytes']) is int
+            assert metadata['digest'] == 'sha256:f66b290f3f98596d5254b1e65501a188f8be2ba1caa126d8c71d04a5c1d313e6'
+            assert metadata['expired'] is False
+            expiry = datetime.datetime.fromisoformat(metadata['expires_at'].replace('Z', '+00:00'))
+            assert expiry > datetime.datetime.now(datetime.timezone.utc)
+            assert producer['id'] == 37518173142 and producer['head_sha'] == run['head_sha']
+            assert producer['repository_id'] == producer['head_repository_id'] == 1377698441
+            assert producer['head_branch'] == run['head_branch']
+            value = {'producer_run_id': 37518173142, 'producer_run_attempt': 1, 'producer_head': run['head_sha'],
+                'artifact_id': 11438377287, 'artifact_name': metadata['name'], 'zip_size': 46399076,
+                'zip_sha256': metadata['digest'].removeprefix('sha256:'), 'expires_at': expiry.isoformat(),
+                'metadata_admitted': True, 'current_compile_executed': False, 'product_green': False}
+            (Path(os.environ['MANUAL_EVIDENCE']) / 'producer-manifest.json').write_text(json.dumps(value) + '\n')
+            print('{"retained_off_producer_admitted":true,"current_compile_executed":false}')
+        except Exception:
+            print('{"error":"native-off-reuse-metadata-refused"}')
+            raise SystemExit(1)
+        REUSE_METADATA
+    - name: Download only the admitted retained OFF archive
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      with:
+        artifact-ids: '11438377287'
+        github-token: ${{ github.token }}
+        repository: Makeinu1/phase
+        run-id: '37518173142'
+        merge-multiple: true
+        path: ${{ runner.temp }}/bootstrap-native-archives
+    - name: Admit exact regular singleton archive bytes before use
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-reuse-archive-admission python3 - 2>/dev/null <<'REUSE_ARCHIVE'
+        import hashlib, json, os, stat
+        from pathlib import Path
+        try:
+            directory = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-archives'
+            assert stat.S_ISDIR(directory.lstat().st_mode)
+            assert sorted(path.name for path in directory.iterdir()) == ['off.tar.zst']
+            archive = directory / 'off.tar.zst'; info = archive.lstat()
+            assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == 46703637
+            with archive.open('rb') as stream: digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            assert digest == '5e99987532006082eee38656b3cf5b5f4588222fcf8658e338f9a4b2e53c8a56'
+            value = {'basename': 'off.tar.zst', 'size': info.st_size, 'sha256': digest,
+                'archive_admitted': True, 'reused_producer_run_id': 37518173142, 'current_compile_executed': False}
+            (Path(os.environ['MANUAL_EVIDENCE']) / 'archive-manifest.json').write_text(json.dumps(value) + '\n')
+            print('{"retained_off_archive_admitted":true}')
+        except Exception:
+            print('{"error":"native-off-reuse-archive-refused"}')
+            raise SystemExit(1)
+        REUSE_ARCHIVE
+    - name: Install same pinned native Rust and cranelift only
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+      with:
+        toolchain: nightly-2026-04-19
+        components: rustc-codegen-cranelift-preview
+        rust-src-dir: candidate-source
+        cache: false
+        rustflags: ''
+    - name: Install same pinned nextest only
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      with:
+        tool: cargo-nextest@0.9.146
+    - name: Execute exact existing native tool admission
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-reuse-rust-tools python3 - 2>/dev/null < "$RUNNER_TEMP/bootstrap-native-off-tools.py"
+    - name: Observe original no-build collector with finite safe errors
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-reuse-tests python3 - 2>/dev/null <<'REUSE_COLLECTOR'
+        import ast, hashlib, json, locale, os, re, subprocess, sys
+        from pathlib import Path
+        # ExpectedError::display_to_stderr and the runner errors at cargo-nextest-0.9.146.
+        # Only these static portions are saved; every dynamic slot is withheld.
+        def project(raw):
+            value = {'category': 'unknown', 'header': None, 'causes': [], 'projection_status': 'unknown'}
+            if len(raw) > 65536:
+                value['projection_status'] = 'output-over-bound'; return value
+            try: output = raw.decode('utf-8')
+            except UnicodeError:
+                value['projection_status'] = 'text-decode-failed'; return value
+            output = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output)
+            headers = [
+                (r'profile `[^`\n]{1,256}` not found \(known profiles: [^\n]{0,256}\)', 'profile', 'profile `<withheld>` not found (known profiles: <withheld>)'),
+                (r'failed to parse nextest config at `[^`\n]{1,256}`(?: provided by tool `[^`\n]{1,128}`)?', 'config', 'failed to parse nextest config at `<withheld>`'),
+                (r'error extracting archive `[^`\n]{1,256}`', 'archive', 'error extracting archive `<withheld>`'),
+                (r'failed to autodetect archive format for [^\n]{1,256}', 'archive', 'failed to autodetect archive format for <withheld>'),
+                (r'argument --(?:workspace-remap|target-dir-remap|build-dir-remap) specified `[^`\n]{1,256}` that couldn\x27t be read', 'path', "argument <withheld> specified `<withheld>` that couldn't be read"),
+                (r'workspace root manifest at [^\n]{1,256} does not exist', 'path', 'workspace root manifest at <withheld> does not exist'),
+                (r'workspace root `[^`\n]{1,256}` is invalid', 'path', 'workspace root `<withheld>` is invalid'),
+                (r'failed to create store dir at `[^`\n]{1,256}`', 'path', 'failed to create store dir at `<withheld>`'),
+                (r'error reading Cargo metadata from file `[^`\n]{1,256}`', 'archive', 'error reading Cargo metadata from file `<withheld>`'),
+                (r'error parsing Rust build metadata', 'archive', 'error parsing Rust build metadata'),
+                (r'failed to build test runner', 'runner', 'failed to build test runner'),
+                (r'the host platform could not be detected', 'runner', 'the host platform could not be detected'),
+                (r'failed to get current executable', 'runner', 'failed to get current executable'),
+            ]
+            causes = [
+                (r'error creating Tokio runtime', 'runner', 'error creating Tokio runtime'),
+                (r'error setting up signals', 'runner', 'error setting up signals'),
+                (r'(remapped (?:workspace root|target directory|build directory)) `[^`\n]{1,256}` failed to canonicalize', 'path', 'remapped <withheld> failed to canonicalize'),
+                (r'(remapped (?:workspace root|target directory|build directory)) `[^`\n]{1,256}` is not a directory', 'path', 'remapped <withheld> is not a directory'),
+                (r'error resolving the configuration path', 'config', 'error resolving the configuration path'),
+                (r'error deserializing platform from build metadata', 'archive', 'error deserializing platform from build metadata'),
+                (r'the host platform could not be determined', 'runner', 'the host platform could not be determined'),
+                (r'unsupported features in the build metadata: [^\n]{1,256}', 'archive', 'unsupported features in the build metadata: <withheld>'),
+                (r'error joining dynamic library paths for [^\n]{1,256}', 'lib', 'error joining dynamic library paths for <withheld>'),
+                (r'No such file or directory \(os error 2\)', 'path', 'No such file or directory (os error 2)'),
+                (r'Permission denied \(os error 13\)', 'path', 'Permission denied (os error 13)'),
+                (r'Not a directory \(os error 20\)', 'path', 'Not a directory (os error 20)'),
+                (r'Resource temporarily unavailable \(os error 11\)', 'runner', 'Resource temporarily unavailable (os error 11)'),
+            ]
+            lines = output.splitlines()
+            for line in lines[:128]:
+                if len(line) > 512: continue
+                if line.startswith('error: '):
+                    for pattern, category, public in headers:
+                        if re.fullmatch(pattern, line[7:]):
+                            value.update(category=category, header=public, projection_status='matched-static-portions'); break
+                    break
+            if value['header'] is not None:
+                for index, line in enumerate(lines[:128]):
+                    if line != 'Caused by:' or index + 1 >= len(lines): continue
+                    cause = lines[index + 1]
+                    if not cause.startswith('  ') or len(cause) > 512: continue
+                    for pattern, category, public in causes:
+                        if re.fullmatch(pattern, cause[2:]):
+                            value['causes'].append({'category': category, 'static_text': public}); break
+                    if len(value['causes']) == 4: break
+            return value
+        diagnostic = {'runner_exit_code': None, 'collector_exit_code': None, 'runner_returned': False,
+            'launch_classification': None, 'error_projection': project(b''), 'product_green': False}
+        original_run = subprocess.run; calls = 0; saved = False
+        try:
+            native = (Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-off-collector.py').read_text()
+            assert hashlib.sha256(native.encode()).hexdigest() == 'cbbd22b60f2f4b6630748bb277fe75c89d4df68ef1edc96e76fe008db0a223e4'
+            tree = ast.parse(native)
+            invocations = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and
+                isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and
+                node.func.value.id == 'subprocess' and node.func.attr == 'run']
+            assert len(invocations) == 1
+            def observe(argv, **kwargs):
+                global calls
+                calls += 1
+                assert calls == 1 and argv[:3] == ['cargo-nextest', 'nextest', 'run']
+                assert kwargs == {'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT, 'text': True}
+                # Capture bytes only to latch the actual returned code before the original text decode.
+                result = original_run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                diagnostic.update(runner_exit_code=result.returncode, runner_returned=True)
+                diagnostic['error_projection'] = project(result.stdout)
+                encoding = 'utf-8' if sys.flags.utf8_mode else locale.getencoding()
+                output = result.stdout.decode(encoding).replace('\r\n', '\n').replace('\r', '\n')
+                return subprocess.CompletedProcess(result.args, result.returncode, output, result.stderr)
+            subprocess.run = observe
+            exec(compile(native, '<original-native-off-collector>', 'exec'), {})
+        except SystemExit as error:
+            diagnostic['collector_exit_code'] = error.code if type(error.code) is int else 1
+        except FileNotFoundError: diagnostic['launch_classification'] = 'path-or-command-missing'
+        except PermissionError: diagnostic['launch_classification'] = 'path-or-command-permission-denied'
+        except UnicodeError: diagnostic['launch_classification'] = 'text-decode-failed'
+        except Exception: diagnostic['launch_classification'] = 'observer-or-collector-refused'
+        finally:
+            subprocess.run = original_run
+            try:
+                (Path(os.environ['MANUAL_EVIDENCE']) / 'runner-error.json').write_text(json.dumps(diagnostic) + '\n')
+                saved = True
+            except Exception:
+                print('{"error":"native-off-reuse-observation-save-failed"}')
+            print(json.dumps({'native_off_reuse_observation': diagnostic, 'observation_saved': saved}))
+        raise SystemExit(0 if saved and diagnostic['collector_exit_code'] == 0 and diagnostic['launch_classification'] is None else 1)
+        REUSE_COLLECTOR
+    - name: Check exact reuse source after observation even on failure
+      if: always() && steps.source-admission.outcome == 'success'
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-reuse-source-after true 2>/dev/null
+    - name: Retain only finite safe reuse diagnostic JSON evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-native-off-reuse-diagnostic-evidence
+        path: |
+          bootstrap-native-off-reuse-evidence/source-manifest.json
+          bootstrap-native-off-reuse-evidence/producer-manifest.json
+          bootstrap-native-off-reuse-evidence/archive-manifest.json
+          bootstrap-native-off-reuse-evidence/tool-manifest.json
+          bootstrap-native-off-reuse-evidence/red-adjudication.json
+          bootstrap-native-off-reuse-evidence/runner-error.json
+          bootstrap-native-off-reuse-evidence/native-reuse-source-before.json
+          bootstrap-native-off-reuse-evidence/native-reuse-metadata.json
+          bootstrap-native-off-reuse-evidence/native-reuse-archive-admission.json
+          bootstrap-native-off-reuse-evidence/native-reuse-rust-tools.json
+          bootstrap-native-off-reuse-evidence/native-reuse-tests.json
+          bootstrap-native-off-reuse-evidence/native-reuse-source-after.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
