@@ -10,12 +10,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   # Product source is admitted only after a measured qualifying baseline RED.
   # The later product checkpoint must explicitly replace this fixed lane.
-  BOOTSTRAP_CHECKPOINT_MODE: baseline-red
+  BOOTSTRAP_CHECKPOINT_MODE: privacy-repair
   BOOTSTRAP_BASE_SHA: 8fcd0f33451058f55b110e707d50497545763615
   MANUAL_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
   MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-evidence
