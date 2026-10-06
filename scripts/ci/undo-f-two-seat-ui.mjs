@@ -22,7 +22,8 @@ ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','r
 const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
 const shape=(${publicNodeShape});const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return {...shape(n),ancestors};});
 return {disabled:b.disabled,clientRects:b.getClientRects().length,bounds:{x:r.x,y:r.y,width:r.width,height:r.height},hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y)),hits};})`;
-const undoCandidates = "[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='Sandbox pre-cast Undo')";
+const undoCandidates = "[...document.querySelectorAll('[data-player-hud=\"0\"] button')].filter(b=>b.textContent.trim()==='Sandbox pre-cast Undo')";
+const visibleEnabledUndo = `(${undoCandidates}).filter(b=>{const r=b.getBoundingClientRect();return !b.disabled&&b.getClientRects().length>0&&r.width>0&&r.height>0;})`;
 const undoControls = fullControlControls.replace(fullControlCandidates, undoCandidates);
 const hittableUndo = `(${undoCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y));})`;
 const publicGameControls = `(()=>{const shape=(${publicNodeShape});return {dialogCount:document.querySelectorAll('[role=dialog],dialog[open]').length,
@@ -208,9 +209,17 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     };
     const click = async (expression, diagnostic) => {
       if (diagnostic) result[diagnostic.key] = { beforeScroll: await evaluate(diagnostic.controls) };
-      const r = await evaluate(`(()=>{const n=${expression};if(!n||n.disabled)return null;n.scrollIntoView({block:'center'});const r=n.getBoundingClientRect();const x=r.x+r.width/2,y=r.y+r.height/2;return n.contains(document.elementFromPoint(x,y))?{x,y}:null;})()`);
+      const r = await evaluate(`(async()=>{const n=${expression};if(!n||n.disabled)return null;const before=n.getBoundingClientRect();
+const inside=before.left>=0&&before.top>=0&&before.right<=innerWidth&&before.bottom<=innerHeight;
+const scrolled=!(${Boolean(diagnostic?.scrollOnlyWhenNeeded)}&&inside);if(scrolled)n.scrollIntoView({block:'center'});
+const first=n.getBoundingClientRect();if(${Boolean(diagnostic?.scrollOnlyWhenNeeded)})await new Promise(resolve=>requestAnimationFrame(resolve));
+const r=n.getBoundingClientRect(),stable=['x','y','width','height'].every(k=>first[k]===r[k]),x=r.x+r.width/2,y=r.y+r.height/2;
+return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(document.elementFromPoint(x,y))};})()`);
       if (diagnostic) result[diagnostic.key].afterScroll = await evaluate(diagnostic.controls);
-      assert(r, "app control not pointer-hittable"); await point(r.x, r.y);
+      if (diagnostic) result[diagnostic.key].geometry = r;
+      assert(r, "app control not pointer-hittable");
+      assert(r.stable, "app control rectangle unstable");
+      assert(r.hittable, "app control not pointer-hittable"); await point(r.x, r.y);
     };
     const button = text => `[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)})`;
     const cropControl = async (expression, name) => {
@@ -383,10 +392,11 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   await host.wait(`(()=>{const b=${undo};return b&&!b.disabled;})()`);
   category = "setup"; stage = "host-undo-pointer-ready";
   result.undoCandidatesBefore = await host.evaluate(undoControls);
+  assert(await host.evaluate(`(${visibleEnabledUndo}).length===1`), "visible enabled host Undo control not unique");
   await host.wait(hittableUndo);
   await host.cropControl(hittableUndo, "host-armed-undo-control.png");
   stage = "host-pointer-undo";
-  await host.click(hittableUndo, { key: "undoClickUi", controls: undoControls });
+  await host.click(hittableUndo, { key: "undoClickUi", controls: undoControls, scrollOnlyWhenNeeded: true });
   category = "product"; stage = "host-undo-restore";
   await host.wait("window.__twoSeatQa.restoreWitness()", 30);
   await guest.wait("window.__twoSeatQa.status().stackCount===0 && !window.__twoSeatQa.status().blocked", 30);
