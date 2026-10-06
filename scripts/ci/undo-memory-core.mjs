@@ -135,3 +135,13 @@ export const cases = [
  {caseId:"smoke40-off",cards:40,minTurn:1,repeats:1,undo:false},
  {caseId:"repeat40-on",cards:40,minTurn:1,repeats:32,undo:true}
 ];
+
+// Node size expansion follows the validated 40-short contract.
+// Compare reachedTurn/traceLength as well as structural counts: a common seed
+// does not guarantee identical preparation history at different deck sizes.
+export const nodeCases = [...cases,
+ {caseId:"short80-off",cards:80,minTurn:1,repeats:1,undo:false},
+ {caseId:"short80-on",cards:80,minTurn:1,repeats:32,undo:true},
+ {caseId:"short160-off",cards:160,minTurn:1,repeats:1,undo:false},
+ {caseId:"short160-on",cards:160,minTurn:1,repeats:32,undo:true}
+];

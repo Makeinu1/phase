@@ -2,7 +2,7 @@ import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
-import {prepare,measure,cases} from './undo-memory-core.mjs';
+import {prepare,measure,nodeCases as cases} from './undo-memory-core.mjs';
 const directory=path.resolve(process.argv[2]);
 const bytes=await readFile(path.join(directory,'engine_wasm_bg.wasm'));
 const fixture=await readFile(process.argv[3],'utf8');
