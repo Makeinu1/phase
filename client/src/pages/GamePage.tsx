@@ -1446,7 +1446,7 @@ function GamePageContent({
     >
       <div
         ref={containerRef}
-        className="relative min-h-0 min-w-0 flex-1 overflow-hidden contain-paint"
+        className="relative min-h-0 min-w-0 flex-1 overflow-clip contain-paint"
         style={gamePageStyle}
       onContextMenu={(e) => {
         e.preventDefault();
