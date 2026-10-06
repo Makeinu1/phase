@@ -72,6 +72,7 @@ jobs:
             "$GITHUB_WORKSPACE/adapter-evidence/browser-capability" \
             node ../control/scripts/ci/undo-history-adapter-run.mjs \
             "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
+            "$GITHUB_WORKSPACE/adapter-evidence/browser-capability" --browser-selfcheck-only
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         id: pnpm
         if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
