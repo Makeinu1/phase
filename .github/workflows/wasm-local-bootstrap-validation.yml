@@ -2157,7 +2157,6 @@ jobs:
     env:
       MANUAL_EXPECTED_SOURCE_SHA: 4fa56ded3a65431ce3f5f943dafaff979a40255f
       MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-native-off-evidence
-      CARGO_TARGET_DIR: ${{ runner.temp }}/bootstrap-native-target
       RUST_MIN_STACK: '16777216'
       BOOTSTRAP_NATIVE_ARTIFACT: 'off'
       BOOTSTRAP_NATIVE_TEST_COUNT: '10'
@@ -2244,6 +2243,8 @@ jobs:
     - name: Capture resource preflight before native tooling
       working-directory: candidate-source
       run: |
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-native-target"
+        printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
         python3 scripts/ci/manual-integration-guard.py native-off-source-before true 2>/dev/null
     - name: Install pinned native Rust and cranelift only
       uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
