@@ -17,13 +17,15 @@ const fullControlCandidates = "[...document.querySelectorAll('button[aria-label=
 // Fixed source class tokens only: no raw class attribute, text, or dialog data.
 const publicNodeShape = `n=>{const role=n.getAttribute('role'),label=n.getAttribute('aria-label');return {tag:n.tagName,
 role:['dialog','button','status','presentation','alert','tooltip','listbox','option','menu','group','none'].includes(role)?role:role?'other':null,
-ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan'].includes(label)?label:label?'other':null,
-ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-50','z-30','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c))};}`;
+ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan','Tap to continue'].includes(label)?label:label?'other':null,
+ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-50','z-30','z-[55]','pointer-events-none','pointer-events-auto','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c))};}`;
 const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
 const shape=(${publicNodeShape});const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return {...shape(n),ancestors};});
 return {disabled:b.disabled,clientRects:b.getClientRects().length,bounds:{x:r.x,y:r.y,width:r.width,height:r.height},hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y)),hits};})`;
 const publicGameControls = `(()=>{const shape=(${publicNodeShape});return {dialogCount:document.querySelectorAll('[role=dialog],dialog[open]').length,
 mulliganShells:[...document.querySelectorAll('div.fixed.inset-0.z-50.overflow-x-hidden.overflow-y-auto')].map(shape),
+startingDiceShells:[...document.querySelectorAll('div[role=status].fixed.inset-0')].filter(n=>n.classList.contains('z-[55]')).map(shape),
+continueButtons:[...document.querySelectorAll('button[aria-label="Tap to continue"]')].map(b=>{const r=b.getBoundingClientRect();return {disabled:b.disabled,clientRects:b.getClientRects().length,hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};}),
 keepButtons:[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='Keep Hand').map(b=>{const r=b.getBoundingClientRect();return {disabled:b.disabled,clientRects:b.getClientRects().length,hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};}),
 fullControl:${fullControlControls}};})()`;
 const hittableFullControl = `(${fullControlCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y));})`;
@@ -301,12 +303,29 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   // confirm. Follow its original Keep Hand buttons instead of reaching behind it.
   result.openingHandConfirmed = {};
   result.openingHandUi = {};
+  result.openingContestUi = {};
+  result.startingContestContinued = {};
   for (const [role, page] of Object.entries(pages)) {
     stage = role + "-opening-hand-confirm";
     await page.wait("window.__twoSeatQa.status().mulliganPending===true");
     const beforeKeepSeq = await page.evaluate("window.__twoSeatQa.status().localCommitSeq");
     assert(Number.isInteger(beforeKeepSeq), "opening hand commit sequence unavailable");
     const keep = `[...document.querySelectorAll('button')].find(b=>{if(b.textContent.trim()!=='Keep Hand'||b.disabled)return false;const r=b.getBoundingClientRect();return r.width>0&&r.height>0&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})`;
+    // The CR 103.1 starting-player presentation can hold the mulligan UI.
+    // Its original backdrop control calls skipDiceRoll; observe and click only
+    // that visible/hittable control, never clear the UI store or wait it away.
+    const continueContest = `[...document.querySelectorAll('button[aria-label="Tap to continue"]')].find(b=>{const r=b.getBoundingClientRect();return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));})`;
+    stage = role + "-opening-contest-or-keep";
+    await page.wait(`Boolean(${keep}) || Boolean(${continueContest})`);
+    result.openingContestUi[role] = await page.evaluate(publicGameControls);
+    if (await page.evaluate(`Boolean(${continueContest})`)) {
+      assert(await page.evaluate("window.__twoSeatQa.status().startingDicePending"), "starting contest control/state mismatch");
+      stage = role + "-pointer-starting-contest-continue";
+      await page.click(continueContest);
+      await page.wait("!window.__twoSeatQa.status().startingDicePending && !document.querySelector('button[aria-label=\"Tap to continue\"]')");
+      result.startingContestContinued[role] = true;
+    }
+    stage = role + "-opening-hand-confirm";
     await page.wait(keep);
     result.openingHandUi[role] = await page.evaluate(publicGameControls);
     await page.click(keep);
