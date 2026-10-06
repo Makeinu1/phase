@@ -44,6 +44,7 @@ let viteLog = "", chromeOut = "", chromeErr = "";
 let serial = 0;
 const pending = new Map();
 const createdWorkers = new Set(), destroyedWorkers = new Set();
+const workerSessions = new Map(), detachedWorkerSessions = new Set();
 function call(method, params = {}, sessionId) {
   return new Promise((resolve, reject) => {
     const id = ++serial;
@@ -101,16 +102,26 @@ try {
       if (info.type === "worker" && info.url.includes("engine-worker")) createdWorkers.add(info.targetId);
     }
     if (message.method === "Target.targetDestroyed" && createdWorkers.has(message.params.targetId)) destroyedWorkers.add(message.params.targetId);
+    if (message.method === "Target.attachedToTarget") {
+      const info = message.params.targetInfo;
+      if (info.type === "worker" && info.url.includes("engine-worker")) {
+        createdWorkers.add(info.targetId);
+        workerSessions.set(message.params.sessionId, info.targetId);
+      }
+    }
+    if (message.method === "Target.detachedFromTarget" && workerSessions.has(message.params.sessionId)) detachedWorkerSessions.add(message.params.sessionId);
     const request = pending.get(message.id);
     if (!request) return;
     pending.delete(message.id); clearTimeout(request.timer);
-    if (message.error) request.reject(Error("CDP command failed")); else request.resolve(message.result);
+    if (message.error) request.reject(Object.assign(Error("CDP command failed"), { protocolCode: message.error.code })); else request.resolve(message.result);
   });
   await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
   await call("Target.setDiscoverTargets", { discover: true });
   const target = await call("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await call("Target.attachToTarget", { targetId: target.targetId, flatten: true });
   await call("Page.enable", {}, sessionId);
+  // Dedicated Workers are page-related targets, not browser discovery events.
+  await call("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
   // Observation only: native Worker construction/postMessage/terminate still execute.
   await call("Page.addScriptToEvaluateOnNewDocument", { source: `
     window.__hostUiMonitor={workers:[]}; const NativeWorker=window.Worker;
@@ -163,6 +174,11 @@ try {
   assert(!primary[0].requests.includes("enableHostPrecastUndo") && !primary[0].requests.includes("restoreHostPrecastUndo"), "Undo gate was bypassed");
   assert(await evaluate("!document.querySelector('input[type=checkbox]').checked && document.querySelector('#snapshot-active').textContent==='true' && [...document.querySelectorAll('button')].find(button=>button.textContent==='Sandbox pre-cast Undo')?.disabled===true"), "consent consumption/disabled Undo failed");
   result.consentConsumedOnce = true; result.guestAbsentUndoDisabled = true;
+  assert(workerSessions.size === 1 && createdWorkers.size === 1, "real engine Worker CDP session unavailable");
+  const workerTarget = [...createdWorkers][0];
+  const liveTarget = await call("Target.getTargetInfo", { targetId: workerTarget });
+  assert(liveTarget.targetInfo.type === "worker" && liveTarget.targetInfo.url.includes("engine-worker"), "engine Worker target not live before close");
+  result.engineWorkerInspectableBeforeClose = true;
   await screenshot("host-undo-disabled.png");
   stage = "host-close";
   await click("#close-host");
@@ -172,9 +188,14 @@ try {
   assert(after.ui.displayCleared && after.ui.diagnosticsCleared && after.workers.filter(worker => worker.engine && worker.terminated).length === 1, "close did not release Worker/display/diagnostics");
   assert(!after.workers.some(worker => worker.requests.includes("releaseHostSession")), "private close waited on a release RPC");
   assert(await evaluate("document.querySelector('#snapshot-active').textContent==='false' && ![...document.querySelectorAll('button')].some(button=>button.textContent==='Sandbox pre-cast Undo')"), "closed Undo display remains");
-  for (let i = 0; i < 50 && destroyedWorkers.size < createdWorkers.size; i++) await pause(100);
-  result.workerTargets = { created: createdWorkers.size, destroyed: destroyedWorkers.size };
-  assert(createdWorkers.size === 1 && destroyedWorkers.size === 1, "actual engine Worker target remains");
+  // Never detach the Worker or close its page before checking actual disposal.
+  for (let i = 0; i < 50 && detachedWorkerSessions.size !== 1; i++) await pause(100);
+  let removedTargetCode;
+  try { await call("Target.getTargetInfo", { targetId: workerTarget }); }
+  catch (cause) { removedTargetCode = cause.protocolCode; }
+  result.workerTargets = { created: createdWorkers.size, destroyedEvents: destroyedWorkers.size,
+    detached: detachedWorkerSessions.size, removedTargetCode };
+  assert(detachedWorkerSessions.size === 1 && removedTargetCode === -32602, "actual engine Worker target remains");
   result.hostClose = true; result.actualWorkerTargetDestroyed = true;
   await screenshot("host-closed.png");
   await call("Browser.close").catch(() => {});
