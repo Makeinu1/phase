@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  MANUAL_SOURCE_SHA: 6aa2cd4fed81286be3b0876767a0c5953016f8fc
+  MANUAL_SOURCE_SHA: 5fbd380a24eee151103328465f980e492209ae18
   CARGO_INCREMENTAL: '0'
   CARGO_BUILD_JOBS: '1'
   CARGO_TERM_COLOR: never
