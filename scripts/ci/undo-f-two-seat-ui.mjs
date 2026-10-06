@@ -290,7 +290,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     };
     const readyHandPoint = async key => {
       const started=Date.now(), deadline=started+30000;
-      const witness=result[key]={samples:[],sampleCount:0,ready:false};
+      const witness=result[key]={samples:[],sampleCount:0,ready:false,pointerMovements:[],pointerMovementCount:0};
       const timeout = () => Object.assign(Error("app hand target not pointer-ready"), {qaDeadline:true});
       const run = async operation => {
         const remaining=deadline-Date.now(); if(remaining<=0)throw timeout();
@@ -306,14 +306,20 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
         // One initial target selection; all later samples keep that node locked.
         const initial=await read("window.__twoSeatQa.cardPoint()"); witness.initialPoint=initial;
         assert(initial, "app hand target not pointer-ready");
-        // Ordinary pointer arrival precedes hover-sensitive readiness. Keep
-        // this exact coordinate through settling and both original clicks.
-        await run(() => cdp("Input.dispatchMouseEvent", {type:"mouseMoved",x:initial.x,y:initial.y,button:"none",buttons:0}, sessionId));
-        witness.nativePointerArrivalCompleted=true;
+        let pointer=initial;
+        const arrive=async point=>{
+          await run(()=>cdp("Input.dispatchMouseEvent",{type:"mouseMoved",x:point.x,y:point.y,button:"none",buttons:0},sessionId));
+          pointer=point;witness.nativePointerArrivalCompleted=true;witness.pointerMovementCount++;
+          witness.pointerMovements.push({...point});if(witness.pointerMovements.length>10)witness.pointerMovements.shift();
+        };
+        await arrive(initial);
         let previous, stable=0;
         while (Date.now()<deadline) {
+          // Remeasure the same card before clicking; geometry may move on hover.
+          const exposed=await read("window.__twoSeatQa.lockedCardPoint()");
+          if(exposed&&(exposed.x!==pointer.x||exposed.y!==pointer.y))await arrive(exposed);
           await read("new Promise(resolve=>requestAnimationFrame(resolve))");
-          const sample=await read(`(()=>{const x=${initial.x},y=${initial.y},snapshot=window.__twoSeatQa.handPointerSnapshot(x,y);
+          const sample=await read(`(()=>{const x=${pointer.x},y=${pointer.y},snapshot=window.__twoSeatQa.handPointerSnapshot(x,y);
 const shape=(${publicNodeShape});return {pointAvailable:Boolean(snapshot.intendedNodeConnected&&snapshot.hitIntended),...snapshot,
 pointer:{x,y},hitElements:document.elementsFromPoint(x,y).slice(0,3).map(shape)};})()`);
           if(Date.now()>=deadline)throw timeout();
@@ -321,7 +327,7 @@ pointer:{x,y},hitElements:document.elementsFromPoint(x,y).slice(0,3).map(shape)}
           const signature=JSON.stringify({pointer:sample.pointer,bounds:sample.intendedBounds});
           stable=sample.pointAvailable&&handReady(sample)?signature===previous?stable+1:1:0;
           previous=signature;
-          if(stable>=3){witness.ready=true;return sample.pointer;}
+          if(stable>=3){witness.ready=true;witness.finalPoint=sample.pointer;return sample.pointer;}
         }
         throw timeout();
       } finally { witness.elapsedMs=Date.now()-started; }

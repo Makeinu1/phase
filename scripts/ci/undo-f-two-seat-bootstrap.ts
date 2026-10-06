@@ -46,6 +46,22 @@ type OrdinaryStepAction = "MulliganDecision" | "DeclareAttackers" | "DeclareBloc
 let ordinaryStepOrdinal = 0;
 let ordinaryStep: {ordinal:number;startedAtUnixMs:number;phase:"entered"|"dispatch"|"completed"|"threw";
   actionKind:OrdinaryStepAction|null;dispatchAtUnixMs?:number;finishedAtUnixMs?:number} | null = null;
+function visibleHandPoint(node: HTMLElement) {
+  const r=node.getBoundingClientRect();
+  const at=(dx:number,dy:number)=>{
+    const x=r.x+r.width*dx,y=r.y+r.height*dy;
+    if(x<0||y<0||x>=innerWidth||y>=innerHeight)return null;
+    const hit=document.elementFromPoint(x,y);
+    if(hit?.closest("[data-hand-card]")!==node)return null;
+    const control=hit.closest('button,a,input,select,textarea,[role="button"]');
+    if(control&&node.contains(control))return null;
+    return{x,y};
+  };
+  // Preserve the existing nine probes before measuring exposed inset regions.
+  for(const dx of [.5,.2,.8])for(const dy of [.1,.3,.6]){const p=at(dx,dy);if(p)return p;}
+  for(const dx of [.05,.1,.35,.65,.9,.95])for(const dy of [.05,.15,.45,.75,.9,.95]){const p=at(dx,dy);if(p)return p;}
+  return null;
+}
 function ordinalFor(map: WeakMap<object, number>, value: unknown) {
   if (!value || typeof value !== "object") return null;
   if (!map.has(value)) map.set(value, ++observationOrdinal);
@@ -316,13 +332,8 @@ const qa = {
     const s = useGameStore.getState().gameState;
     for (const node of document.querySelectorAll<HTMLElement>("[data-player-hand] [data-hand-card][data-object-id]")) {
       if (s?.objects[Number(node.dataset.objectId)]?.name !== "Grizzly Bears") continue;
-      const r = node.getBoundingClientRect();
-      for (const dx of [.5, .2, .8]) for (const dy of [.1, .3, .6]) {
-        const x = r.x + r.width * dx, y = r.y + r.height * dy;
-        if (document.elementFromPoint(x, y)?.closest("[data-hand-card]") === node) {
-          pointerTarget = node; pointerObjectId = Number(node.dataset.objectId); return { x, y };
-        }
-      }
+      const point=visibleHandPoint(node);
+      if(point){pointerTarget=node;pointerObjectId=Number(node.dataset.objectId);return point;}
     }
     return null;
   },
@@ -330,12 +341,7 @@ const qa = {
     // Read only the already chosen node. A disappearing or obscured target
     // cannot silently select another card during pointer readiness.
     if (!pointerTarget?.isConnected) return null;
-    const r = pointerTarget.getBoundingClientRect();
-    for (const dx of [.5, .2, .8]) for (const dy of [.1, .3, .6]) {
-      const x = r.x + r.width * dx, y = r.y + r.height * dy;
-      if (document.elementFromPoint(x, y)?.closest("[data-hand-card]") === pointerTarget) return { x, y };
-    }
-    return null;
+    return visibleHandPoint(pointerTarget);
   },
   handPointerSnapshot(x: number, y: number) {
     const g = useGameStore.getState(), s = g.gameState;
