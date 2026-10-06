@@ -20,3 +20,8 @@ This is not a comprehensive bound: arbitrary strings, ability payloads, other co
 ## Validation
 
 Private unit tests reuse the existing legal cast Fixture and shared host Undo regressions. They cover inclusive structural boundaries, nested inner sums, arithmetic overflow, multibyte JSON, capture avoidance, serializer refusal/error with exactly one SpellCast, old receipt invalidation, and failed decode retaining the armed Case. Dedicated fork-only native Actions uses fixed nightly-2026-04-19, cranelift, opt0, debug0, jobs1, incremental disabled, existing nextest CI profile, relevant rustfmt check and parser Gate A. Each native build/test command has the reused 13 GiB working-set, 4 GiB disk-free, and 1500-second process-group guard. No WASM rebuild or new credentials are used. Local runtime validation is unavailable; committed-candidate CI and independent review remain required.
+
+
+### Workflow context preflight
+
+Before publishing workflow edits, parse the YAML and check expression roots against GitHub's [context availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability). Top-level `env` permits `github`, `secrets`, `inputs`, and `vars`; job-level `env` additionally permits `needs`, `strategy`, and `matrix`, but neither permits `runner`. Runner-local paths are initialized in a step using quoted `$RUNNER_TEMP` and `$GITHUB_ENV`; `runner.temp` remains valid in artifact step `with`. Verify the context check rejects the previous top-level `runner.temp` definitions, verify the initialization shell with `bash -n`, and recheck branch/path triggers and read-only permissions. This preflight does not replace GitHub workflow admission or Rust test results.

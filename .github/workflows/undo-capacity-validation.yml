@@ -21,8 +21,6 @@ env:
   CARGO_INCREMENTAL: '0'
   CARGO_TERM_COLOR: never
   CARGO_PROFILE_DEV_DEBUG: '0'
-  CARGO_TARGET_DIR: ${{ runner.temp }}/undo-capacity-target
-  CAPACITY_EVIDENCE: ${{ runner.temp }}/undo-capacity-evidence
 
 jobs:
   native:
@@ -30,6 +28,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: Initialize runner-local paths
+        run: |
+          printf 'CARGO_TARGET_DIR=%s/undo-capacity-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CAPACITY_EVIDENCE=%s/undo-capacity-evidence\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/undo-capacity-evidence"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
