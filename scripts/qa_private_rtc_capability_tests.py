@@ -2,6 +2,7 @@
 """Validator/cleanup fault injection only; no browser capability proof."""
 
 import copy
+import ctypes
 import base64
 import errno
 import hashlib
@@ -12,6 +13,7 @@ import tempfile
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import types
 import unittest
@@ -204,6 +206,20 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ProcessGroupTests(unittest.TestCase):
+    def test_kernel_membership_distinguishes_absent_group_and_rejects_permission_failure(self):
+        with patch.object(driver.os, "killpg", side_effect=ProcessLookupError):
+            self.assertFalse(driver.browser_group_exists(424242))
+        with patch.object(driver.os, "killpg", side_effect=PermissionError(errno.EPERM, "private process detail")):
+            with self.assertRaises(PermissionError):
+                driver.browser_group_exists(424242)
+
+    def test_zombie_snapshot_cannot_hide_kernel_visible_forked_child_from_signal(self):
+        with patch.object(driver.Path, "iterdir", return_value=[Path("/proc/10")]), \
+                patch.object(driver.Path, "read_bytes", return_value=b"10 (parent) Z 1 424242 424242 0"), \
+                patch.object(driver, "browser_group_exists", return_value=True, create=True), \
+                patch.object(driver.os, "killpg") as send:
+            driver.signal_browser_group(424242, signal.SIGTERM)
+        send.assert_called_once_with(424242, signal.SIGTERM)
     def test_inventory_excludes_exited_zombies_and_handles_parentheses_in_command(self):
         data = [b"10 (writer ) with spaces) S 1 424242 424242 0", b"11 (zombie) Z 1 424242 424242 0",
                 b"12 (other) S 1 12345 12345 0"]
@@ -285,6 +301,7 @@ class CleanupTests(unittest.TestCase):
             popen = stack.enter_context(patch.object(driver.subprocess, "Popen", return_value=self.process, side_effect=launch))
             if isinstance(self.process, Mock):
                 stack.enter_context(patch.object(driver, "active_browser_group", self.group_inventory))
+                stack.enter_context(patch.object(driver, "browser_group_exists", return_value=False))
                 stack.enter_context(patch.object(driver.os, "killpg", self.group_signal))
             stack.enter_context(patch.object(driver.Path, "read_text", return_value="1234\n"))
             if profile is not None:
@@ -315,6 +332,22 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue(self.result["cleanup"]["terminationRequested"])
         self.assertEqual(self.result["cleanup"]["result"], "fail")
         self.assertFalse(self.profile.exists())
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+
+    def test_sigterm_after_cleanup_return_cannot_be_recorded_as_success(self):
+        run = driver._run_browser
+        previous = signal.getsignal(signal.SIGTERM)
+        self.group_inventory.side_effect = [1, 1, 0, 0]
+
+        def after_cleanup(*args, **kwargs):
+            run(*args, **kwargs)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        with patch.object(driver, "_run_browser", side_effect=after_cleanup):
+            error = self.run_fault()
+        self.assertIsInstance(error, RuntimeError)
+        self.assertTrue(self.result["cleanup"]["terminationRequested"])
+        self.assertEqual(self.result["a2"]["result"], "pass")
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
 
     def test_real_launch_does_not_inherit_blocked_sigterm(self):
@@ -359,6 +392,13 @@ time.sleep(30)
 
     def test_exited_parent_cannot_leave_owned_child_writing_profile_during_removal(self):
         """Real Python processes reach run_browser teardown; no browser is run."""
+        # Reap this fixture's exact orphan as a normal init would. The driver
+        # itself does not change process adoption or reap unknown children.
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)  # PR_GET_CHILD_SUBREAPER
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)  # PR_SET_CHILD_SUBREAPER
+        self.addCleanup(lambda: self.assertEqual(libc.prctl(36, previous.value, 0, 0, 0), 0))
         profile = self.args.output_dir / "writer-profile"
         profile.mkdir()
         writer = """
@@ -385,6 +425,8 @@ while not (Path(sys.argv[1]) / 'late-write').exists():
                                    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                                      start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        reaper = None
+        reaped = []
         try:
             self.assertEqual(process.wait(timeout=5), 0)
             child = int((profile / "ready").read_text())
@@ -397,6 +439,8 @@ while not (Path(sys.argv[1]) / 'late-write').exists():
 
             self.assertTrue(child_writing(), "positive guard: child survived its exited parent")
             self.assertEqual(os.getpgid(child), process.pid)
+            reaper = threading.Thread(target=lambda: reaped.append(os.waitpid(child, 0)), daemon=True)
+            reaper.start()
             remove = shutil.rmtree
 
             def remove_quiescent(path):
@@ -417,6 +461,10 @@ while not (Path(sys.argv[1]) / 'late-write').exists():
             self.assertEqual(self.result["cleanup"]["result"], "pass")
             self.assertGreater(self.result["cleanup"]["browserProcess"]["activeGroupBefore"], 0)
             self.assertEqual(self.result["cleanup"]["browserProcess"]["activeGroupAfter"], 0)
+            self.assertTrue(self.result["cleanup"]["browserProcess"]["groupReleased"])
+            reaper.join(timeout=2)
+            self.assertFalse(reaper.is_alive())
+            self.assertEqual([pid for pid, _status in reaped], [child])
             self.assertIsNone(unrelated.poll(), "an unrelated owned test group must be untouched")
         finally:
             try:
@@ -424,6 +472,9 @@ while not (Path(sys.argv[1]) / 'late-write').exists():
             except ProcessLookupError:
                 pass
             process.wait(timeout=5)
+            if reaper is not None:
+                reaper.join(timeout=5)
+                self.assertFalse(reaper.is_alive())
             unrelated.terminate()
             unrelated.wait(timeout=5)
 
@@ -563,7 +614,8 @@ finally:
         self.process.poll.side_effect = None
         self.process.poll.return_value = 0
         cleanup = {}
-        with patch.object(driver, "active_browser_group", return_value=0), patch.object(driver.os, "killpg") as send:
+        with patch.object(driver, "active_browser_group", return_value=0), \
+                patch.object(driver, "browser_group_exists", return_value=False), patch.object(driver.os, "killpg") as send:
             driver.stop_browser_process(self.process, cleanup)
         send.assert_not_called()
         self.process.terminate.assert_not_called()
@@ -575,25 +627,47 @@ finally:
         self.process.poll.side_effect = [None, -9]
         cleanup = {}
         with patch.object(driver, "active_browser_group", side_effect=[1, 1, 1, 1, 0]), \
+                patch.object(driver, "browser_group_exists", side_effect=[True, False]), \
                 patch.object(driver.time, "monotonic", side_effect=[0, 5, 5]), \
                 patch.object(driver.os, "killpg") as send:
             driver.stop_browser_process(self.process, cleanup)
         self.assertEqual(send.call_args_list, [unittest.mock.call(self.process.pid, signal.SIGTERM),
                                               unittest.mock.call(self.process.pid, signal.SIGKILL)])
         self.assertEqual(cleanup["browserProcess"], {"terminateSent": True, "killSent": True, "exitCode": -9,
-                                                     "activeGroupBefore": 1, "activeGroupAfter": 0})
+                                                     "activeGroupBefore": 1, "activeGroupAfter": 0, "groupReleased": True})
 
     def test_surviving_group_fails_closed_after_bounded_term_and_kill(self):
         self.process.poll.side_effect = None
         self.process.poll.return_value = 0
         cleanup = {}
         with patch.object(driver, "active_browser_group", return_value=1), \
+                patch.object(driver, "browser_group_exists", return_value=True), \
                 patch.object(driver.time, "monotonic", side_effect=[0, 5, 5, 10]), \
                 patch.object(driver.os, "killpg") as send:
             with self.assertRaises(subprocess.TimeoutExpired):
                 driver.stop_browser_process(self.process, cleanup)
         self.assertEqual(send.call_count, 2)
         self.assertEqual(cleanup["browserProcess"]["activeGroupAfter"], 1)
+
+    def test_zero_inventory_cannot_release_kernel_visible_group_or_remove_profile(self):
+        self.group_inventory.side_effect = None
+        self.group_inventory.return_value = 0
+        stop = driver.stop_browser_process
+
+        def ambiguous(process, cleanup):
+            with patch.object(driver, "browser_group_exists", return_value=True), \
+                    patch.object(process, "poll", return_value=0), \
+                    patch.object(driver.time, "monotonic", side_effect=[0, 5, 5, 10]):
+                return stop(process, cleanup)
+
+        with patch.object(driver, "stop_browser_process", side_effect=ambiguous):
+            error = self.run_fault()
+        self.assertIsInstance(error, subprocess.TimeoutExpired)
+        state = self.result["cleanup"]["browserProcess"]
+        self.assertEqual(state["activeGroupAfter"], 0)
+        self.assertFalse(state["groupReleased"])
+        self.assertTrue(self.profile.is_dir())
+        self.assertEqual(next(s for s in self.result["cleanup"]["steps"] if s["stage"] == "profile-remove")["result"], "skipped")
 
     def test_profile_enotempty_remains_fatal_and_preserves_passed_communication(self):
         with patch.object(driver.shutil, "rmtree", side_effect=OSError(errno.ENOTEMPTY, "private profile path")) as remove:

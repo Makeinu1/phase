@@ -75,8 +75,17 @@ def active_browser_group(group):
     return active
 
 
+def browser_group_exists(group):
+    require(type(group) is int and group > 1 and group != os.getpgrp(), "invalid owned browser group")
+    try:
+        os.killpg(group, 0)  # Kernel membership includes children omitted by a /proc snapshot.
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def signal_browser_group(group, number):
-    if active_browser_group(group):
+    if active_browser_group(group) or browser_group_exists(group):
         try:
             os.killpg(group, number)
         except ProcessLookupError:
@@ -87,7 +96,7 @@ def signal_browser_group(group, number):
 
 def stop_browser_process(process, cleanup):
     state = {"terminateSent": False, "killSent": False, "exitCode": None,
-             "activeGroupBefore": None, "activeGroupAfter": None}
+             "activeGroupBefore": None, "activeGroupAfter": None, "groupReleased": False}
     cleanup["browserProcess"] = state
     state["activeGroupBefore"] = active_browser_group(process.pid)
     for number, key in [(signal.SIGTERM, "terminateSent"), (signal.SIGKILL, "killSent")]:
@@ -96,7 +105,11 @@ def stop_browser_process(process, cleanup):
         while True:
             state["exitCode"] = process.poll()  # Reap the root even when it exited before its children.
             state["activeGroupAfter"] = active_browser_group(process.pid)
-            if state["exitCode"] is not None and state["activeGroupAfter"] == 0:
+            state["groupReleased"] = not browser_group_exists(process.pid)
+            # A zero /proc count is not a release proof. Even an unreaped zombie
+            # group remains ambiguous here; retain the profile if the kernel
+            # cannot confirm absence within the existing teardown deadline.
+            if state["exitCode"] is not None and state["groupReleased"]:
                 return
             if time.monotonic() >= deadline:
                 break
@@ -440,6 +453,7 @@ def _run_browser(args, manifest, contents, result, owner):
                 require(not thread.is_alive(), "HTTP server thread did not stop")
             clean("http-thread-join", join_server)
         result["httpRequests"] = requests
+        owner["cleaning"] = False
         if owner["termination"] is not None:
             failures.append(owner["termination"])
         result["cleanup"]["result"] = "fail" if failures else "pass"
