@@ -6,6 +6,7 @@ exec 2>/dev/null
 session_id=''
 vite_pid=''
 driver_pid=''
+browser_stage='runtime-copy'
 cleanup() {
   if [ -n "$session_id" ]; then
     curl --silent --max-time 10 -X DELETE "http://127.0.0.1:9515/session/$session_id" \
@@ -14,8 +15,22 @@ cleanup() {
   if [ -n "$vite_pid" ]; then kill "$vite_pid" 2>/dev/null || true; fi
   if [ -n "$driver_pid" ]; then kill "$driver_pid" 2>/dev/null || true; fi
 }
-trap cleanup EXIT
+finish() {
+  browser_code=$?
+  cleanup
+  set +e
+  python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$browser_code" \
+    "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" "$browser_stage"
+  projection_code=$?
+  if [ "$browser_code" -ne 0 ]; then exit "$browser_code"; fi
+  exit "$projection_code"
+}
+trap finish EXIT
 trap 'printf "{\"error\":\"browser-command-failed\"}\n"' ERR
+cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
+cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
+if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
+browser_stage='server-start'
 TELEMETRY_URL='' pnpm --dir client dev --host 127.0.0.1 --port 5173 --strictPort \
   >/dev/null 2>&1 &
 vite_pid=$!
@@ -24,9 +39,11 @@ CHROME_LOG_FILE=/dev/null "$BOOTSTRAP_CHROMEDRIVER" --port=9515 --log-path=/dev/
 driver_pid=$!
 # One bounded startup interval and one preflight request; no polling or retry.
 sleep 5
+browser_stage='server-ready'
 kill -0 "$vite_pid" "$driver_pid"
 driver_status=$(curl --fail --silent --max-time 10 http://127.0.0.1:9515/status)
 printf '%s' "$driver_status" | jq -e '.value.ready == true' >/dev/null
+browser_stage='served-identity'
 served_glue_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm.js \
   | sha256sum | cut -d ' ' -f 1)
 served_wasm_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm_bg.wasm \
@@ -36,28 +53,34 @@ glue_hash=$(sha256sum client/src/wasm/engine_wasm.js | cut -d ' ' -f 1)
 test "$served_wasm_hash" = "$wasm_hash"
 printf '%s  served-engine-glue\n%s  served-engine-wasm\n' "$served_glue_hash" "$served_wasm_hash" \
   > "$MANUAL_EVIDENCE/served-artifacts.sha256"
+browser_stage='source-identity'
 baseline_tree=$(git -C ../baseline-source rev-parse HEAD^{tree})
 candidate_tree=$(git rev-parse HEAD^{tree})
 url="http://127.0.0.1:5173/manual-resolution-wasm-worker.html?artifact=$BOOTSTRAP_CANDIDATE_ARTIFACT&baseline_sha=$BOOTSTRAP_BASE_SHA&candidate_sha=$MANUAL_EXPECTED_SOURCE_SHA&baseline_tree=$baseline_tree&candidate_tree=$candidate_tree&wasm_sha256=$wasm_hash&glue_sha256=$glue_hash&served_glue_sha256=$served_glue_hash"
+browser_stage='session-create'
 session_response=$(jq -n --arg binary "$(command -v google-chrome)" \
   '{capabilities:{alwaysMatch:{browserName:"chrome","goog:chromeOptions":{binary:$binary,args:["--headless=new","--no-sandbox","--disable-dev-shm-usage","--disable-logging","--log-level=3"]},"goog:loggingPrefs":{browser:"OFF",performance:"OFF"}}}}' \
   | curl --fail --silent --max-time 60 -H 'Content-Type: application/json' \
     --data-binary @- http://127.0.0.1:9515/session)
 session_id=$(printf '%s' "$session_response" \
   | jq -er '.value.sessionId | select(type == "string" and test("^[a-zA-Z0-9-]+$"))')
+browser_stage='session-timeouts'
 timeouts_response=$(jq -n '{script:130000,pageLoad:60000,implicit:0}' \
   | curl --fail --silent --max-time 10 -H 'Content-Type: application/json' \
     --data-binary @- "http://127.0.0.1:9515/session/$session_id/timeouts")
 printf '%s' "$timeouts_response" | jq -e '.value == null' >/dev/null
+browser_stage='navigation'
 navigation_response=$(jq -n --arg url "$url" '{url:$url}' \
   | curl --fail --silent --max-time 65 -H 'Content-Type: application/json' \
     --data-binary @- "http://127.0.0.1:9515/session/$session_id/url")
 printf '%s' "$navigation_response" | jq -e '.value == null' >/dev/null
+browser_stage='page-completion'
 terminal_response=$(jq -n '{script:"const done = arguments[arguments.length - 1]; window.manualWasmBootstrap.completionPromise.then(done);",args:[]}' \
   | curl --fail --silent --max-time 140 -H 'Content-Type: application/json' \
     --data-binary @- "http://127.0.0.1:9515/session/$session_id/execute/async")
 # Select allowlisted fields before the first write. Unexpected values
 # become fixed invalid codes, never raw transport or application text.
+browser_stage='terminal-projection'
 printf '%s' "$terminal_response" | jq -c '
   def fixed($values): . as $value | if ($values | index($value)) != null then $value else "invalid" end;
   def boolean: if type == "boolean" then . else null end;
@@ -114,6 +137,7 @@ printf '%s' "$terminal_response" | jq -c '
 jq -c '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
   (if (.evidence | type) == "array" then (.evidence | length) else null end)}]}' \
   "$MANUAL_EVIDENCE/product-terminal.json"
+browser_stage='terminal-save'
 python3 - <<'SAVE'
 import json, os
 from pathlib import Path
@@ -122,4 +146,5 @@ value = json.loads(path.read_text()) if path.exists() else {}
 value[os.environ['BOOTSTRAP_CANDIDATE_ARTIFACT']] = json.loads((root / 'product-terminal.json').read_text())
 path.write_text(json.dumps(value) + '\n')
 SAVE
+browser_stage='terminal-gate'
 jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null

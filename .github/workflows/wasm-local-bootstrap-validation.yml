@@ -34,7 +34,7 @@ env:
   BOOTSTRAP_PROVENANCE_SHA256: '4b6bbd36a78d3a3055d3b159d130962b609a3ac5c8120bff1b3eade7fd79f0cd'
   BOOTSTRAP_RUNTIME_FILES: '{"engine_wasm.d.ts":{"sha256":"8bc1cc21a04d46529e415df480db3a129baa4f535c21de6b4535c652bac54bab","size":39992},"engine_wasm.js":{"sha256":"4627c04238353d0e2a427b78b802fe1a9437aee87ef27361ff971bc57e85ae9b","size":70262},"engine_wasm_bg.wasm":{"sha256":"ebd72d24d302ec93b471fe84a7e536f3cbce74268d784d33b11b35391d133050","size":129410984},"engine_wasm_bg.wasm.d.ts":{"sha256":"5f945f48384458a2bbd2ea5f1de6037f05f049598444ad851d365e633704bf3b","size":6112}}'
   STAGE1_GUARD_SHA256: efd477e5cdfc4cdc645546287de00649922f9458f33151d7aafaee4640b62aee
-  STAGE1_NATIVE_ENABLED_REF: ''
+  STAGE1_NATIVE_ENABLED_REF: '{"archive":{"kind":"native","feature":"enabled","producer":{"repository":"Makeinu1/phase","repository_id":1377698441,"sha":"469549a4c6d02e9fb792ac936524a08130a05ff6","tree":"2ce2ce2bf48a418e71faa9987e1ed2b8e2d81105","workflow_path":".github/workflows/wasm-local-bootstrap-validation.yml","workflow_sha256":"51546933686ab4a1a366fa1471f0fc48e99dd4be6b8f64d838372f14294b07de","guard_sha256":"efd477e5cdfc4cdc645546287de00649922f9458f33151d7aafaee4640b62aee","run_id":37538109594,"run_attempt":1,"ref":"refs/heads/experiment/manual-wasm-stage1-validation","job_name":"stage1-native-producer","job_id":112524144809},"artifact":{"id":11446819730,"name":"local-worker-bootstrap-stage1-enabled-native","size":46413744,"sha256":"571a28a8052a7bbd3ba0378a00639c64a5a3484501733d1eae0f5d1b4445886a"},"manifest_sha256":"9f87037e1fc971436ef148bed1a52e753ef896541c02db1a2d6b83162aff2f77","files":{"enabled.tar.zst":{"size":46720775,"sha256":"c0c9d264f27ba2a3339513ab24685e4bcaaee92fb98cc8bc3acd3b5a723d4596"}}},"checks":null}'
   STAGE1_WASM_OFF_REF: ''
   STAGE1_WASM_ENABLED_REF: ''
   MANUAL_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
@@ -2954,12 +2954,12 @@ jobs:
         cache: false
         rustflags: ''
         components: rustfmt,clippy,rustc-codegen-cranelift-preview
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Install pinned Stage1 nextest
       uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
       with:
         tool: cargo-nextest@0.9.146
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Verify actual Stage1 Rust tools
       working-directory: candidate-source
       run: |
@@ -2971,7 +2971,7 @@ jobs:
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Build the single missing native enabled archive
       working-directory: candidate-source
       run: |
@@ -3058,26 +3058,26 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-format 2>/dev/null
         projection_code=$?
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Check exact candidate clippy
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-clippy bash -euo pipefail -c 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\"cranelift\"" -- -D warnings >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-clippy bash -euo pipefail -c 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\"cranelift\"" --message-format=json -- -D warnings' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-clippy 2>/dev/null
         projection_code=$?
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Check native checks source after
       working-directory: candidate-source
       run: |
@@ -3089,7 +3089,7 @@ jobs:
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Package enabled checks public output
       working-directory: candidate-source
       run: |
@@ -3102,7 +3102,7 @@ jobs:
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
       id: enabled-checks-package
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
       env:
         STAGE1_FEATURE: enabled
         STAGE1_KIND: checks
@@ -3115,7 +3115,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
         overwrite: false
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Pin actual enabled checks upload metadata
       working-directory: candidate-source
       run: |
@@ -3128,7 +3128,7 @@ jobs:
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
       id: enabled-checks-pins
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
       env:
         STAGE1_FEATURE: enabled
         STAGE1_KIND: checks
@@ -3147,7 +3147,7 @@ jobs:
         if-no-files-found: error
         retention-days: 7
         overwrite: false
-      if: steps.selection.outputs.native == 'EMPTY'
+      if: steps.selection.outputs.native != 'FULL'
     - name: Check final Stage1 native source
       working-directory: candidate-source
       run: |
@@ -3377,7 +3377,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --message-format=json' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-build 2>/dev/null
         projection_code=$?
@@ -3459,7 +3459,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-off" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-off" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-bindgen 2>/dev/null
         projection_code=$?
@@ -3555,7 +3555,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --features manual_resolution_local_bootstrap >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --features manual_resolution_local_bootstrap --message-format=json' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-build 2>/dev/null
         projection_code=$?
@@ -3637,7 +3637,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-enabled" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-enabled" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-bindgen 2>/dev/null
         projection_code=$?
@@ -3775,8 +3775,12 @@ jobs:
           bootstrap-stage1-wasm-producer-evidence/stage1-native-admission-result.json
           bootstrap-stage1-wasm-producer-evidence/stage1-off-admission.json
           bootstrap-stage1-wasm-producer-evidence/stage1-off-admission-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-input.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-input-result.json
           bootstrap-stage1-wasm-producer-evidence/stage1-enabled-admission.json
           bootstrap-stage1-wasm-producer-evidence/stage1-enabled-admission-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-input.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-input-result.json
           bootstrap-stage1-wasm-producer-evidence/stage1-rust-tools.json
           bootstrap-stage1-wasm-producer-evidence/stage1-rust-tools-result.json
           bootstrap-stage1-wasm-producer-evidence/stage1-source-after.json
@@ -4099,7 +4103,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-dependencies bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-dependencies bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-dependencies 2>/dev/null
         projection_code=$?
@@ -4110,7 +4114,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-types bash -euo pipefail -c 'pnpm --dir client run type-check >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-types bash -euo pipefail -c 'pnpm --dir client run type-check' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-types 2>/dev/null
         projection_code=$?
@@ -4121,7 +4125,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-lint bash -euo pipefail -c 'pnpm --dir client run lint >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-lint bash -euo pipefail -c 'pnpm --dir client run lint --format json' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-lint 2>/dev/null
         projection_code=$?
@@ -4132,7 +4136,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-protocol bash -euo pipefail -c 'pnpm --dir client run protocol:check >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-protocol bash -euo pipefail -c 'pnpm --dir client run protocol:check' 2>/dev/null
         command_code=$?
         python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-protocol 2>/dev/null
         projection_code=$?
@@ -4166,9 +4170,6 @@ jobs:
       run: |
         exec 2>/dev/null
         export BOOTSTRAP_CANDIDATE_ARTIFACT=enabled
-        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
-        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
-        if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
         # Existing hosted browser/driver inventory and direct documented W3C API:
         # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
         # https://developer.chrome.com/docs/chromedriver/get-started
@@ -4186,9 +4187,6 @@ jobs:
       run: |
         exec 2>/dev/null
         export BOOTSTRAP_CANDIDATE_ARTIFACT=off
-        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
-        cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
-        if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
         # Existing hosted browser/driver inventory and direct documented W3C API:
         # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
         # https://developer.chrome.com/docs/chromedriver/get-started

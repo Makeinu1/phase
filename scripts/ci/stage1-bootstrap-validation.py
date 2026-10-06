@@ -59,15 +59,15 @@ def receipt_valid(item, label, producer, native, inputs):
         feature = 'enabled' if '-enabled-' in label else 'off'
         commands = {
             'candidate-native-enabled-archive': 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config \'profile.test.codegen-backend="cranelift"\' -p engine-wasm --lib --no-default-features --features manual_resolution_local_bootstrap --archive-file "$RUNNER_TEMP/bootstrap-native-archives/enabled.tar.zst" >/dev/null 2>&1',
-            'candidate-format': 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs >/dev/null 2>&1',
-            'candidate-clippy': 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\\"cranelift\\"" -- -D warnings >/dev/null 2>&1',
+            'candidate-format': 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs',
+            'candidate-clippy': 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\\"cranelift\\"" --message-format=json -- -D warnings',
         }
         if label.endswith('-build'):
             expected = 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features'
             if feature == 'enabled': expected += ' --features manual_resolution_local_bootstrap'
-            expected += ' >/dev/null 2>&1'
+            expected += ' --message-format=json'
         elif label.endswith('-bindgen'):
-            expected = 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-' + feature + '" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1'
+            expected = 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-' + feature + '" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"'
         else: expected = commands[label]
         assert actual == expected
 
@@ -294,6 +294,10 @@ def package():
         tools = json.loads((root / 'tool-manifest.json').read_text())
         assert tools.get('error') is None
         if kind in ['native','checks']: tools = {name:tools[name] for name in ['toolchain','rustc','cargo','nextest','nextest_query']}
+        if kind == 'checks':
+            archive = json.loads((root / 'enabled-native-descriptor.json').read_text())
+            assert archive['kind'] == 'native' and archive['product'] == {'sha':source['source_sha'],'tree':source['source_tree']}
+            assert archive['recipe'] == recipe('native','enabled') and archive['tools'] == tools
         names = {'engine_wasm.js','engine_wasm_bg.wasm','engine_wasm.d.ts','engine_wasm_bg.wasm.d.ts'}
         raw = None
         if kind == 'native': paths = {'enabled.tar.zst':temp / 'bootstrap-native-archives/enabled.tar.zst'}
@@ -562,25 +566,171 @@ def admit():
         raise SystemExit(1)
 
 
+def diagnostic_projection(raw, label, tracked, cwd):
+    """Project compiler coordinates/codes only; messages and dynamic slots stay private."""
+    import json
+    from pathlib import Path
+    value = {'status':'no-diagnostics','diagnostics':[], 'codes_withheld':0, 'locations_withheld':0}
+    if len(raw) > 4*1024**2: return {**value,'status':'output-over-bound'}
+    try: text = raw.decode('utf-8')
+    except UnicodeError: return {**value,'status':'text-decode-failed'}
+    # Fixed public lint vocabulary. Unknown lint IDs are withheld, including IDs
+    # that merely resemble a lint. Compiler E/TS numeric codes contain no text.
+    lint_ids = set(('dead_code unused_imports unused_variables unused_mut unused_assignments unreachable_code '
+        'private_interfaces private_bounds unexpected_cfgs deprecated non_snake_case non_camel_case_types '
+        'non_upper_case_globals clippy::too_many_arguments clippy::type_complexity clippy::large_enum_variant '
+        'clippy::needless_return clippy::needless_borrow clippy::needless_lifetimes clippy::needless_question_mark '
+        'clippy::redundant_closure clippy::redundant_pattern_matching clippy::collapsible_if clippy::collapsible_match '
+        'clippy::unnecessary_map_or clippy::unnecessary_unwrap clippy::unnecessary_cast clippy::useless_conversion '
+        'clippy::derivable_impls clippy::clone_on_copy clippy::new_without_default clippy::missing_const_for_thread_local '
+        'clippy::missing_safety_doc clippy::not_unsafe_ptr_arg_deref clippy::manual_map clippy::manual_strip '
+        'clippy::map_identity clippy::let_and_return clippy::bool_assert_comparison clippy::len_without_is_empty '
+        'clippy::await_holding_refcell_ref clippy::await_holding_lock').split())
+    eslint_ids = {'@typescript-eslint/no-unused-vars','@typescript-eslint/no-explicit-any',
+        '@typescript-eslint/no-empty-object-type','@typescript-eslint/no-require-imports',
+        'react-hooks/rules-of-hooks','react-hooks/exhaustive-deps','react-refresh/only-export-components',
+        'no-unused-vars','no-undef','no-unreachable','no-constant-condition','no-empty','no-dupe-keys'}
+    def location(name, line, column):
+        if isinstance(name,str) and name.startswith(cwd + '/'): name = name[len(cwd)+1:]
+        if name not in tracked or type(line) is not int or type(column) is not int or not 1 <= line <= 1000000 or not 1 <= column <= 1000000:
+            value['locations_withheld'] += 1; return None
+        lines = (Path(cwd) / name).read_text().splitlines()
+        if line > len(lines) or column > len(lines[line-1]) + 1:
+            value['locations_withheld'] += 1; return None
+        return {'path':name,'line':line,'column':column}
+    def add(level, code, place, vocabulary):
+        assert level in ['error','warning','note','help','failure-note']
+        numeric = r'TS[0-9]{4,5}' if label == 'client-types' else r'E[0-9]{4}' if label != 'client-lint' else r'(?!)'
+        if code is not None and not (code in vocabulary or isinstance(code,str) and re.fullmatch(numeric,code)):
+            value['codes_withheld'] += 1; code = None
+        assert len(value['diagnostics']) < 64
+        value['diagnostics'].append({'level':level,'code':code,'location':place})
+    try:
+        if label == 'candidate-clippy' or label in ['candidate-wasm-off-build','candidate-wasm-enabled-build']:
+            for line in text.splitlines():
+                if not line.startswith('{'): continue  # Cargo progress/stderr remains withheld.
+                assert len(line) <= 262144
+                item = json.loads(line); reason = item['reason']
+                assert reason in ['compiler-message','compiler-artifact','build-script-executed','build-finished']
+                if reason != 'compiler-message': continue
+                message = item['message']; code = message.get('code')
+                code = code.get('code') if isinstance(code,dict) else None
+                spans = message['spans']; assert isinstance(spans,list) and len(spans) <= 128
+                primary = [span for span in spans if span.get('is_primary') is True]
+                place = location(primary[0].get('file_name'),primary[0].get('line_start'),primary[0].get('column_start')) if primary else None
+                add(message['level'],code,place,lint_ids)
+        elif label == 'client-types':
+            for line in text.splitlines():
+                found = re.fullmatch(r'([^\r\n]{1,512})\(([0-9]+),([0-9]+)\): error (TS[0-9]{4,5}):[^\r\n]*',line)
+                if found:
+                    name = found[1] if found[1].startswith(cwd + '/') else 'client/' + found[1]
+                    add('error',found[4],location(name,int(found[2]),int(found[3])),set())
+        elif label == 'client-lint':
+            start = next((match.start() for match in re.finditer(r'^\[',text,re.M)),None)
+            if start is not None:
+                report,_ = json.JSONDecoder().raw_decode(text[start:]); assert isinstance(report,list) and len(report) <= 10000
+                for file in report:
+                    messages = file['messages']; assert isinstance(messages,list) and len(messages) <= 128
+                    for message in messages:
+                        assert type(message['severity']) is int and message['severity'] in [1,2]
+                        add('error' if message['severity'] == 2 else 'warning',message.get('ruleId'),
+                            location(file.get('filePath'),message.get('line'),message.get('column')),eslint_ids)
+        value['status'] = 'matched' if value['diagnostics'] else 'no-diagnostics'
+    except Exception:
+        # Do not export a partial projection after a malformed/unbounded structure.
+        value = {'status':'parse-failed','diagnostics':[],'codes_withheld':0,'locations_withheld':0}
+    return value
+
+
 def safe_result():
-    import json, os, sys
+    import json, os, subprocess, sys
     from pathlib import Path
     code = int(sys.argv[2]); label = sys.argv[3]
+    assert 0 <= code <= 255 and re.fullmatch('[a-z0-9]+(?:-[a-z0-9]+)*',label)
     paths = []
     if label == 'candidate-native-enabled-archive': paths = ['bootstrap-native-archives/enabled.tar.zst']
     elif label in ['candidate-wasm-off-build','candidate-wasm-enabled-build']: paths = ['bootstrap-wasm-target/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm']
     elif label in ['candidate-wasm-off-bindgen','candidate-wasm-enabled-bindgen']:
         feature = 'off' if label == 'candidate-wasm-off-bindgen' else 'enabled'
         paths = ['bootstrap-bindgen-' + feature + '/' + name for name in ['engine_wasm.js','engine_wasm_bg.wasm','engine_wasm.d.ts','engine_wasm_bg.wasm.d.ts']]
-    value = {'label':label,'command_exit_code':code,'classification':'passed' if code == 0 else 'command-failed',
-        'known_files':{name:(Path(os.environ['RUNNER_TEMP']) / name).is_file() for name in paths}}
+    elif label == 'candidate-declarations':
+        paths = ['bootstrap-bindgen-off/engine_wasm.d.ts','bootstrap-bindgen-enabled/engine_wasm.d.ts']
     root = Path(os.environ['MANUAL_EVIDENCE'])
+    value = {'label':label,'command_exit_code':code,'process_exit_code':None,'collector_exit_code':code,
+        'projection_exit_code':0,'classification':'passed' if code == 0 else 'command-failed',
+        'known_files':{},'diagnostic_projection':{'status':'not-applicable','diagnostics':[], 'codes_withheld':0,'locations_withheld':0}}
+    if label in ['client-adapter-tests','candidate-native-off-tests','candidate-native-enabled-tests']:
+        value['runner_exit_code'] = None
+    try:
+        value['known_files'] = {name:(Path(os.environ['RUNNER_TEMP']) / name).is_file() for name in paths}
+        receipt = json.loads((root / (label + '.json')).read_text())
+        assert receipt['label'] == label and receipt['effective_exit'] == code
+        actual = receipt['exit_code']; assert actual is None or type(actual) is int and -255 <= actual <= 255
+        value['process_exit_code'] = actual
+        if type(actual) is int and actual < 0: value['classification'] = 'process-signalled'
+        with (root / (label + '.log')).open('rb') as stream: raw = stream.read(4*1024**2 + 1)
+        # Reuse fixed native OS causes and the shared helpers' fixed refusal codes.
+        # Nothing from a raw line or arbitrary JSON value is copied to the result.
+        fixed_errors = {'stage1-source-refused','stage1-retained-ref-invalid','runtime-provenance-mismatch',
+            'stage1-public-package-refused','stage1-upload-metadata-refused','stage1-retained-output-refused',
+            'stage1-raw-input-refused','stage1-baseline-source-refused','native-off-reuse-metadata-refused',
+            'native-off-reuse-archive-refused','stage1-producer-current-tool-mismatch','adapter-report-unavailable',
+            'adapter-summary-save-failed','native-off-reuse-observation-save-failed'}
+        value['static_causes'] = []
+        if len(raw) <= 4*1024**2:
+            for literal,category in [(b'No such file or directory (os error 2)','path-missing'),
+                (b'Permission denied (os error 13)','permission-denied'),(b'Not a directory (os error 20)','not-a-directory')]:
+                if literal in raw: value['static_causes'].append(category)
+            for line in raw.splitlines():
+                if line.startswith(b'{') and len(line) <= 1024:
+                    try: error = json.loads(line).get('error')
+                    except Exception: continue
+                    if isinstance(error,str) and error in fixed_errors: value['static_causes'].append(error)
+            value['static_causes'] = sorted(set(value['static_causes']))
+        if label in ['client-adapter-tests','candidate-native-off-tests','candidate-native-enabled-tests'] and len(raw) <= 4*1024**2:
+            # The existing collectors print their safe result even if saving fails.
+            # Retain only their actual scalar exit fields, never application stdout.
+            for line in raw.splitlines():
+                if not line.startswith(b'{') or len(line) > 65536: continue
+                try:
+                    item = json.loads(line)
+                    observation = item['native_off_reuse_observation'] if label != 'client-adapter-tests' else item
+                    runner = observation['runner_exit_code']
+                    assert runner is None or type(runner) is int and -255 <= runner <= 255
+                    value['runner_exit_code'] = runner
+                    if label != 'client-adapter-tests':
+                        collector = observation['collector_exit_code']
+                        assert collector is None or type(collector) is int and 0 <= collector <= 255
+                        value['collector_exit_code'] = collector
+                        if item['observation_saved'] is not True: value['projection_exit_code'] = 1
+                except Exception: continue
+        compiler = label in ['candidate-clippy','candidate-wasm-off-build','candidate-wasm-enabled-build','client-types','client-lint']
+        if compiler:
+            tracked = set(subprocess.check_output(['git','ls-files','-z'],stderr=subprocess.DEVNULL).decode().split('\0')) - {''}
+            value['diagnostic_projection'] = diagnostic_projection(raw,label,tracked,str(Path.cwd()))
+            if value['diagnostic_projection']['status'] not in ['matched','no-diagnostics']: value['projection_exit_code'] = 1
+    except Exception:
+        value['projection_exit_code'] = 1
+        value['diagnostic_projection']['status'] = 'receipt-or-collector-unavailable'
+    if label in ['candidate-enabled-browser','candidate-off-browser']:
+        stages = ['runtime-copy','server-start','server-ready','served-identity','source-identity','session-create',
+            'session-timeouts','navigation','page-completion','terminal-projection','terminal-save','terminal-gate']
+        try:
+            stage = sys.argv[4] if len(sys.argv) == 5 else json.loads((root / (label + '-result.json')).read_text())['browser_stage']
+            assert stage in stages
+            value['browser_stage'] = stage
+            # Inside the browser EXIT trap the guard has not finished its receipt.
+            if len(sys.argv) == 5 and not (root / (label + '.json')).exists():
+                value['projection_exit_code'] = 0; value['diagnostic_projection']['status'] = 'awaiting-guard-receipt'
+        except Exception:
+            value['browser_stage'] = None; value['projection_exit_code'] = 1
     try:
         (root / (label + '-result.json')).write_text(json.dumps(value) + '\n')
         print(json.dumps(value))
     except Exception:
         print('{"error":"stage1-safe-result-save-failed"}')
         raise SystemExit(1)
+    raise SystemExit(value['projection_exit_code'])
 
 
 def raw_input():
@@ -866,11 +1016,15 @@ def adapter_tests():
                            all_selected_tests_passed=result.returncode == 0 and counts['passed'] == len(statuses))
     except Exception:
         summary['error'] = 'adapter-report-unavailable'
-    Path(os.environ['MANUAL_EVIDENCE'], 'adapter-assertions.json').write_text(json.dumps(summary) + '\n')
-    print(json.dumps(summary))
     code = result.returncode if result is not None else 1
     if code == 0 and not summary['all_selected_tests_passed']:
         code = 1
+    try:
+        Path(os.environ['MANUAL_EVIDENCE'], 'adapter-assertions.json').write_text(json.dumps(summary) + '\n')
+    except Exception:
+        summary['error'] = 'adapter-summary-save-failed'
+        if code == 0: code = 1
+    print(json.dumps(summary))
     raise SystemExit(code if code >= 0 else 128 - code)
 
 
@@ -949,9 +1103,9 @@ def green():
             'candidate-native-off-tests':'native-tests','candidate-native-enabled-tests':'native-tests',
             'candidate-declarations':'declarations','baseline-runtime-copy':'copy-runtime','client-adapter-tests':'adapter-tests'}
         if label in modes: expected_argv = ['python3','../validation-source/scripts/ci/stage1-bootstrap-validation.py',modes[label]]
-        client_commands = {'client-dependencies':'pnpm --dir client install --frozen-lockfile >/dev/null 2>&1',
-            'client-types':'pnpm --dir client run type-check >/dev/null 2>&1','client-lint':'pnpm --dir client run lint >/dev/null 2>&1',
-            'client-protocol':'pnpm --dir client run protocol:check >/dev/null 2>&1'}
+        client_commands = {'client-dependencies':'pnpm --dir client install --frozen-lockfile',
+            'client-types':'pnpm --dir client run type-check','client-lint':'pnpm --dir client run lint --format json',
+            'client-protocol':'pnpm --dir client run protocol:check'}
         if label in client_commands: expected_argv = ['bash','-euo','pipefail','-c',client_commands[label]]
         complete &= bool(record and record.get('source_sha') == expected_sha and record.get('source_tree') == (os.environ['BOOTSTRAP_BASE_TREE'] if label.startswith('baseline-source-') else 'f41d9e32a31aaa7ed653d24991226c3c92c51316') and record.get('label') == label
             and record.get('event_sha') == os.environ['GITHUB_SHA'] and record.get('argv') == expected_argv
