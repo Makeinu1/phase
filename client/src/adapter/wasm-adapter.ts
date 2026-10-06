@@ -249,6 +249,7 @@ function describeCardDbError(err: unknown): string {
 export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
   private initialized = false;
   private disposed = false;
+  private experimentalLocalOwner: { engine: EngineWorkerClient; lifecycle: number } | null = null;
   private unregisterDiagnostics: (() => void) | null = null;
 
   constructor() {
@@ -975,6 +976,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
   }
 
@@ -1029,6 +1031,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       await this.fallback!.setMultiplayerMode(enabled);
     }
     this.invalidateAiDecisionDiagnostics();
+    if (enabled) this.experimentalLocalOwner = null;
   }
 
   async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
@@ -1082,6 +1085,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const resumed = this.engine
       ? await this.engine.resumeMultiplayerHostState(json)
       : await this.fallback!.resumeMultiplayerHostState(json, owner);
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
     return {
       presentation: resumed.presentation,
@@ -1105,6 +1109,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     } else {
       await this.fallback!.resetGameState();
     }
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
   }
 
@@ -1276,6 +1281,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   dispose(): void {
+    this.experimentalLocalOwner = null;
     this.disposed = true;
     this.unregisterDiagnostics?.();
     this.unregisterDiagnostics = null;
@@ -1308,6 +1314,43 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return this.fallback!.ping();
   }
 
+  async initializeExperimentalLocalGame(
+    request: Parameters<EngineWorkerClient["initializeExperimentalLocalGame"]>[0],
+  ): Promise<SubmitResult> {
+    this.assertInitialized("initializeExperimentalLocalGame");
+    const engine = this.engine;
+    if (!engine) throw new Error("Experimental Local requires a dedicated Worker");
+    const lifecycle = this.lifecycleGeneration;
+    if (request === null || typeof request !== "object" || Array.isArray(request)
+      || (Object.getPrototypeOf(request) !== null && Object.getPrototypeOf(request) !== Object.prototype)
+      || Reflect.ownKeys(request).some((key) => typeof key !== "string"
+        || !["deckData", "seed", "formatConfig", "matchConfig", "playerCount", "firstPlayer"].includes(key))) {
+      throw new Error("Invalid experimental Local request");
+    }
+    if (request.deckData) await this.requireCardDb();
+    const result = await engine.initializeExperimentalLocalGame(request);
+    this.experimentalLocalOwner = null;
+    if (this.engine !== engine || this.lifecycleGeneration !== lifecycle
+      || await engine.experimentalLocalActor() !== 0) {
+      throw new Error("Experimental Local admission unavailable");
+    }
+    if (this.engine !== engine || this.lifecycleGeneration !== lifecycle) {
+      throw new Error("Experimental Local lifecycle changed");
+    }
+    this.experimentalLocalOwner = { engine, lifecycle };
+    this.invalidateAiDecisionDiagnostics();
+    return result;
+  }
+
+  async experimentalLocalActor(): Promise<0 | null> {
+    const owner = this.experimentalLocalOwner;
+    if (!owner || owner.engine !== this.engine || owner.lifecycle !== this.lifecycleGeneration) return null;
+    const actor = await owner.engine.experimentalLocalActor();
+    if (this.experimentalLocalOwner !== owner || owner.engine !== this.engine
+      || owner.lifecycle !== this.lifecycleGeneration || actor !== 0) return null;
+    return 0;
+  }
+
   async initializeGame(
     deckData?: unknown,
     formatConfig?: FormatConfig,
@@ -1329,6 +1372,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         playerCount,
         firstPlayer,
       );
+      this.experimentalLocalOwner = null;
       this.invalidateAiDecisionDiagnostics();
       return result;
     }
@@ -1340,6 +1384,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       playerCount,
       firstPlayer,
     );
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
     return result;
   }
@@ -1374,6 +1419,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         playerCount,
         firstPlayer,
       );
+      this.experimentalLocalOwner = null;
       this.invalidateAiDecisionDiagnostics();
       return result;
     }
@@ -1386,6 +1432,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       firstPlayer,
       owner,
     );
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
     return { events: result.events, log_entries: result.log_entries };
   }

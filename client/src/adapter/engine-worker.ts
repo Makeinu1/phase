@@ -4,6 +4,7 @@
  * The main thread communicates via postMessage with typed request/response messages.
  * This worker owns the authoritative game state — the main thread never loads WASM directly.
  */
+import * as wasmNamespace from "@wasm/engine";
 import init, {
   ping,
   take_last_panic_message,
@@ -97,6 +98,9 @@ type EngineRequest =
       playerCount?: number;
       firstPlayer?: number;
     }
+  | { type: "initializeExperimentalLocalGame"; id: number; deckData?: unknown; seed?: number;
+      formatConfig?: unknown; matchConfig?: unknown; playerCount?: number; firstPlayer?: number }
+  | { type: "experimentalLocalActor"; id: number }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
@@ -326,6 +330,42 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "canonicalCardNames": {
         result(msg.id, canonicalCardNames(msg.names));
+        break;
+      }
+
+      case "initializeExperimentalLocalGame": {
+        const allowed = new Set(["type", "id", "deckData", "seed", "formatConfig", "matchConfig", "playerCount", "firstPlayer"]);
+        if (Array.isArray(msg) || (Object.getPrototypeOf(msg) !== null && Object.getPrototypeOf(msg) !== Object.prototype)
+          || Reflect.ownKeys(msg).some((key) => typeof key !== "string" || !allowed.has(key))) {
+          error(msg.id, "Invalid experimental Local request");
+          break;
+        }
+        const namespace = wasmNamespace as unknown as Record<string, unknown>;
+        const bootstrap = namespace.initialize_experimental_local_game;
+        if (typeof bootstrap !== "function") {
+          error(msg.id, "Experimental Local bootstrap unavailable");
+          break;
+        }
+        if (!cardDbLoaded && msg.deckData) {
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
+          break;
+        }
+        const request: Record<string, unknown> = { ...msg };
+        delete request.type;
+        delete request.id;
+        const gameResult = bootstrap(request);
+        const failure = classifyInitFailure(gameResult);
+        if (failure) {
+          initFailureError(msg.id, failure);
+          break;
+        }
+        result(msg.id, { events: gameResult.events ?? [], log_entries: gameResult.log_entries ?? [] });
+        break;
+      }
+
+      case "experimentalLocalActor": {
+        const verify = (wasmNamespace as unknown as Record<string, unknown>).experimental_local_actor;
+        result(msg.id, typeof verify === "function" && verify() === 0 ? 0 : null);
         break;
       }
 

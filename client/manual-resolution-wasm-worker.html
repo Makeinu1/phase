@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Worker bootstrap validation</title>
+  </head>
+  <body>
+    <h1>Local Worker bootstrap validation</h1>
+    <pre id="result">Running ordinary initialization controls…</pre>
+    <script>
+      // Install the deadline before loading the module, so load errors also
+      // produce a terminal result for WebDriver's one async-script call.
+      let resolveCompletion;
+      const completionPromise = new Promise((resolve) => { resolveCompletion = resolve; });
+      let finished = false;
+      const deadline = setTimeout(() => finish({
+        status: "fail", reason: "timeout", error: "page-deadline", rows: [],
+      }), 120000);
+      function finish(result) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(deadline);
+        const terminal = JSON.parse(JSON.stringify(result));
+        document.getElementById("result").textContent = JSON.stringify(terminal, null, 2);
+        resolveCompletion(terminal);
+      }
+      window.manualWasmBootstrap = { completionPromise, finish };
+      addEventListener("error", (event) => {
+        event.preventDefault();
+        finish({ status: "fail", reason: "uncaught-error", error: "page-error", rows: [] });
+      });
+      addEventListener("unhandledrejection", (event) => {
+        event.preventDefault();
+        finish({ status: "fail", reason: "unhandled-rejection", error: "page-rejection", rows: [] });
+      });
+    </script>
+    <script type="module" src="/src/adapter/__tests__/manual-resolution-wasm-worker.harness.ts"></script>
+  </body>
+</html>

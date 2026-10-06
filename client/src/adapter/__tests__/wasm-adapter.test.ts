@@ -75,6 +75,8 @@ const mockWorkerClient = {
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   canonicalCardNames: vi.fn().mockResolvedValue([]),
+  initializeExperimentalLocalGame: vi.fn().mockResolvedValue({ events: [], log_entries: [] }),
+  experimentalLocalActor: vi.fn().mockResolvedValue(0),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -1598,5 +1600,49 @@ describe("worker preview envelope", () => {
 
     await expect(pending).resolves.toEqual(answer);
     client.dispose();
+  });
+});
+
+
+describe("WasmAdapter experimental Local ownership", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWorkerClient.initializeExperimentalLocalGame.mockResolvedValue({ events: [], log_entries: [] });
+    mockWorkerClient.experimentalLocalActor.mockResolvedValue(0);
+    mockWorkerClient.initializeGame.mockResolvedValue({ events: [], log_entries: [] });
+  });
+  it("requires successful bootstrap and native verification on the retained Worker", async () => {
+    const adapter = new WasmAdapter(); await adapter.initialize();
+    await expect(adapter.experimentalLocalActor()).resolves.toBeNull();
+    await adapter.initializeExperimentalLocalGame({ seed: 42 });
+    expect(mockWorkerClient.initializeExperimentalLocalGame).toHaveBeenCalledWith({ seed: 42 });
+    await expect(adapter.experimentalLocalActor()).resolves.toBe(0);
+    mockWorkerClient.experimentalLocalActor.mockResolvedValueOnce(null as unknown as number);
+    await expect(adapter.initializeExperimentalLocalGame({ seed: 43 })).rejects.toThrow("admission unavailable");
+    await expect(adapter.experimentalLocalActor()).resolves.toBeNull(); adapter.dispose();
+  });
+  it("preserves failed bootstrap ownership and revokes successful ordinary supersession", async () => {
+    const adapter = new WasmAdapter(); await adapter.initialize(); await adapter.initializeExperimentalLocalGame({ seed: 42 });
+    mockWorkerClient.initializeExperimentalLocalGame.mockRejectedValueOnce(new Error("refused"));
+    await expect(adapter.initializeExperimentalLocalGame({ seed: 43 })).rejects.toThrow("refused");
+    await expect(adapter.experimentalLocalActor()).resolves.toBe(0);
+    await adapter.initializeGame(); await expect(adapter.experimentalLocalActor()).resolves.toBeNull(); adapter.dispose();
+  });
+  it("rejects caller extras and envelope fields before any bootstrap", async () => {
+    const adapter = new WasmAdapter(); await adapter.initialize();
+    for (const key of ["type", "id", "actor", "authenticatedActor", "owner", "session", "ticket", "enrollment", "worker", "unknown"]) {
+      await expect(adapter.initializeExperimentalLocalGame({ seed: 42, [key]: 0 })).rejects.toThrow("Invalid experimental Local request");
+    }
+    for (const request of [new Date(), new Map(), new (class {})()]) {
+      await expect(adapter.initializeExperimentalLocalGame(request as never)).rejects.toThrow("Invalid experimental Local request");
+    }
+    expect(mockWorkerClient.initializeExperimentalLocalGame).not.toHaveBeenCalled(); adapter.dispose();
+  });
+  it("refuses the main-thread fallback before calling experimental WASM", async () => {
+    vi.mocked(EngineWorkerClient).mockImplementationOnce(() => { throw new Error("worker unavailable"); });
+    const adapter = new WasmAdapter(); await adapter.initialize();
+    await expect(adapter.initializeExperimentalLocalGame({ seed: 42 })).rejects.toThrow("dedicated Worker");
+    await expect(adapter.experimentalLocalActor()).resolves.toBeNull();
+    expect(mockWorkerClient.initializeExperimentalLocalGame).not.toHaveBeenCalled(); adapter.dispose();
   });
 });

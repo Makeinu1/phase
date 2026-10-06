@@ -748,6 +748,9 @@ fn rejected_action_outcome(rejection: ActionRejection) -> JsValue {
 /// local game on a shared worker may undo again.
 #[wasm_bindgen]
 pub fn set_multiplayer_mode(enabled: bool) {
+    if enabled {
+        revoke_experimental_local_owner();
+    }
     MULTIPLAYER_MODE.with(|cell| cell.set(enabled));
 }
 
@@ -913,6 +916,7 @@ pub fn take_last_panic_message() -> Option<String> {
 /// immediately rather than running a full search on stale state.
 #[wasm_bindgen]
 pub fn clear_game_state() {
+    revoke_experimental_local_owner();
     GAME_STATE.with(|cell| cell.set(None));
     clear_ai_session_cache();
     REPLAY_LOG.with(|cell| cell.set(None));
@@ -1505,6 +1509,196 @@ fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
     })
 }
 
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Clone, PartialEq, Eq)]
+struct ExperimentalLocalOwner {
+    interaction_session: InteractionSessionId,
+    session: String,
+    ticket: String,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+thread_local! {
+    // Private admission only. None of these values is part of a wire/save DTO.
+    static EXPERIMENTAL_LOCAL_OWNER: Cell<Option<ExperimentalLocalOwner>> = const { Cell::new(None) };
+}
+
+fn revoke_experimental_local_owner() {
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    EXPERIMENTAL_LOCAL_OWNER.with(|cell| cell.set(None));
+}
+
+#[derive(Clone, Copy)]
+enum InitializeAdmission {
+    Ordinary,
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    ExperimentalLocal,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn experimental_local_actor_inner() -> Option<u8> {
+    if is_multiplayer_mode() {
+        return None;
+    }
+    EXPERIMENTAL_LOCAL_OWNER.with(|owner_cell| {
+        let owner = owner_cell.take();
+        let actor = owner.as_ref().and_then(|owner| {
+            GAME_STATE.with(|state_cell| {
+                let state = state_cell.take();
+                let valid = state.as_ref().is_some_and(|state| {
+                    state.interaction_session_id.as_ref() == Some(&owner.interaction_session)
+                        && state.players.iter().any(|player| player.id == PlayerId(0))
+                        && !owner.session.is_empty()
+                        && !owner.ticket.is_empty()
+                });
+                state_cell.set(state);
+                valid.then_some(0)
+            })
+        });
+        owner_cell.set(owner);
+        actor
+    })
+}
+
+#[cfg(all(feature = "manual_resolution_local_bootstrap", target_arch = "wasm32"))]
+#[wasm_bindgen(module = "/src/experimental-local-worker-realm.js")]
+extern "C" {
+    fn is_experimental_local_worker_realm() -> bool;
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn experimental_worker_realm() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        is_experimental_local_worker_realm()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn initialize_experimental_local_game_inner(
+    inputs: InitializeInputs,
+) -> Result<engine::types::game_state::ActionResult, serde_json::Value> {
+    init_guard(InitSessionKind::Local).map_err(|reason| {
+        serde_json::json!({
+            "error": true, "engine_occupied": true, "reasons": [reason],
+        })
+    })?;
+    let prepared = prepare_initialize_game(inputs, InitSessionKind::Local)?;
+    // Check the prospective installed seat, never the existence of an old game.
+    if !prepared
+        .state
+        .players
+        .iter()
+        .any(|player| player.id == PlayerId(0))
+    {
+        return Err(
+            serde_json::json!({ "error": true, "reasons": ["Experimental Local seat unavailable"] }),
+        );
+    }
+    Ok(install_initialized_game(
+        prepared,
+        InitSessionKind::Local,
+        InitializeAdmission::ExperimentalLocal,
+    ))
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn decode_experimental_local_request(
+    request: JsValue,
+) -> Result<InitializeInputs, serde_json::Value> {
+    let refusal =
+        || serde_json::json!({ "error": true, "reasons": ["Invalid experimental Local request"] });
+    if !request.is_object() || request.is_null() || js_sys::Array::is_array(&request) {
+        return Err(refusal());
+    }
+    let prototype: JsValue = js_sys::Reflect::get_prototype_of(&request)
+        .map_err(|_| refusal())?
+        .into();
+    let record_prototype: JsValue = js_sys::Object::get_prototype_of(&js_sys::Object::new()).into();
+    if !prototype.is_null() && prototype != record_prototype {
+        return Err(refusal());
+    }
+    let keys = js_sys::Reflect::own_keys(&request).map_err(|_| refusal())?;
+    for key in keys.iter() {
+        if !key.as_string().is_some_and(|key| {
+            matches!(
+                key.as_str(),
+                "deckData"
+                    | "seed"
+                    | "formatConfig"
+                    | "matchConfig"
+                    | "playerCount"
+                    | "firstPlayer"
+            )
+        }) {
+            return Err(refusal());
+        }
+    }
+    let field = |name: &str| {
+        js_sys::Reflect::get(&request, &JsValue::from_str(name)).map_err(|_| refusal())
+    };
+    let number = |value: JsValue| {
+        if value.is_null() || value.is_undefined() {
+            Ok(None)
+        } else {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(Some)
+                .ok_or_else(refusal)
+        }
+    };
+    let byte = |value: JsValue| {
+        number(value)?
+            .map(|value| {
+                if value.fract() == 0.0 && (0.0..=255.0).contains(&value) {
+                    Ok(value as u8)
+                } else {
+                    Err(refusal())
+                }
+            })
+            .transpose()
+    };
+    Ok(decode_initialize_inputs(
+        field("deckData")?,
+        number(field("seed")?)?,
+        field("formatConfig")?,
+        field("matchConfig")?,
+        byte(field("playerCount")?)?,
+        byte(field("firstPlayer")?)?,
+    ))
+}
+
+/// Explicit experimental Local admission, available only in a dedicated Worker.
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[wasm_bindgen]
+pub fn initialize_experimental_local_game(request: JsValue) -> JsValue {
+    if !experimental_worker_realm() {
+        return to_js(
+            &serde_json::json!({ "error": true, "reasons": ["Experimental Local requires a dedicated Worker"] }),
+        );
+    }
+    match decode_experimental_local_request(request)
+        .and_then(initialize_experimental_local_game_inner)
+    {
+        Ok(result) => to_js(&result),
+        Err(error) => to_js(&error),
+    }
+}
+
+/// Verification read only: cannot enroll an ordinary resident or mint a ticket.
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[wasm_bindgen]
+pub fn experimental_local_actor() -> Option<u8> {
+    experimental_worker_realm()
+        .then(experimental_local_actor_inner)
+        .flatten()
+}
+
 /// Which client-side session is installing this game. Selects the
 /// debug-permission posture and whether the multiplayer flag is claimed in the
 /// same call.
@@ -1722,42 +1916,79 @@ fn validate_deck_list_seats(
     None
 }
 
-/// Shared body of both initialize entry points. The guard lives in the shells
-/// (they are where `JsValue` envelopes are produced); this function assumes it
-/// has already passed and installs unconditionally.
-fn initialize_game_impl(
-    deck_data: JsValue,
+/// Decoded ordinary fields. Both JS initializers and the native preparation
+/// tests feed this same fallible preparation and successful-install boundary.
+struct InitializeInputs {
+    deck_data: Result<Option<DeckList>, String>,
     seed: Option<f64>,
-    format_config_js: JsValue,
-    match_config_js: JsValue,
+    format_config: Result<Option<FormatConfig>, String>,
+    match_config: Option<MatchConfig>,
     player_count: Option<u8>,
     first_player: Option<u8>,
+}
+
+fn decode_optional_initialize_field<T: serde::de::DeserializeOwned>(
+    value: JsValue,
+) -> Result<Option<T>, String> {
+    if value.is_null() || value.is_undefined() {
+        Ok(None)
+    } else {
+        serde_wasm_bindgen::from_value(value)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn decode_initialize_inputs(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config: JsValue,
+    match_config: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+) -> InitializeInputs {
+    InitializeInputs {
+        deck_data: decode_optional_initialize_field(deck_data),
+        seed,
+        format_config: decode_optional_initialize_field(format_config),
+        // Ordinary initialization has always defaulted malformed match config.
+        match_config: decode_optional_initialize_field(match_config)
+            .ok()
+            .flatten(),
+        player_count,
+        first_player,
+    }
+}
+
+struct PreparedInitializeGame {
+    state: GameState,
+    replay_header: ReplayHeader,
+    result: engine::types::game_state::ActionResult,
+}
+
+/// Every fallible operation acts on prospective state, before any resident write.
+fn prepare_initialize_game(
+    inputs: InitializeInputs,
     kind: InitSessionKind,
-) -> JsValue {
-    let seed = seed.map(|s| s as u64).unwrap_or(42);
+) -> Result<PreparedInitializeGame, serde_json::Value> {
+    let seed = inputs.seed.map(|s| s as u64).unwrap_or(42);
 
     // Resolved before the format config: an undeclared config's default must
     // be chosen FOR this seat count (see
     // `resolve_and_validate_initialize_format_config`), so `count` has to be
     // known first.
-    let count = player_count.unwrap_or(2);
+    let count = inputs.player_count.unwrap_or(2);
 
-    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        match parse_initialize_format_config(
-            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-                .map_err(|error| error.to_string()),
-        ) {
-            Ok(config) => Some(config),
-            Err(error) => return to_js(&error),
-        }
-    } else {
-        None
-    };
+    let decoded_format_config = inputs.format_config.map_err(|error| {
+        parse_initialize_format_config(Err(error))
+            .err()
+            .unwrap_or_else(|| panic!("invalid format decode"))
+    })?;
     let format_config =
         match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
             Ok(config) => config,
             Err(reason) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [reason],
                 }));
@@ -1770,12 +2001,7 @@ fn initialize_game_impl(
     // thread-local is still clear here and a host game would otherwise be given
     // local debug permissions.
     initialize_debug_permissions(&mut state, kind == InitSessionKind::MultiplayerHost);
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
-    };
+    let match_config = inputs.match_config.unwrap_or_default();
     // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
     // onto the runtime `loop_detection` gate via the single engine authority shared
     // with the server path. The detector is player-count-agnostic, so it carries
@@ -1798,21 +2024,17 @@ fn initialize_game_impl(
     // (wasm-adapter.ts:701) already throws on `{ error: true, reasons }`, so
     // returning that envelope here gives the user a real failure message
     // instead of a silently-broken match.
-    if !deck_data.is_null() && !deck_data.is_undefined() {
-        let deck_list = match serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
-            Ok(d) => d,
-            Err(e) => {
-                return to_js(&serde_json::json!({
-                    "error": true,
-                    "reasons": [format!("Deck payload deserialization failed: {e}")],
-                }));
-            }
-        };
+    if let Some(deck_list) = inputs.deck_data.map_err(|error| {
+        serde_json::json!({
+            "error": true,
+            "reasons": [format!("Deck payload deserialization failed: {error}")],
+        })
+    })? {
         recorded_deck_list = Some(deck_list.clone());
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
         if card_db_missing {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [
                     "Card database not loaded in engine worker. \
@@ -1855,7 +2077,7 @@ fn initialize_game_impl(
         });
 
         if let Some(reasons) = validation_error {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": reasons,
             }));
@@ -1883,7 +2105,7 @@ fn initialize_game_impl(
                     .map(|e| vec![e.to_string()])
             });
             if let Some(reasons) = cedh_error {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "cedh_bracket_violation": true,
                     "reasons": reasons,
@@ -1906,7 +2128,7 @@ fn initialize_game_impl(
             .map(|p| p.id.0)
             .collect();
         if !empty_seats.is_empty() {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [format!(
                     "Empty library after deck load for seat(s): {empty_seats:?}. \
@@ -1918,7 +2140,7 @@ fn initialize_game_impl(
     }
 
     // CR 103.1: Start the game with the chosen starting player.
-    let result = match first_player {
+    let result = match inputs.first_player {
         Some(0) => start_game_with_starting_player(&mut state, PlayerId(0)),
         Some(1) => start_game_with_starting_player(&mut state, PlayerId(1)),
         _ => start_game(&mut state),
@@ -1932,25 +2154,85 @@ fn initialize_game_impl(
         format_config,
         match_config,
         player_count: count,
-        first_player,
+        first_player: inputs.first_player,
         seed,
         deck_data: recorded_deck_list,
     };
-    REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(replay_header))));
+    Ok(PreparedInitializeGame {
+        state,
+        replay_header,
+        result,
+    })
+}
 
-    // After `start_game`, so the slots bound here match the pause the caller is
-    // about to be handed — `bind_all_current_slots` binds for the *current*
-    // `waiting_for`, and nothing re-derives it until the first action boundary.
-    bind_interaction_session(&mut state);
-
-    GAME_STATE.with(|cell| cell.set(Some(state)));
-    // Adjacent to the install, exactly as `resume_multiplayer_host_state` does:
-    // the flag and the game it describes are set in one uninterruptible step.
+/// The one successful install used by both ordinary and experimental callers.
+fn install_initialized_game(
+    mut prepared: PreparedInitializeGame,
+    kind: InitSessionKind,
+    admission: InitializeAdmission,
+) -> engine::types::game_state::ActionResult {
+    bind_interaction_session(&mut prepared.state);
+    revoke_experimental_local_owner();
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    if matches!(admission, InitializeAdmission::ExperimentalLocal) {
+        EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+            cell.set(Some(ExperimentalLocalOwner {
+                interaction_session: prepared
+                    .state
+                    .interaction_session_id
+                    .clone()
+                    .expect("bound session"),
+                session: format!("local-{:016x}", rand::rng().random::<u64>()),
+                ticket: format!("owner-{:016x}", rand::rng().random::<u64>()),
+            }))
+        });
+    }
+    #[cfg(not(feature = "manual_resolution_local_bootstrap"))]
+    let _ = admission;
+    REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(prepared.replay_header))));
+    GAME_STATE.with(|cell| cell.set(Some(prepared.state)));
     claim_engine_for(kind);
     clear_ai_session_cache();
     invalidate_ai_proposals();
+    prepared.result
+}
 
-    to_js(&result)
+fn initialize_game_inner(
+    inputs: InitializeInputs,
+    kind: InitSessionKind,
+) -> Result<engine::types::game_state::ActionResult, serde_json::Value> {
+    init_guard(kind).map_err(|reason| {
+        serde_json::json!({
+            "error": true, "engine_occupied": true, "reasons": [reason],
+        })
+    })?;
+    prepare_initialize_game(inputs, kind)
+        .map(|prepared| install_initialized_game(prepared, kind, InitializeAdmission::Ordinary))
+}
+
+fn initialize_game_impl(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config_js: JsValue,
+    match_config_js: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+    kind: InitSessionKind,
+) -> JsValue {
+    match initialize_game_inner(
+        decode_initialize_inputs(
+            deck_data,
+            seed,
+            format_config_js,
+            match_config_js,
+            player_count,
+            first_player,
+        ),
+        kind,
+    ) {
+        Ok(result) => to_js(&result),
+        Err(error) => to_js(&error),
+    }
 }
 
 /// Submit a game action on behalf of `actor` and return the ActionResult
@@ -2918,6 +3200,7 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     state.debug_mode = true;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     bind_interaction_session(&mut state);
+    revoke_experimental_local_owner();
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -3046,6 +3329,7 @@ fn resume_multiplayer_host_state_inner(
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
     bind_interaction_session(&mut state);
+    revoke_experimental_local_owner();
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
@@ -7467,5 +7751,638 @@ mod settlement_election_host_resume_tests {
             resumed, expected,
             "the resumed host locks and places the same activation"
         );
+    }
+}
+
+/// These tests call the same preparation/install boundaries as the ordinary JS
+/// shells in both feature configurations. Private comparisons never print data.
+#[cfg(test)]
+mod ordinary_initializer_preservation_tests {
+    use super::*;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+
+    pub(super) fn reset() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    pub(super) fn inputs() -> InitializeInputs {
+        InitializeInputs {
+            deck_data: Ok(None),
+            seed: None,
+            format_config: Ok(None),
+            match_config: None,
+            player_count: None,
+            first_player: Some(0),
+        }
+    }
+
+    pub(super) fn load_fixture() {
+        let face = CardFace {
+            name: "Bootstrap Blank Basic".into(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec![],
+            },
+            ..CardFace::default()
+        };
+        let entries = BTreeMap::from([(
+            face.name.to_lowercase(),
+            serde_json::to_value(face).unwrap_or_else(|_| panic!("fixture face")),
+        )]);
+        let db = CardDatabase::from_json_str(
+            &serde_json::to_string(&entries).unwrap_or_else(|_| panic!("fixture db")),
+        )
+        .unwrap_or_else(|_| panic!("fixture loads"));
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(db)));
+    }
+
+    pub(super) fn limited_inputs() -> InitializeInputs {
+        let deck = PlayerDeckList {
+            main_deck: vec!["Bootstrap Blank Basic".into(); 40],
+            ..Default::default()
+        };
+        InitializeInputs {
+            deck_data: Ok(Some(DeckList {
+                player: deck.clone(),
+                opponent: deck,
+                ..Default::default()
+            })),
+            format_config: Ok(Some(FormatConfig::limited())),
+            ..inputs()
+        }
+    }
+
+    pub(super) fn resident() -> GameState {
+        GAME_STATE.with(|cell| {
+            let state = cell.take();
+            let copy = state.clone().expect("resident installed");
+            cell.set(state);
+            copy
+        })
+    }
+
+    pub(super) struct Snapshot {
+        state: Option<serde_json::Value>,
+        replay: Option<serde_json::Value>,
+        interaction: Option<InteractionSessionId>,
+        cache: Option<Arc<AiSession>>,
+        proposals: (u64, u64, HashMap<String, StoredAiProposal>),
+        multiplayer: bool,
+        #[cfg(feature = "manual_resolution_local_bootstrap")]
+        owner: Option<ExperimentalLocalOwner>,
+    }
+
+    pub(super) fn snapshot() -> Snapshot {
+        let (state, interaction, cache) = GAME_STATE.with(|cell| {
+            let state = cell.take();
+            let cache = state.as_ref().map(|state| {
+                AI_SESSION_CACHE.with(|cell| {
+                    let mut cache = cell.take();
+                    let session = cache.get_or_build(state);
+                    cell.set(cache);
+                    session
+                })
+            });
+            let result = (
+                state.as_ref().map(|state| {
+                    serde_json::to_value(state).unwrap_or_else(|_| panic!("state serializes"))
+                }),
+                state
+                    .as_ref()
+                    .and_then(|state| state.interaction_session_id.clone()),
+                cache,
+            );
+            cell.set(state);
+            result
+        });
+        let replay = REPLAY_LOG.with(|cell| {
+            let log = cell.take();
+            let value = log.as_ref().map(|log| {
+                serde_json::to_value(log).unwrap_or_else(|_| panic!("replay serializes"))
+            });
+            cell.set(log);
+            value
+        });
+        Snapshot {
+            state,
+            replay,
+            interaction,
+            cache,
+            proposals: AI_PROPOSALS.with(|cell| {
+                let mut registry = cell.borrow_mut();
+                if registry.proposals.is_empty() && game_state_present() {
+                    registry.insert(AiDecisionContract {
+                        semantic_owner: PlayerId(0),
+                        authorized_actor: PlayerId(0),
+                        state_revision: 0,
+                        candidates: vec![],
+                    });
+                }
+                (
+                    registry.generation,
+                    registry.serial,
+                    registry.proposals.clone(),
+                )
+            }),
+            multiplayer: is_multiplayer_mode(),
+            #[cfg(feature = "manual_resolution_local_bootstrap")]
+            owner: EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+                let owner = cell.take();
+                let copy = owner.clone();
+                cell.set(owner);
+                copy
+            }),
+        }
+    }
+
+    pub(super) fn preserved(before: Snapshot) {
+        let after = snapshot();
+        assert!(before.state == after.state, "resident preserved");
+        assert!(before.replay == after.replay, "replay preserved");
+        assert!(
+            before.interaction == after.interaction,
+            "interaction preserved"
+        );
+        assert!(before.multiplayer == after.multiplayer, "posture preserved");
+        assert!(
+            before.proposals.0 == after.proposals.0
+                && before.proposals.1 == after.proposals.1
+                && before.proposals.2.len() == after.proposals.2.len()
+                && before.proposals.2.iter().all(|(token, proposal)| after
+                    .proposals
+                    .2
+                    .get(token)
+                    .is_some_and(|other| proposal.generation == other.generation
+                        && proposal.contract.semantic_owner == other.contract.semantic_owner
+                        && proposal.contract.authorized_actor == other.contract.authorized_actor
+                        && proposal.contract.state_revision == other.contract.state_revision
+                        && proposal.contract.candidates.len() == other.contract.candidates.len()
+                        && proposal
+                            .contract
+                            .candidates
+                            .iter()
+                            .zip(&other.contract.candidates)
+                            .all(|(a, b)| a.action == b.action
+                                && a.metadata.semantic_owner == b.metadata.semantic_owner
+                                && a.metadata.actor == b.metadata.actor
+                                && a.metadata.tactical_class == b.metadata.tactical_class))),
+            "proposals preserved"
+        );
+        assert!(
+            match (before.cache, after.cache) {
+                (Some(a), Some(b)) => Arc::ptr_eq(&a, &b),
+                (None, None) => true,
+                _ => false,
+            },
+            "cache preserved"
+        );
+        #[cfg(feature = "manual_resolution_local_bootstrap")]
+        assert!(before.owner == after.owner, "private binding preserved");
+    }
+
+    pub(super) fn failures() -> Vec<InitializeInputs> {
+        let mut malformed_format = limited_inputs();
+        malformed_format.format_config = Err("fixture".into());
+        let mut count = limited_inputs();
+        count.player_count = Some(4);
+        let mut malformed_deck = limited_inputs();
+        malformed_deck.deck_data = Err("fixture".into());
+        let mut player = limited_inputs();
+        player
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck")
+            .player
+            .main_deck[0] = "Absent Fixture Card".into();
+        let mut opponent = limited_inputs();
+        opponent
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck")
+            .opponent
+            .main_deck[0] = "Absent Fixture Card".into();
+        let mut empty = limited_inputs();
+        let deck = empty
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck");
+        deck.player.main_deck.clear();
+        deck.opponent.main_deck.clear();
+        let mut cedh = limited_inputs();
+        cedh.deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck")
+            .ai_difficulties = vec!["CEDH".into()];
+        vec![
+            malformed_format,
+            count,
+            malformed_deck,
+            player,
+            opponent,
+            empty,
+            cedh,
+        ]
+    }
+
+    #[test]
+    fn defaults_are_installed_with_trusted_seed_and_redacted_viewer() {
+        for kind in [InitSessionKind::Local, InitSessionKind::MultiplayerHost] {
+            for count in [2, 4] {
+                reset();
+                let mut input = inputs();
+                input.player_count = Some(count);
+                assert!(
+                    initialize_game_inner(input, kind).is_ok(),
+                    "default install reaches production"
+                );
+                let mut state = resident();
+                assert!(
+                    state.rng_seed == 42 && state.players.len() == usize::from(count),
+                    "resident defaults"
+                );
+                assert!(
+                    state.format_config == FormatConfig::default_for_player_count(count),
+                    "seat-dependent format"
+                );
+                assert!(
+                    state.match_config == MatchConfig::default(),
+                    "match default"
+                );
+                let viewer =
+                    serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+                        &state,
+                        Some(PlayerId(0)),
+                    ))
+                    .unwrap_or_else(|_| panic!("viewer serializes"));
+                assert!(
+                    viewer["state"]["rng_seed"] == 0 && viewer["state"]["rng_word_pos"] == 0,
+                    "viewer redaction"
+                );
+                state.capture_rng_word_pos();
+                let trusted =
+                    serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone()))
+                        .unwrap_or_else(|_| panic!("trusted serializes"));
+                assert!(trusted["state"]["rng_seed"] == 42, "trusted seed authority");
+                REPLAY_LOG.with(|cell| {
+                    let log = cell.take();
+                    assert!(
+                        log.as_ref().is_some_and(|log| log.header.seed == 42),
+                        "replay seed authority"
+                    );
+                    cell.set(log);
+                });
+            }
+        }
+        reset();
+    }
+
+    #[test]
+    fn configured_deck_install_and_all_preparation_refusals_preserve_local_resident() {
+        reset();
+        load_fixture();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "configured install"
+        );
+        let mut cedh_reach = limited_inputs();
+        let deck = cedh_reach
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck");
+        deck.ai_difficulties = vec!["CEDH".into()];
+        deck.player.bracket_tier = engine::game::bracket_estimate::CommanderBracketTier::Cedh;
+        deck.opponent.bracket_tier = engine::game::bracket_estimate::CommanderBracketTier::Cedh;
+        assert!(
+            initialize_game_inner(cedh_reach, InitSessionKind::Local).is_ok(),
+            "cEDH bracket reach"
+        );
+        for (index, input) in failures().into_iter().enumerate() {
+            let before = snapshot();
+            let error = initialize_game_inner(input, InitSessionKind::Local)
+                .err()
+                .expect("fixture refused");
+            assert!(
+                error["error"] == true && error["reasons"].is_array(),
+                "ordinary refusal envelope"
+            );
+            if index == 6 {
+                assert!(
+                    error["cedh_bracket_violation"] == true,
+                    "typed bracket flag"
+                );
+            }
+            preserved(before);
+        }
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let before = snapshot();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_err(),
+            "missing db refused"
+        );
+        preserved(before);
+        reset();
+    }
+
+    #[test]
+    fn host_preparation_refusals_never_install_or_claim() {
+        reset();
+        load_fixture();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::MultiplayerHost).is_ok(),
+            "host reach"
+        );
+        for input in failures() {
+            clear_game_state();
+            set_multiplayer_mode(false);
+            let before = snapshot();
+            assert!(
+                initialize_game_inner(input, InitSessionKind::MultiplayerHost).is_err(),
+                "host preparation refusal"
+            );
+            preserved(before);
+        }
+        reset();
+    }
+
+    #[test]
+    fn occupied_refusals_are_typed_and_preserve_both_directions() {
+        for kind in [InitSessionKind::Local, InitSessionKind::MultiplayerHost] {
+            reset();
+            load_fixture();
+            assert!(
+                initialize_game_inner(limited_inputs(), kind).is_ok(),
+                "occupied reach"
+            );
+            let before = snapshot();
+            let other = if kind == InitSessionKind::Local {
+                InitSessionKind::MultiplayerHost
+            } else {
+                InitSessionKind::Local
+            };
+            let error = initialize_game_inner(limited_inputs(), other)
+                .err()
+                .expect("occupied refusal");
+            assert!(error["engine_occupied"] == true, "typed occupied flag");
+            preserved(before);
+        }
+        reset();
+    }
+
+    #[test]
+    fn successful_ordinary_install_invalidates_previous_authority_and_cache() {
+        reset();
+        load_fixture();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "first install"
+        );
+        let before = snapshot();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "rematch installs"
+        );
+        let after = snapshot();
+        assert!(
+            before.interaction != after.interaction,
+            "fresh interaction binding"
+        );
+        assert!(
+            before.proposals.0 != after.proposals.0,
+            "proposal generation invalidated"
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &before.cache.expect("cached before"),
+                &after.cache.expect("cached after")
+            ),
+            "cache invalidated"
+        );
+        #[cfg(feature = "manual_resolution_local_bootstrap")]
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "ordinary never admits"
+        );
+        reset();
+    }
+}
+
+#[cfg(all(test, feature = "manual_resolution_local_bootstrap"))]
+mod experimental_local_bootstrap_tests {
+    use super::ordinary_initializer_preservation_tests::{
+        failures, inputs, limited_inputs, load_fixture, preserved, reset, resident, snapshot,
+    };
+    use super::*;
+
+    fn admit() {
+        load_fixture();
+        assert!(
+            initialize_experimental_local_game_inner(limited_inputs()).is_ok(),
+            "experimental production install"
+        );
+        assert!(
+            experimental_local_actor_inner() == Some(0),
+            "installed LocalP0 admitted"
+        );
+    }
+
+    #[test]
+    fn admission_is_explicit_and_verification_never_mints() {
+        reset();
+        assert!(experimental_local_actor_inner().is_none(), "empty verifier");
+        assert!(
+            initialize_game_inner(inputs(), InitSessionKind::Local).is_ok(),
+            "ordinary reach"
+        );
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "ordinary verifier cannot enroll"
+        );
+        admit();
+        let before = snapshot();
+        assert!(
+            experimental_local_actor_inner() == Some(0),
+            "repeat verification"
+        );
+        preserved(before);
+        reset();
+    }
+
+    #[test]
+    fn failed_bootstrap_preserves_ordinary_and_experimental_residents() {
+        for experimental in [false, true] {
+            reset();
+            load_fixture();
+            if experimental {
+                admit();
+            } else {
+                assert!(
+                    initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+                    "ordinary resident"
+                );
+            }
+            for input in failures() {
+                let before = snapshot();
+                assert!(
+                    initialize_experimental_local_game_inner(input).is_err(),
+                    "experimental preparation refusal"
+                );
+                preserved(before);
+                assert!(
+                    experimental_local_actor_inner() == experimental.then_some(0),
+                    "old admission retained"
+                );
+            }
+            CARD_DB.with(|cell| *cell.borrow_mut() = None);
+            let before = snapshot();
+            assert!(
+                initialize_experimental_local_game_inner(limited_inputs()).is_err(),
+                "missing db refusal"
+            );
+            preserved(before);
+        }
+        reset();
+    }
+
+    #[test]
+    fn verifier_checks_actual_resident_seat_session_and_posture() {
+        reset();
+        admit();
+        let state = resident();
+        GAME_STATE.with(|cell| {
+            let mut changed = state.clone();
+            changed.players.retain(|player| player.id != PlayerId(0));
+            cell.set(Some(changed));
+        });
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "missing installed seat"
+        );
+        GAME_STATE.with(|cell| {
+            let mut changed = state.clone();
+            changed.interaction_session_id = None;
+            cell.set(Some(changed));
+        });
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "wrong interaction binding"
+        );
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        assert!(
+            experimental_local_actor_inner() == Some(0),
+            "same resident restores verification"
+        );
+        set_multiplayer_mode(true);
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "multiplayer revokes"
+        );
+        set_multiplayer_mode(false);
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "posture release cannot remint"
+        );
+        reset();
+    }
+
+    #[test]
+    fn checked_restore_failure_preserves_and_success_revokes() {
+        reset();
+        admit();
+        let before = snapshot();
+        assert!(
+            restore_game_state_inner("invalid").is_err(),
+            "checked restore refuses"
+        );
+        preserved(before);
+        let mut state = resident();
+        state.capture_rng_word_pos();
+        let save = serde_json::to_string(&TrustedGameStateEnvelope::capture(state.clone()))
+            .unwrap_or_else(|_| panic!("trusted save"));
+        assert!(
+            restore_game_state_inner(&save).is_ok(),
+            "checked restore installs"
+        );
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "restore has no experimental admission"
+        );
+        reset();
+    }
+
+    #[test]
+    fn ordinary_supersession_clear_and_host_cannot_admit() {
+        reset();
+        admit();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "ordinary rematch"
+        );
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "ordinary supersession revokes"
+        );
+        admit();
+        clear_game_state();
+        assert!(experimental_local_actor_inner().is_none(), "clear revokes");
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::MultiplayerHost).is_ok(),
+            "host installs"
+        );
+        let before = snapshot();
+        let error = initialize_experimental_local_game_inner(limited_inputs())
+            .err()
+            .expect("host refuses bootstrap");
+        assert!(error["engine_occupied"] == true, "host refusal typed");
+        preserved(before);
+        reset();
+    }
+
+    #[test]
+    fn private_binding_is_absent_from_save_viewer_and_replay() {
+        reset();
+        admit();
+        let owner = EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+            let owner = cell.take();
+            let copy = owner.clone().expect("private owner");
+            cell.set(owner);
+            copy
+        });
+        let mut state = resident();
+        state.capture_rng_word_pos();
+        let save = serde_json::to_string(&TrustedGameStateEnvelope::capture(state.clone()))
+            .unwrap_or_else(|_| panic!("save"));
+        let viewer = serde_json::to_string(&engine::game::derived_views::ClientGameStateRef::wrap(
+            &state,
+            Some(PlayerId(1)),
+        ))
+        .unwrap_or_else(|_| panic!("viewer"));
+        let replay = REPLAY_LOG.with(|cell| {
+            let log = cell.take();
+            let text = serde_json::to_string(log.as_ref().expect("recording"))
+                .unwrap_or_else(|_| panic!("replay"));
+            cell.set(log);
+            text
+        });
+        for text in [save, viewer, replay] {
+            assert!(
+                !text.contains(&owner.session) && !text.contains(&owner.ticket),
+                "private binding not serialized"
+            );
+        }
+        reset();
     }
 }

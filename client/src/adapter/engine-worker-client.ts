@@ -262,6 +262,24 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "canonicalCardNames", names });
   }
 
+  async initializeExperimentalLocalGame(request: {
+    deckData?: unknown; seed?: number; formatConfig?: unknown; matchConfig?: unknown;
+    playerCount?: number; firstPlayer?: number;
+  }): Promise<SubmitResult> {
+    if (request === null || typeof request !== "object" || Array.isArray(request)
+      || (Object.getPrototypeOf(request) !== null && Object.getPrototypeOf(request) !== Object.prototype)
+      || Reflect.ownKeys(request).some((key) => typeof key !== "string"
+        || !["deckData", "seed", "formatConfig", "matchConfig", "playerCount", "firstPlayer"].includes(key))) {
+      throw new Error("Invalid experimental Local request");
+    }
+    return this.request<SubmitResult>({ ...request, type: "initializeExperimentalLocalGame" });
+  }
+
+  async experimentalLocalActor(): Promise<0 | null> {
+    const actor = await this.request<unknown>({ type: "experimentalLocalActor" });
+    return actor === 0 ? 0 : null;
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,
