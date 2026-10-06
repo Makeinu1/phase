@@ -561,6 +561,56 @@ fn finalized_post(state: &GameState, case: &Case) -> Option<Post> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[path = "host_precast_undo_tests.rs"]
 mod tests;
+
+/// Assertion entry points for the bounded native acceptance venue.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    pub fn synthetic_activation_metadata_is_not_ordinary_payment() {
+        super::tests::synthetic_activation_metadata_is_not_ordinary_payment();
+    }
+
+    pub fn rejected_correct_cast_captures_private_pre_counter() {
+        super::tests::rejected_correct_cast_captures_private_pre_counter();
+    }
+
+    pub fn installed_delayed_watcher_is_ineligible_pre() {
+        super::tests::installed_delayed_watcher_is_ineligible_pre();
+    }
+
+    pub fn synthetic_private_post_overflow_refuses_before_decoder() {
+        super::tests::synthetic_private_post_overflow_refuses_before_decoder();
+    }
+
+    pub fn capacity_checked_sum_overflow_fails_closed() {
+        super::tests::capacity_checked_sum_overflow_fails_closed();
+    }
+
+    pub fn capacity_each_structural_category_has_inclusive_boundary() {
+        super::tests::capacity_each_structural_category_has_inclusive_boundary();
+    }
+
+    pub fn capacity_nested_history_counts_inner_entries() {
+        super::tests::capacity_nested_history_counts_inner_entries();
+    }
+
+    pub fn capacity_json_counts_utf8_bytes_inclusive() {
+        super::tests::capacity_json_counts_utf8_bytes_inclusive();
+    }
+
+    pub fn capacity_structure_refusal_skips_capture_and_casts_once() {
+        super::tests::capacity_structure_refusal_skips_capture_and_casts_once();
+    }
+
+    pub fn capacity_serializer_error_or_json_refusal_casts_once() {
+        super::tests::capacity_serializer_error_or_json_refusal_casts_once();
+    }
+
+    pub fn capacity_restore_decode_failure_preserves_case() {
+        super::tests::capacity_restore_decode_failure_preserves_case();
+    }
+}

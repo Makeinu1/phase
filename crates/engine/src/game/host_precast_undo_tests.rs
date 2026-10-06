@@ -10,8 +10,8 @@ mod cases;
 
 use cases::{witness, Fixture, BINDING};
 
-#[test]
-fn synthetic_activation_metadata_is_not_ordinary_payment() {
+#[cfg_attr(test, test)]
+pub(super) fn synthetic_activation_metadata_is_not_ordinary_payment() {
     let mut f = Fixture::new();
     f.cast(CastPaymentMode::Manual);
     // Carrier discrimination unit: this is synthetic activation metadata,
@@ -24,8 +24,8 @@ fn synthetic_activation_metadata_is_not_ordinary_payment() {
     assert!(!ordinary_payment(&f.state, f.undo.case.as_ref().unwrap()));
 }
 
-#[test]
-fn rejected_correct_cast_captures_private_pre_counter() {
+#[cfg_attr(test, test)]
+pub(super) fn rejected_correct_cast_captures_private_pre_counter() {
     let mut f = Fixture::with_payment_setup(None, crate::game::scenario::P1);
     let card_id = f.state.objects[&f.bears].card_id;
     assert!(eligible_pre(&f.state, P0, f.bears, card_id));
@@ -53,8 +53,8 @@ fn rejected_correct_cast_captures_private_pre_counter() {
     assert!(f.undo.receipt().is_none());
 }
 
-#[test]
-fn installed_delayed_watcher_is_ineligible_pre() {
+#[cfg_attr(test, test)]
+pub(super) fn installed_delayed_watcher_is_ineligible_pre() {
     let mut f = Fixture::new();
     f.install_delayed_mana_watcher();
     assert!(!eligible_pre(
@@ -65,8 +65,8 @@ fn installed_delayed_watcher_is_ineligible_pre() {
     ));
 }
 
-#[test]
-fn synthetic_private_post_overflow_refuses_before_decoder() {
+#[cfg_attr(test, test)]
+pub(super) fn synthetic_private_post_overflow_refuses_before_decoder() {
     let mut f = Fixture::new();
     let receipt = f.arm();
     // Synthetic exhaustion fixture; neither the live nor receipt revision is
@@ -99,14 +99,14 @@ fn cast_action(f: &Fixture) -> GameAction {
     }
 }
 
-#[test]
-fn capacity_checked_sum_overflow_fails_closed() {
+#[cfg_attr(test, test)]
+pub(super) fn capacity_checked_sum_overflow_fails_closed() {
     assert_eq!(checked_item_sum([usize::MAX, 1]), None);
     assert_eq!(checked_item_sum([usize::MAX - 1, 1]), Some(usize::MAX));
 }
 
-#[test]
-fn capacity_each_structural_category_has_inclusive_boundary() {
+#[cfg_attr(test, test)]
+pub(super) fn capacity_each_structural_category_has_inclusive_boundary() {
     use crate::game::deck_loading::DeckEntry;
     use crate::types::game_state::PlayerDeckPool;
     let mut f = Fixture::new();
@@ -183,8 +183,8 @@ fn capacity_each_structural_category_has_inclusive_boundary() {
     }
 }
 
-#[test]
-fn capacity_nested_history_counts_inner_entries() {
+#[cfg_attr(test, test)]
+pub(super) fn capacity_nested_history_counts_inner_entries() {
     use crate::types::game_state::{DepartedStackSpell, LinkedExileSnapshot};
     let mut f = Fixture::new();
     f.arm();
@@ -246,8 +246,8 @@ fn capacity_nested_history_counts_inner_entries() {
     assert!(limits.admits_structure(&f.state));
 }
 
-#[test]
-fn capacity_json_counts_utf8_bytes_inclusive() {
+#[cfg_attr(test, test)]
+pub(super) fn capacity_json_counts_utf8_bytes_inclusive() {
     let mut limits = UNDO_CAPACITY_LIMITS;
     limits.checkpoint_bytes = 6;
     assert!(limits.admits_json("éabc"));
@@ -255,8 +255,8 @@ fn capacity_json_counts_utf8_bytes_inclusive() {
     assert!(!limits.admits_json("éabcde"));
 }
 
-#[test]
-fn capacity_structure_refusal_skips_capture_and_casts_once() {
+#[cfg_attr(test, test)]
+pub(super) fn capacity_structure_refusal_skips_capture_and_casts_once() {
     let mut f = Fixture::new();
     let old = f.arm();
     f.restore(old).unwrap();
@@ -286,8 +286,8 @@ fn capacity_structure_refusal_skips_capture_and_casts_once() {
     assert_eq!(f.undo.phase(), HostUndoPhase::Invalidated);
 }
 
-#[test]
-fn capacity_serializer_error_or_json_refusal_casts_once() {
+#[cfg_attr(test, test)]
+pub(super) fn capacity_serializer_error_or_json_refusal_casts_once() {
     for error in [false, true] {
         let mut f = Fixture::new();
         let action = cast_action(&f);
@@ -315,8 +315,8 @@ fn capacity_serializer_error_or_json_refusal_casts_once() {
     }
 }
 
-#[test]
-fn capacity_restore_decode_failure_preserves_case() {
+#[cfg_attr(test, test)]
+pub(super) fn capacity_restore_decode_failure_preserves_case() {
     let mut f = Fixture::new();
     let receipt = f.arm();
     let before = witness(&f.state);

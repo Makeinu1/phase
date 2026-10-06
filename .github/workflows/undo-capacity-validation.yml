@@ -6,6 +6,7 @@ on:
     paths:
       - crates/engine/src/game/host_precast_undo.rs
       - crates/engine/src/game/host_precast_undo_tests.rs
+      - crates/engine/tests/host_precast_undo_acceptance/main.rs
       - .github/workflows/undo-capacity-validation.yml
       - scripts/ci/undo-capacity-guard.py
 
@@ -51,17 +52,23 @@ jobs:
         run: |
           rustfmt --edition 2021 --config skip_children=true --check \
             crates/engine/src/game/host_precast_undo.rs \
-            crates/engine/src/game/host_precast_undo_tests.rs
+            crates/engine/src/game/host_precast_undo_tests.rs \
+            crates/engine/tests/host_precast_undo_acceptance/main.rs
           bash scripts/check-parser-combinators.sh e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
-      - name: Bounded native lib regressions
+      - name: Bounded native regressions
         run: |
           for PACKAGE in phase-engine engine-wasm; do
+            if [ "$PACKAGE" = phase-engine ]; then
+              VENUE=(--test host_precast_undo_acceptance)
+            else
+              VENUE=(--lib -E 'test(host_precast_undo::tests::)')
+            fi
             python3 scripts/ci/undo-capacity-guard.py "native-$PACKAGE" \
-              cargo nextest run --locked --build-jobs 1 --profile ci \
+              cargo nextest run --locked --build-jobs 1 --cargo-verbose --profile ci \
               --config profile.test.opt-level=0 --config profile.test.debug=0 \
               --config profile.test.incremental=false \
               --config 'profile.test.codegen-backend="cranelift"' \
-              --package "$PACKAGE" --lib -E 'test(host_precast_undo::tests::)' \
+              --package "$PACKAGE" "${VENUE[@]}" \
               --status-level all --final-status-level all
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
