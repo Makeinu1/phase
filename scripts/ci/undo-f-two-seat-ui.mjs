@@ -18,7 +18,7 @@ const fullControlCandidates = "[...document.querySelectorAll('button[aria-label=
 const publicNodeShape = `n=>{const role=n.getAttribute('role'),label=n.getAttribute('aria-label');return {tag:n.tagName,
 role:['dialog','button','status','presentation','alert','tooltip','listbox','option','menu','group','none'].includes(role)?role:role?'other':null,
 ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan','Tap to continue'].includes(label)?label:label?'other':null,
-ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-10','z-20','z-30','z-40','z-50','z-[55]','z-[60]','pointer-events-none','pointer-events-auto','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c)),markers:['data-hand-card','data-player-hand','data-mobile-action-left','data-mobile-action-right'].filter(a=>n.hasAttribute(a))};}`;
+ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-10','z-20','z-30','z-40','z-50','z-[55]','z-[60]','z-[100]','pointer-events-none','pointer-events-auto','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c)),markers:['data-hand-card','data-player-hand','data-mobile-action-left','data-mobile-action-right','data-card-preview','data-action-button-panel'].filter(a=>n.hasAttribute(a))};}`;
 const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
 const shape=(${publicNodeShape});const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return {...shape(n),ancestors};});
 return {disabled:b.disabled,clientRects:b.getClientRects().length,bounds:{x:r.x,y:r.y,width:r.width,height:r.height},hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y)),hits};})`;
@@ -33,21 +33,53 @@ const handReady = s => s.intendedNodeConnected && s.hitIntended && !s.hitOtherHa
 // Product CSS and actual App elements only. These observations cannot enable a
 // control, rewrite styles, select a card, or call the restore operation.
 const railHitAreas = `(()=>{const rail=document.querySelector('[data-flex-zone="actionRail"]');if(!rail)return null;
+const shape=(${publicNodeShape});
+const bounds=n=>{const r=n.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};};
 const visible=n=>{const r=n.getBoundingClientRect();return n.getClientRects().length>0&&r.width>0&&r.height>0;};
-const hit=n=>{const r=n.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return {inViewport:x>=0&&y>=0&&x<innerWidth&&y<innerHeight,hittable:n.contains(document.elementFromPoint(x,y)),pointerEvents:getComputedStyle(n).pointerEvents};};
+const hit=n=>{const r=n.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+const hits=document.elementsFromPoint(x,y).slice(0,6).map(el=>{const ancestors=[];let p=el.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return{...shape(el),ancestors};});
+return {bounds:bounds(n),point:{x,y},inViewport:x>=0&&y>=0&&x<innerWidth&&y<innerHeight,hittable:n.contains(document.elementFromPoint(x,y)),pointerEvents:getComputedStyle(n).pointerEvents,hits};};
 const columns=[...rail.querySelectorAll('[data-mobile-action-left],[data-mobile-action-right]')];
 const surfaces=columns.flatMap(n=>[...n.children]).filter(visible);
 const controls=[...rail.querySelectorAll('button[aria-label="Full Control On"],button[aria-label="Full Control Off"]')].filter(n=>visible(n)&&!n.disabled).map(hit).filter(x=>x.inViewport);
 const status=[...rail.querySelectorAll('[role=status]')].filter(visible).map(hit).filter(x=>x.inViewport);
 const actions=[...rail.querySelectorAll('[data-action-button-panel]')].filter(visible).map(hit).filter(x=>x.inViewport);
-return {viewport:{width:innerWidth,height:innerHeight},railPointerEvents:getComputedStyle(rail).pointerEvents,
-columns:columns.map(n=>({visible:visible(n),pointerEvents:getComputedStyle(n).pointerEvents})),
-surfacePointerEvents:surfaces.map(n=>getComputedStyle(n).pointerEvents),controls,status,actions};})()`;
+const actionControls=[...rail.querySelectorAll('[data-action-button-panel] button')].filter(n=>visible(n)&&!n.disabled).map(hit);
+return {viewport:{width:innerWidth,height:innerHeight},railBounds:bounds(rail),railPointerEvents:getComputedStyle(rail).pointerEvents,
+columns:columns.map(n=>({bounds:bounds(n),visible:visible(n),pointerEvents:getComputedStyle(n).pointerEvents})),
+surfaceBounds:surfaces.map(bounds),surfacePointerEvents:surfaces.map(n=>getComputedStyle(n).pointerEvents),controls,status,actions,actionControls};})()`;
 const railGap = `(()=>{const rail=document.querySelector('[data-flex-zone="actionRail"]');if(!rail)return null;const r=rail.getBoundingClientRect();
 const rects=[...rail.querySelectorAll('[data-mobile-action-left],[data-mobile-action-right]')].flatMap(n=>[...n.children]).map(n=>n.getBoundingClientRect()).filter(b=>b.width>0&&b.height>0);
 const empty=(x,y)=>x>r.left&&x<r.right&&y>r.top&&y<r.bottom&&x>=0&&y>=0&&x<innerWidth&&y<innerHeight&&!rects.some(b=>x>=b.left&&x<=b.right&&y>=b.top&&y<=b.bottom);
 const undo=(${visibleEnabledUndo})[0];if(undo){const b=undo.getBoundingClientRect(),x=b.x+b.width/2,y=b.y+b.height/2;if(empty(x,y))return{x,y,originalUndoCenter:true};}
 for(let y=Math.max(0,r.top)+2;y<Math.min(innerHeight,r.bottom);y+=8)for(let x=Math.max(0,r.left)+2;x<Math.min(innerWidth,r.right);x+=8)if(empty(x,y))return{x,y,originalUndoCenter:false};return null;})()`;
+const observeRail = async (page,width,height) => {
+  const started=Date.now(),deadline=started+30000;
+  const witness={viewport:{width,height},samples:[],sampleCount:0,stable:false};
+  result.actionRailHitAreaSamples.push(witness);
+  const timeout=()=>Object.assign(Error("app rail observation deadline"),{qaDeadline:true});
+  const run=async operation=>{
+    const remaining=deadline-Date.now();if(remaining<=0)throw timeout();let timer;
+    try {
+      const value=await Promise.race([operation(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(timeout()),Math.min(remaining,15000));})]);
+      if(Date.now()>=deadline)throw timeout();return value;
+    } finally {clearTimeout(timer);}
+  };
+  try {
+    await run(()=>cdp("Emulation.setDeviceMetricsOverride",{width,height,deviceScaleFactor:1,mobile:false},page.sessionId));
+    await run(()=>page.evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))"));
+    let previous,stable=0;
+    while(Date.now()<deadline) {
+      await run(()=>page.evaluate("new Promise(resolve=>requestAnimationFrame(resolve))"));
+      const area=await run(()=>page.evaluate(railHitAreas));
+      witness.sampleCount++;witness.samples.push(area);if(witness.samples.length>10)witness.samples.shift();
+      // Settle geometry/CSS/hit identity, including a stable blocked target.
+      const signature=JSON.stringify(area);stable=signature===previous?stable+1:1;previous=signature;
+      if(stable>=3){witness.stable=true;return area;}
+    }
+    throw timeout();
+  } finally {witness.elapsedMs=Date.now()-started;}
+};
 const publicGameControls = `(()=>{const shape=(${publicNodeShape});return {dialogCount:document.querySelectorAll('[role=dialog],dialog[open]').length,
 mulliganShells:[...document.querySelectorAll('div.fixed.inset-0.z-50.overflow-x-hidden.overflow-y-auto')].map(shape),
 startingDiceShells:[...document.querySelectorAll('div[role=status].fixed.inset-0')].filter(n=>n.classList.contains('z-[55]')).map(shape),
@@ -499,35 +531,6 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   result.stagesPassed.push("host-pointer-cast");
   const undo = host.button("Sandbox pre-cast Undo");
   await host.wait(`(()=>{const b=${undo};return b&&!b.disabled;})()`);
-  category = "setup"; stage = "action-rail-hit-area-regression";
-  const railStateBefore = {host:await host.evaluate("window.__twoSeatQa.status()"),guest:await guest.evaluate("window.__twoSeatQa.status()")};
-  result.actionRailHitAreas = [];
-  for (const [width,height] of [[1440,1000],[390,844],[844,390],[1440,1000]]) {
-    await cdp("Emulation.setDeviceMetricsOverride", {width,height,deviceScaleFactor:1,mobile:false}, host.sessionId);
-    await host.evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
-    const area = await host.evaluate(railHitAreas); result.actionRailHitAreas.push(area);
-    assert(area && area.railPointerEvents === "none" && area.columns.length === 2 && area.columns.every(x=>x.pointerEvents === "none"), "action rail empty layout area captures pointers");
-    assert(area.surfacePointerEvents.length>0 && area.surfacePointerEvents.every(x=>x === "auto"), "action rail content surfaces lost pointer input");
-    assert(area.controls.length>0 && area.controls.every(x=>x.pointerEvents === "auto" && x.hittable), "visible Full Control target lost pointer input");
-    assert(area.status.length>0 && area.status.every(x=>x.pointerEvents === "auto" && x.hittable), "status hover surface lost pointer input");
-    assert(area.actions.length>0 && area.actions.every(x=>x.pointerEvents === "auto" && x.hittable), "action panel lost pointer input");
-  }
-  const gap = await host.evaluate(railGap); assert(gap, "action rail empty-space witness missing");
-  assert(await host.evaluate(`!document.querySelector('[data-flex-zone="actionRail"]').contains(document.elementFromPoint(${gap.x},${gap.y}))`), "empty action rail area does not pass through");
-  // Existing product shortcut toggles edit mode; no store writes or CSS injection.
-  await cdp("Input.dispatchKeyEvent", {type:"keyDown",key:"L",code:"KeyL",modifiers:10,windowsVirtualKeyCode:76}, host.sessionId);
-  await cdp("Input.dispatchKeyEvent", {type:"keyUp",key:"L",code:"KeyL",modifiers:10,windowsVirtualKeyCode:76}, host.sessionId);
-  await host.wait("document.querySelector('[data-flex-zone=actionRail]')?.style.pointerEvents==='auto'");
-  assert(await host.evaluate(`document.elementFromPoint(${gap.x},${gap.y})===document.querySelector('[data-flex-zone="actionRail"]')`), "layout edit mode cannot grab rail empty space");
-  await cdp("Input.dispatchKeyEvent", {type:"keyDown",key:"Escape",code:"Escape",windowsVirtualKeyCode:27}, host.sessionId);
-  await cdp("Input.dispatchKeyEvent", {type:"keyUp",key:"Escape",code:"Escape",windowsVirtualKeyCode:27}, host.sessionId);
-  await host.wait("document.querySelector('[data-flex-zone=actionRail]')?.style.pointerEvents===''");
-  for (const [role,page] of Object.entries(pages)) {
-    const after=await page.evaluate("window.__twoSeatQa.status()");
-    for (const key of ["localCommitSeq","lastStateRevision","stackCount"]) assert(Number.isFinite(after[key]) && after[key]===railStateBefore[role][key], "layout-only regression changed committed game state");
-  }
-  result.actionRailGap = {...gap,playPassThrough:true,editModeWrapperHit:true,actualDrag:"NOT RUN"};
-  result.stagesPassed.push("actual-responsive-rail-hit-areas-edit-mode");
   category = "setup"; stage = "host-undo-pointer-ready";
   result.undoCandidatesBefore = await host.evaluate(undoControls);
   assert(await host.evaluate(`(${visibleEnabledUndo}).length===1`), "visible enabled host Undo control not unique");
@@ -571,7 +574,41 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   assert(finalHost.safeErrors.length === 0 && finalGuest.safeErrors.length === 0, "seat observation or transport errors present before success");
   assert(!viteLog.includes("optimized dependencies changed. reloading"), "DEV dependency reload invalidated the UI lifecycle");
   result.stagesPassed.push("next-legal-pointer-cast");
-  result.nextLegalCast = true; stage = "complete";
+  result.nextLegalCast = true;
+  assert(finalHost.contextGeneration === 1 && finalGuest.contextGeneration === 1, "context reload invalidated core Undo acceptance");
+  git("diff", "--exit-code");
+  result.coreUndoAcceptancePassed = true;
+  category = "setup"; stage = "action-rail-hit-area-regression";
+  const railStateBefore = {host:await host.evaluate("window.__twoSeatQa.status()"),guest:await guest.evaluate("window.__twoSeatQa.status()")};
+  result.actionRailHitAreas = [];
+  result.actionRailHitAreaSamples = [];
+  for (const [width,height] of [[1440,1000],[390,844],[844,390],[1440,1000]]) {
+    const area = await observeRail(host,width,height); result.actionRailHitAreas.push(area);
+    assert(area && area.railPointerEvents === "none" && area.columns.length === 2 && area.columns.every(x=>x.pointerEvents === "none"), "action rail empty layout area captures pointers");
+    assert(area.surfacePointerEvents.length>0 && area.surfacePointerEvents.every(x=>x === "auto"), "action rail content surfaces lost pointer input");
+    assert(area.controls.length>0 && area.controls.every(x=>x.pointerEvents === "auto" && x.hittable), "visible Full Control target lost pointer input");
+    assert(area.status.length>0 && area.status.every(x=>x.pointerEvents === "auto" && x.hittable), "status hover surface lost pointer input");
+    // The layout panel's center is diagnostic; actual enabled buttons own input.
+    assert(area.actions.length>0 && area.actions.every(x=>x.pointerEvents === "auto"), "action panel lost pointer input");
+    assert(area.actionControls.length>0 && area.actionControls.every(x=>x.inViewport && x.pointerEvents === "auto" && x.hittable), "visible action button lost pointer input");
+  }
+  const gap = await host.evaluate(railGap); assert(gap, "action rail empty-space witness missing");
+  assert(await host.evaluate(`!document.querySelector('[data-flex-zone="actionRail"]').contains(document.elementFromPoint(${gap.x},${gap.y}))`), "empty action rail area does not pass through");
+  // Existing product shortcut toggles edit mode; no store writes or CSS injection.
+  await cdp("Input.dispatchKeyEvent", {type:"keyDown",key:"L",code:"KeyL",modifiers:10,windowsVirtualKeyCode:76}, host.sessionId);
+  await cdp("Input.dispatchKeyEvent", {type:"keyUp",key:"L",code:"KeyL",modifiers:10,windowsVirtualKeyCode:76}, host.sessionId);
+  await host.wait("document.querySelector('[data-flex-zone=actionRail]')?.style.pointerEvents==='auto'");
+  assert(await host.evaluate(`document.elementFromPoint(${gap.x},${gap.y})===document.querySelector('[data-flex-zone="actionRail"]')`), "layout edit mode cannot grab rail empty space");
+  await cdp("Input.dispatchKeyEvent", {type:"keyDown",key:"Escape",code:"Escape",windowsVirtualKeyCode:27}, host.sessionId);
+  await cdp("Input.dispatchKeyEvent", {type:"keyUp",key:"Escape",code:"Escape",windowsVirtualKeyCode:27}, host.sessionId);
+  await host.wait("document.querySelector('[data-flex-zone=actionRail]')?.style.pointerEvents===''");
+  for (const [role,page] of Object.entries(pages)) {
+    const after=await page.evaluate("window.__twoSeatQa.status()");
+    for (const key of ["localCommitSeq","lastStateRevision","stackCount"]) assert(Number.isFinite(after[key]) && after[key]===railStateBefore[role][key], "layout-only regression changed committed game state");
+  }
+  result.actionRailGap = {...gap,playPassThrough:true,editModeWrapperHit:true,actualDrag:"NOT RUN"};
+  result.stagesPassed.push("actual-responsive-rail-hit-areas-edit-mode");
+  result.responsiveAcceptancePassed = true; stage = "complete";
   result.lifecycleTimeline = { host: await host.evaluate("window.__twoSeatQa.lifecycleSnapshot()"), guest: await guest.evaluate("window.__twoSeatQa.lifecycleSnapshot()") };
   git("diff", "--exit-code");
   await markDriverTeardown();
