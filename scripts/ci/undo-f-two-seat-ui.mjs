@@ -87,6 +87,35 @@ continueButtons:[...document.querySelectorAll('button[aria-label="Tap to continu
 keepButtons:[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='Keep Hand').map(b=>{const r=b.getBoundingClientRect();return {disabled:b.disabled,clientRects:b.getClientRects().length,hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};}),
 fullControl:${fullControlControls}};})()`;
 const hittableFullControl = `(${fullControlCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y));})`;
+const handBadgeCandidates = "[...document.querySelectorAll('[data-flex-zone=\"actionRail\"] button[aria-label]')].filter(b=>/^View full hand \\(\\d+ cards?\\)$/.test(b.getAttribute('aria-label')))";
+const handBadgeControls = fullControlControls.replace(fullControlCandidates, handBadgeCandidates);
+const hittableHandBadge = `(${handBadgeCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&b.getClientRects().length>0&&r.width>0&&r.height>0&&x>=0&&y>=0&&x<innerWidth&&y<innerHeight&&b.contains(document.elementFromPoint(x,y));})`;
+// HandBadge and the full-hand drawer are ordinary desktop UI too. No synthetic
+// DOM event, store setter or direct action/restore call is used for these clicks.
+const castFromDrawer = async (page,key,prefix) => {
+  const witness=result[key]={route:"hand-badge-full-hand-drawer"};
+  category="setup";stage=`${prefix}-hand-badge-ready`;
+  witness.beforeOpen=await page.evaluate("window.__twoSeatQa.status()");
+  witness.badgeControls=await page.evaluate(handBadgeControls);
+  await page.wait(hittableHandBadge);
+  await page.click(hittableHandBadge,{key:`${key}BadgeClick`,controls:handBadgeControls,scrollOnlyWhenNeeded:true});
+  stage=`${prefix}-drawer-card-ready`;
+  await page.wait("window.__twoSeatQa.lockDrawerCard()");
+  await page.wait("window.__twoSeatQa.drawerCardSnapshot().ready");
+  witness.beforeClick=await page.evaluate("window.__twoSeatQa.drawerCardSnapshot()");
+  assert(witness.beforeClick.ready,"app drawer target not pointer-ready");
+  assert(witness.beforeClick.committedSeq===witness.beforeOpen.localCommitSeq,"opening drawer changed committed game state");
+  stage=`${prefix}-drawer-pointer-cast`;
+  await page.click("window.__twoSeatQa.drawerCard()",{key:`${key}CardClick`,controls:"window.__twoSeatQa.drawerCardSnapshot()",scrollOnlyWhenNeeded:true});
+  witness.afterClick=await page.evaluate("window.__twoSeatQa.drawerCardSnapshot()");
+  const events=witness.afterClick.pointerTrace.events;
+  assert(["pointerdown","pointerup","click"].every(type=>events.filter(e=>e.type===type).length===1&&events.find(e=>e.type===type).trusted)
+    &&events.findIndex(e=>e.type==="pointerdown")<events.findIndex(e=>e.type==="pointerup")
+    &&events.findIndex(e=>e.type==="pointerup")<events.findIndex(e=>e.type==="click")
+    &&!events.some(e=>e.type==="dblclick")&&witness.afterClick.pointerTrace.count<=10,"native drawer click events missing");
+  await page.wait("!window.__twoSeatQa.drawerCardSnapshot().drawerOpen");
+  witness.closedByUi=true;
+};
 // Only fixed public control names and validity flags leave the page. Never
 // serialize arbitrary text, input values, deck identity, or a DOM node.
 const setupControls = `(()=>{const f=${hostForm};if(!f)return {formPresent:false};
@@ -526,10 +555,8 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   assert(reached, "ordinary host cast not reached"); result.setupSteps = steps;
   assert(await host.evaluate("window.__twoSeatQa.prepareCast()"), "pre-floating semantic mana setup failed");
   result.stagesPassed.push("ordinary-app-actions");
-  category = "setup"; stage = "host-hand-pointer-ready";
-  const castPoint = await host.readyHandPoint("hostCastReadinessUi");
+  await castFromDrawer(host,"hostCastDrawerUi","host");
   category = "product"; stage = "host-pointer-cast";
-  await host.point(castPoint.x, castPoint.y, true, "hostCastPointerUi");
   await host.wait("window.__twoSeatQa.status().stackCount===1", 30);
   assert(await host.evaluate("window.__twoSeatQa.recordCast()"), "real app cast snapshot missing");
   await guest.wait("window.__twoSeatQa.status().stackCount===1");
@@ -569,10 +596,8 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   result.restore = { host: h, guest: g, beforeRevision, publicBoardEqual: true, guestRedaction: true };
   result.stagesPassed.push("pointer-undo-exact-acks-restore-privacy");
   await host.cropControl(undo, "host-restored-undo-control.png");
-  category = "setup"; stage = "next-hand-pointer-ready";
-  const nextPoint = await host.readyHandPoint("nextCastReadinessUi");
+  await castFromDrawer(host,"nextCastDrawerUi","next");
   category = "product"; stage = "next-legal-pointer-cast";
-  await host.point(nextPoint.x, nextPoint.y, true, "nextCastPointerUi");
   await host.wait("window.__twoSeatQa.status().stackCount===1"); await guest.wait("window.__twoSeatQa.status().stackCount===1");
   await host.evaluate("window.__twoSeatQa.drainObservations()");
   await guest.evaluate("window.__twoSeatQa.drainObservations()");

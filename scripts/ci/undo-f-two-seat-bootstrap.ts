@@ -210,6 +210,20 @@ let preSeq = 0, castSeq = 0;
 // Private target identity remains in this page; diagnostics emit only flags.
 let pointerTarget: HTMLElement | undefined;
 let pointerObjectId: number | undefined;
+const drawerRoot = () => document.querySelector<HTMLElement>('div.fixed[class~="z-[91]"]');
+let drawerPointerEvents: Array<{type:string;atUnixMs:number;timeStamp:number;trusted:boolean;button:number|null;buttons:number|null;pointerType:string|null}> = [];
+let drawerPointerEventCount = 0;
+for (const type of ["pointerdown","pointerup","click","dblclick","gotpointercapture","lostpointercapture"]) {
+  document.addEventListener(type,event=>{
+    if (!(event.target instanceof Node) || !pointerTarget?.contains(event.target)) return;
+    const pointer=event as PointerEvent;
+    drawerPointerEventCount++;
+    drawerPointerEvents.push({type,atUnixMs:Date.now(),timeStamp:event.timeStamp,trusted:event.isTrusted,
+      button:typeof pointer.button==="number"?pointer.button:null,buttons:typeof pointer.buttons==="number"?pointer.buttons:null,
+      pointerType:["mouse","touch","pen"].includes(pointer.pointerType)?pointer.pointerType:null});
+    if(drawerPointerEvents.length>10)drawerPointerEvents.shift();
+  },true);
+}
 const actions = () => {
   const g = useGameStore.getState();
   return [...g.legalActions, ...Object.values(g.legalActionsByObject).flat()] as GameAction[];
@@ -327,6 +341,38 @@ const qa = {
     await dispatchAction(mana);
     pre = structuredClone(useGameStore.getState().gameState!); preSeq = useGameStore.getState().lastCommittedSeq;
     return pre.stack.length === 0 && pre.players[0].mana_pool.mana.length === 1 && Boolean(ordinaryCast());
+  },
+  lockDrawerCard() {
+    const s=useGameStore.getState().gameState;
+    // Choose once, then require the very same engine object after Undo too.
+    const cast=ordinaryCast();
+    const objectId=pointerObjectId??(cast?.type==="CastSpell"?cast.data.object_id:undefined);
+    if(objectId===undefined||!s?.players[0].hand.includes(objectId)
+      ||!actions().some(a=>a.type==="CastSpell"&&a.data.object_id===objectId))return false;
+    pointerObjectId=objectId;
+    const node=drawerRoot()?.querySelector<HTMLButtonElement>(`button[data-object-id="${objectId}"]`);
+    if(!node)return false;
+    pointerTarget=node;drawerPointerEvents=[];drawerPointerEventCount=0;
+    return true;
+  },
+  drawerCard() {
+    return pointerTarget?.isConnected&&drawerRoot()?.contains(pointerTarget)?pointerTarget:null;
+  },
+  drawerCardSnapshot() {
+    const g=useGameStore.getState(),s=g.gameState,root=drawerRoot();
+    const node=pointerTarget?.isConnected&&root?.contains(pointerTarget)?pointerTarget:null;
+    const r=node?.getBoundingClientRect(),x=r?r.x+r.width/2:0,y=r?r.y+r.height/2:0;
+    const inViewport=Boolean(r&&x>=0&&y>=0&&x<innerWidth&&y<innerHeight);
+    const hittable=Boolean(node&&inViewport&&r&&r.width>0&&r.height>0&&node.contains(document.elementFromPoint(x,y)));
+    const inHand=Boolean(s&&pointerObjectId!==undefined&&s.players[0].hand.includes(pointerObjectId));
+    const legal=actions().some(a=>a.type==="CastSpell"&&a.data.object_id===pointerObjectId);
+    const debug=useUiStore.getState().debugInteractionMode,idle=isDispatchIdle();
+    return {drawerOpen:Boolean(root),targetConnected:Boolean(node),targetIsButton:node?.tagName==="BUTTON",
+      bounds:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null,inViewport,hittable,inHand,legal,
+      prioritySeat:s?.priority_player??null,dispatchIdle:idle,debugInteraction:debug,committedSeq:g.lastCommittedSeq,
+      ready:Boolean(node&&hittable&&inHand&&legal&&s?.priority_player===0&&s.waiting_for?.type==="Priority"
+        &&g.waitingFor?.type==="Priority"&&idle&&!debug&&!blocked()),
+      pointerTrace:{count:drawerPointerEventCount,events:[...drawerPointerEvents]}};
   },
   cardPoint() {
     const s = useGameStore.getState().gameState;
