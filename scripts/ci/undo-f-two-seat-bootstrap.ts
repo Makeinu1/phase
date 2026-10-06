@@ -30,6 +30,64 @@ const wire: WireObservation[] = [];
 let channelsOpened = 0, nativeChannels = false, signalingOpened = false;
 const safeErrors: string[] = [];
 const observationQueues: Array<() => Promise<void>> = [];
+const contextGeneration = Number(sessionStorage.getItem("qa-observation-generation") ?? "0") + 1;
+sessionStorage.setItem("qa-observation-generation", String(contextGeneration));
+let driverStage = "unmarked", driverTeardown = false, providerSetupGeneration = 0;
+const lifecycleEvents: Array<Record<string, unknown>> = [];
+const observedConnections = new WeakSet<object>();
+const repoSources = ["providers/GameProvider.tsx", "adapter/p2p-adapter.ts", "network/peer.ts", "network/connection.ts",
+  "stores/gameStore.ts", "stores/multiplayerStore.ts", "game/sessionCleanup.ts", "pages/GamePage.tsx",
+  "adapter/wasm-adapter.ts", "adapter/engine-worker-client.ts"];
+const repoFunctions = ["P2PGuestAdapter.dispose", "P2PHostAdapter.dispose", "releaseHostEngineSession",
+  "releasePrivateEngine", "setupP2P", "closeTransport", "onAbort", "dispose", "destroy", "close"];
+function lifecycle(kind: string, conn?: TransportConnection, detail?: Record<string, string | boolean>) {
+  try {
+    if (lifecycleEvents.length >= 200) {
+      if (!safeErrors.includes("lifecycle-observer-overflow")) safeErrors.push("lifecycle-observer-overflow");
+      return;
+    }
+    // Raw stack strings remain in this call only. Emit recognized repository
+    // filenames/function names/line numbers, never URLs, arguments or messages.
+    const frames = (new Error().stack ?? "").split("\n").flatMap(frame => {
+      const source = repoSources.find(name => frame.includes("/src/" + name));
+      if (!source) return [];
+      const suffix = frame.slice(frame.indexOf("/src/" + source) + source.length + 5);
+      const at = suffix.match(/^(?:\?[^\s():]*)?:(\d+):(\d+)/);
+      return [{ source, function: repoFunctions.find(name => frame.includes(name)) ?? null, line: at ? Number(at[1]) : null }];
+    }).slice(0, 12);
+    const g = useGameStore.getState();
+    lifecycleEvents.push({ ordinal: lifecycleEvents.length + 1, atUnixMs: Date.now(), kind, contextGeneration,
+      gameSessionGeneration: g.gameSessionGeneration, providerSetupGeneration, driverStage, driverTeardown,
+      route: location.pathname.startsWith("/game/") ? "game" : "setup",
+      adapterPresent: Boolean(g.adapter), snapshotPresent: Boolean(g.gameState), frames,
+      ...(conn ? { connectionOpen: conn.open, channelState: conn.dataChannel?.readyState ?? null,
+        peerConnectionState: conn.peerConnection?.connectionState ?? null } : {}),
+      ...detail });
+  } catch { safeErrors.push("lifecycle-observer-failed"); }
+}
+function observeMethod(target: object, method: string, kind: string, conn?: TransportConnection) {
+  const object = target as Record<string, unknown>, original = object[method];
+  if (typeof original !== "function") throw Error("native-observation-method-unavailable");
+  object[method] = function(this: unknown, ...args: unknown[]) {
+    lifecycle(kind, conn);
+    // Exactly one native/original call with unchanged receiver and arguments.
+    // No catch, delay, suppression or altered return/error behavior.
+    return Reflect.apply(original, this, args);
+  };
+}
+observeMethod(RTCPeerConnection.prototype, "close", "native-peer-connection-close-call");
+observeMethod(RTCDataChannel.prototype, "close", "native-data-channel-close-call");
+observeMethod(Worker.prototype, "terminate", "native-worker-terminate-call");
+lifecycle("context-start");
+useGameStore.subscribe((next, previous) => {
+  if (next.adapter !== previous.adapter || Boolean(next.gameState) !== Boolean(previous.gameState)
+    || next.gameSessionGeneration !== previous.gameSessionGeneration) lifecycle("game-store-session-change");
+});
+useSandboxUndoConsentStore.subscribe((next, previous) => {
+  if (next.agreed !== previous.agreed) lifecycle(next.agreed ? "consent-on" : "consent-off");
+});
+window.addEventListener("pagehide", () => lifecycle("context-pagehide"));
+import.meta.hot?.on("vite:beforeFullReload", () => lifecycle("vite-before-full-reload"));
 let privateProjectionChecks = 0, privateProjectionOk = true;
 let undoIdentity: string | undefined;
 let undoRevision: number | undefined;
@@ -48,6 +106,10 @@ function privacy(state: GameState) {
       && x.abilities.length === 0 && x.keywords.length === 0);
 }
 function observe(conn: TransportConnection) {
+  if (observedConnections.has(conn)) return;
+  observedConnections.add(conn);
+  observeMethod(conn, "close", "data-connection-close-call", conn);
+  lifecycle("data-connection-observed", conn);
   let sent = Promise.resolve(), received = Promise.resolve();
   observationQueues.push(async () => { await Promise.all([sent, received]); });
   const capture = (direction: string, data: unknown) => {
@@ -78,16 +140,24 @@ function observe(conn: TransportConnection) {
   const onOpen = () => {
     channelsOpened++;
     nativeChannels = conn.peerConnection instanceof RTCPeerConnection && conn.dataChannel instanceof RTCDataChannel && conn.dataChannel.ordered;
+    lifecycle("data-connection-open-event", conn);
   };
   if (conn.open) onOpen(); else conn.once("open", onOpen);
-  conn.on("error", () => { safeErrors.push("data-connection-error"); });
+  conn.on("close", () => lifecycle("data-connection-close-event", conn));
+  conn.on("error", error => {
+    safeErrors.push("data-connection-error");
+    lifecycle("data-connection-error-event", conn, { errorKind: ["webrtc", "network", "not-open-yet", "serialization", "message-too-big"].includes(error.type ?? "") ? error.type! : "other" });
+  });
 }
 installPeerTransportSelector(() => ({
   create(id) {
     // Actual operator-supported bootstrap seam, not a fake transport.
     const options = { host: "127.0.0.1", port: 9000, path: "/peerjs", secure: false, config: { iceServers: [] }, debug: 0 };
     const peer = id === undefined ? new Peer(options) : new Peer(id, options);
-    peer.on("open", () => { signalingOpened = true; });
+    observeMethod(peer, "destroy", "peer-destroy-call");
+    lifecycle("peer-created");
+    peer.on("open", () => { signalingOpened = true; lifecycle("peer-open-event"); });
+    peer.on("close", () => lifecycle("peer-close-event"));
     peer.on("error", error => { safeErrors.push(["network", "peer-unavailable", "socket-error", "webrtc"].includes(error.type) ? error.type : "peer-error"); });
     peer.on("connection", conn => observe(conn as unknown as TransportConnection));
     const connect = peer.connect.bind(peer);
@@ -112,10 +182,32 @@ const publicState = (s: GameState) => JSON.stringify({
   battlefield: s.battlefield.map(id => s.objects[id]), stack: s.stack,
 });
 const qa = {
+  noteLifecycle(kind: string, signalAborted?: boolean) {
+    if (!["p2p-provider-setup-start", "p2p-provider-effect-cleanup-enter", "p2p-provider-compensating-cleanup", "p2p-adapter-dispose-enter"].includes(kind)) {
+      safeErrors.push("lifecycle-observer-failed"); return;
+    }
+    if (kind === "p2p-provider-setup-start") providerSetupGeneration++;
+    lifecycle(kind, undefined, signalAborted === undefined ? undefined : { signalAborted });
+  },
+  noteSessionClose(reason: unknown) {
+    const reasons: Record<string, string> = { "Left game": "left-game", "Host session superseded": "host-superseded",
+      "Removed by host": "removed", "Undecodable first message": "first-message-undecodable", "Protocol violation": "protocol-violation",
+      "Wire protocol mismatch": "wire-protocol-mismatch", "Malformed P2P authority": "malformed-authority",
+      "Host failed to add player": "add-player-failed", "Game in progress": "game-in-progress", "Lobby full": "lobby-full",
+      "Deck validation failed": "deck-validation-failed", "Host initialization failed": "host-initialization-failed",
+      "Wrong P2P session": "wrong-session", "Kicked": "kicked", "Unknown token": "unknown-token", "Not in grace": "not-in-grace",
+      "Player departure is in progress": "departure-in-progress", "Reconnect already in progress": "reconnect-in-progress",
+      "Player conceded": "player-conceded", "Undecodable frame during reconnect": "reconnect-frame-undecodable" };
+    lifecycle("peer-session-close-enter", undefined, { closeReasonCode: typeof reason === "string" && Object.prototype.hasOwnProperty.call(reasons, reason) ? reasons[reason] : "other" });
+  },
+  markDriverStage(next: string) { if (next !== driverStage) { driverStage = next; lifecycle("driver-stage"); } },
+  markDriverTeardown() { driverTeardown = true; lifecycle("driver-teardown-marker"); },
+  lifecycleSnapshot() { return { contextGeneration, driverStage, driverTeardown, events: [...lifecycleEvents] }; },
   async drainObservations() { await Promise.all(observationQueues.map(drain => drain())); },
   status() {
     const g = useGameStore.getState(), s = g.gameState;
     return { ready: Boolean(s && g.adapter), role, seat: getPlayerId(), route: location.pathname.startsWith("/game/") ? "game" : "setup",
+      contextGeneration, gameSessionGeneration: g.gameSessionGeneration,
       signalingOpened, channelsOpened, nativeChannels, safeErrors: [...safeErrors], blocked: blocked(), agreed: useSandboxUndoConsentStore.getState().agreed,
       fullControl: useUiStore.getState().fullControl, fullControlApplied: s?.priority_passing_modes?.[getPlayerId()] === "FullControl",
       lastStateRevision, stackCount: s?.stack.length ?? 0, dispatchIdle: isDispatchIdle(),

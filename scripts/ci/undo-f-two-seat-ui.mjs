@@ -27,6 +27,18 @@ return {formPresent:true,formatLimited:f.querySelector('button[aria-label=Format
 submitPresent:Boolean(b),submitDisabled:Boolean(b?.disabled),submitAriaDisabled:b?.getAttribute('aria-disabled')==='true',
 submitLabel:b?.textContent.trim()==='Host P2P Game'?'Host P2P Game':b?.textContent.trim()==='Host Game'?'Host Game':'other',
 submitTitlePresent:Boolean(title),submitReason:/checking/i.test(title)?'checking':/not legal/i.test(title)?'illegal':title?'other':null,controls};})()`;
+// DEV-only call-entry probes preserve every original statement. They expose
+// the caller before PeerSession's asynchronous channel-disposal queue loses it.
+const qaProbe = "(window as unknown as {__twoSeatQa?:{noteLifecycle:(kind:string,aborted?:boolean)=>void;noteSessionClose:(reason:unknown)=>void}}).__twoSeatQa";
+const lifecycleProbes = [
+  { source: "/src/network/peer.ts", anchor: 'close(reason = "Left game") {', count: 1, note: `${qaProbe}?.noteSessionClose(reason);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: "dispose(): void {", count: 3, note: `${qaProbe}?.noteLifecycle("p2p-adapter-dispose-enter");` },
+  { source: "/src/providers/GameProvider.tsx", anchor: "const setupP2P = async () => {", count: 1, note: `${qaProbe}?.noteLifecycle("p2p-provider-setup-start",signal.aborted);` },
+  { source: "/src/providers/GameProvider.tsx", anchor: "return () => {\n        ac.abort();", count: 1,
+    before: true, note: `${qaProbe}?.noteLifecycle("p2p-provider-effect-cleanup-enter",signal.aborted);` },
+  { source: "/src/providers/GameProvider.tsx", anchor: "} catch (err) {\n          // Compensating teardown", count: 1,
+    before: true, note: `${qaProbe}?.noteLifecycle("p2p-provider-compensating-cleanup",signal.aborted);` },
+];
 const git = (...args) => execFileSync("git", ["-C", client, ...args], { encoding: "utf8" }).trim();
 await mkdir(evidence, { recursive: true });
 const result = { frontendSha, engineSha, workflowSha: process.env.GITHUB_SHA,
@@ -49,6 +61,13 @@ async function stop(child) {
   child.kill("SIGTERM");
   for (let i = 0; i < 50 && child.exitCode === null && child.signalCode === null; i++) await pause(100);
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+}
+async function markDriverTeardown() {
+  if (result.driverTeardownAtUnixMs !== undefined) return;
+  result.driverTeardownAtUnixMs = Date.now();
+  for (const page of Object.values(pages)) {
+    try { await page.evaluate("window.__twoSeatQa?.markDriverTeardown()"); } catch {}
+  }
 }
 try {
   assert(git("rev-parse", "HEAD") === frontendSha, "frontend pin differs"); git("diff", "--exit-code");
@@ -83,8 +102,15 @@ try {
   await copyFile(harness, path.join(client, "src/qa-two-seat.ts"));
   await copyFile(fixture, path.join(client, "public/qa-host-card-data.json"));
   await writeFile(path.join(client, "vite.two-seat.config.ts"), `import base from './vite.config';import {defineConfig} from 'vite';
+const probes=${JSON.stringify(lifecycleProbes)};
 export default defineConfig(async env=>{const c=typeof base==='function'?await base(env):base;return {...c,
-optimizeDeps:{...c.optimizeDeps,entries:['index.html'],include:[...(c.optimizeDeps?.include??[]),'idb']},plugins:[...c.plugins,{name:'ci-app-bootstrap',transformIndexHtml(html){return html.replace('/src/main.tsx','/src/qa-two-seat.ts');}}]};});`);
+optimizeDeps:{...c.optimizeDeps,entries:['index.html'],include:[...(c.optimizeDeps?.include??[]),'idb']},plugins:[{name:'ci-app-bootstrap',enforce:'pre',
+transformIndexHtml(html){return html.replace('/src/main.tsx','/src/qa-two-seat.ts');},transform(code,id){
+for(const p of probes.filter(p=>id.split('?')[0].endsWith(p.source))){if(code.split(p.anchor).length-1!==p.count)throw Error('fixed lifecycle probe anchor differs');
+const replacement=p.before?p.anchor.replace('{','{'+p.note):p.anchor+p.note;code=code.split(p.anchor).join(replacement);}return code;}},...c.plugins]};});`);
+  result.lifecycleProbeScope = { nativeMethods: ["RTCPeerConnection.close", "RTCDataChannel.close", "Worker.terminate", "Peer.destroy", "DataConnection.close"],
+    callEntries: lifecycleProbes.map(p => ({ source: p.source, expectedAnchors: p.count })), rawStackPersisted: false,
+    nativeCallsSuppressed: false, fixedProductSourceChanged: false };
   const lock = JSON.parse(await readFile(path.join(serverPackages, "package-lock.json")));
   const pkg = lock.packages["node_modules/peer"];
   assert(pkg.version === "1.0.2" && pkg.integrity === "sha512-ZObVEhAaoskd3KuSxr5DJLM8QuqQW4w3i0MqrI8H7Bzz8DjRC3DjUg2XtQQGfdc36+8Xk+wIPT/tL5wE+KnIqg==", "PeerServer package pin differs");
@@ -145,7 +171,8 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, sessionId);
     await cdp("Page.addScriptToEvaluateOnNewDocument", { source: `sessionStorage.setItem('qa-seat',${JSON.stringify(role)});` }, sessionId);
     const evaluate = async expression => {
-      const a = await cdp("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+      const marked = `(()=>{window.__twoSeatQa?.markDriverStage(${JSON.stringify(stage)});return (${expression});})()`;
+      const a = await cdp("Runtime.evaluate", { expression: marked, awaitPromise: true, returnByValue: true }, sessionId);
       assert(!a.exceptionDetails, "app operation failed"); return a.result.value;
     };
     const wait = async (expression, seconds = 30) => {
@@ -241,17 +268,21 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   assert(beforeJoin.agreed && !beforeJoin.signalingOpened, "guest consent not held before original join construction");
   await guest.click(guestDeck);
   result.stagesPassed.push("real-guest-deck-tile-choice");
-  category = "communication"; stage = "real-two-seat-pairing";
+  category = "communication"; stage = "guest-loopback-signaling";
+  await guest.wait("window.__twoSeatQa.status().signalingOpened", 45);
+  stage = "host-start-or-auto-start";
   // Auto-start is an existing host option. If off, use the actual host control.
   if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) {
     const start = host.button("Start Game");
     await host.wait(`window.__twoSeatQa.status().ready || Boolean(${start})`);
     if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) await host.click(start);
   }
-  await host.wait("window.__twoSeatQa.status().ready", 90);
-  await guest.wait("window.__twoSeatQa.status().ready", 90);
-  for (const page of [host, guest]) {
+  stage = "host-game-ready"; await host.wait("window.__twoSeatQa.status().ready", 90);
+  stage = "guest-game-ready"; await guest.wait("window.__twoSeatQa.status().ready", 90);
+  for (const [role, page] of Object.entries(pages)) {
+    stage = role + "-native-channel-ready";
     await page.wait("window.__twoSeatQa.status().route==='game' && window.__twoSeatQa.status().nativeChannels");
+    stage = role + "-full-control";
     const control = "[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')==='Full Control Off')";
     await page.wait(`Boolean(${control})`);
     await page.click(control);
@@ -318,16 +349,26 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   assert(finalHost.safeErrors.length === 0 && finalGuest.safeErrors.length === 0, "seat observation or transport errors present before success");
   assert(!viteLog.includes("optimized dependencies changed. reloading"), "DEV dependency reload invalidated the UI lifecycle");
   result.stagesPassed.push("next-legal-pointer-cast");
-  result.nextLegalCast = true; result.pass = true; stage = "complete";
+  result.nextLegalCast = true; stage = "complete";
+  result.lifecycleTimeline = { host: await host.evaluate("window.__twoSeatQa.lifecycleSnapshot()"), guest: await guest.evaluate("window.__twoSeatQa.lifecycleSnapshot()") };
   git("diff", "--exit-code");
+  await markDriverTeardown();
+  const closingHost = await host.evaluate("window.__twoSeatQa.status()"), closingGuest = await guest.evaluate("window.__twoSeatQa.status()");
+  assert(closingHost.safeErrors.length === 0 && closingGuest.safeErrors.length === 0, "seat observation or transport errors present before driver teardown");
+  result.pass = true;
   await cdp("Browser.close").catch(() => {});
 } catch (cause) {
   result.pass = false; result.failureCategory = category;
   result.failure = cause instanceof assert.AssertionError ? cause.message : cause.qaDeadline ? "stage deadline" : "driver operation failed";
   if (cause.qaCdpMethod) result.cdpFailure = { method: cause.qaCdpMethod, code: cause.qaCdpErrorCode };
   result.lastObservation = {};
+  result.lifecycleTimeline = {};
   for (const [role, page] of Object.entries(pages)) {
-    try { result.lastObservation[role] = await page.evaluate("window.__twoSeatQa?.status() ?? null"); } catch {}
+    try {
+      await page.evaluate("window.__twoSeatQa?.drainObservations()");
+      result.lastObservation[role] = await page.evaluate("window.__twoSeatQa?.status() ?? null");
+      result.lifecycleTimeline[role] = await page.evaluate("window.__twoSeatQa?.lifecycleSnapshot() ?? null");
+    } catch {}
   }
   result.publicUiChecks = {};
   for (const [role, page] of Object.entries(pages)) {
@@ -338,7 +379,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     try { result.publicFormChecks[role] = await page.evaluate(setupControls); } catch {}
   }
   const safeErrors = Object.values(result.lastObservation).flatMap(x => x?.safeErrors ?? []);
-  if (safeErrors.includes("wire-observer-failed")) {
+  if (safeErrors.some(x => ["wire-observer-failed", "lifecycle-observer-failed", "lifecycle-observer-overflow"].includes(x))) {
     result.failureCategory = "observation"; result.failureCode = "WIRE_OBSERVATION_INCOMPLETE";
   } else if (safeErrors.length > 0) {
     result.failureCategory = "communication"; result.failureCode = "REAL_TRANSPORT_ERROR";
@@ -354,6 +395,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   // Never serialize raw page exceptions, frames, hands, library, keys or receipts.
 } finally {
   result.stage = stage; for (const p of pending.values()) clearTimeout(p.timer);
+  await markDriverTeardown();
   socket?.close(); await stop(chrome); await stop(vite); await stop(server);
   await writeFile(path.join(evidence, "two-seat-ui-result.json"), JSON.stringify(result, null, 2) + "\n");
   await writeFile(path.join(evidence, "two-seat-vite.log"), viteLog);
