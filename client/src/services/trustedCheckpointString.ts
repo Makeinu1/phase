@@ -24,11 +24,13 @@ export async function captureTrustedCheckpointString(
 export async function restoreTrustedCheckpointString(
   adapter: Pick<EngineAdapter, "restoreTrustedState">,
   checkpoint: TrustedCheckpointString,
+  isCurrent?: () => boolean,
 ): Promise<void> {
   const json = exports.get(checkpoint);
   if (json === undefined) throw new Error("Unknown or released trusted checkpoint");
   if (!adapter.restoreTrustedState) throw new Error("Trusted restore unavailable");
-  await adapter.restoreTrustedState(json);
+  if (isCurrent) await adapter.restoreTrustedState(json, isCurrent);
+  else await adapter.restoreTrustedState(json);
 }
 
 /** Drop the module's raw-string reference; retained token metadata has no authority. */

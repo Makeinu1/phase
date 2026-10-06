@@ -438,21 +438,28 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     if (this.cardDbLoaded) return Promise.resolve();
     if (this.cardDbPromise) return this.cardDbPromise;
     this.hostUndoObservationGeneration = Symbol();
+    const generation = this.lifecycleGeneration;
+    const engine = this.engine;
+    const fallback = this.fallback;
+    const isCurrent = () => generation === this.lifecycleGeneration
+      && engine === this.engine && fallback === this.fallback;
     const pending = (async () => {
       try {
-        if (this.engine) {
-          const count = await this.engine.loadCardDbFromUrl();
+        if (engine) {
+          const count = await engine.loadCardDbFromUrl();
           console.log(`Card database loaded in worker: ${count} cards`);
-        } else if (this.fallback) {
-          const count = await this.fallback.ensureCardDatabase();
+        } else if (fallback) {
+          const count = await fallback.ensureCardDatabase();
           console.log(`Card database loaded: ${count} cards`);
         }
+        if (!isCurrent()) return;
         this.cardDbLoaded = true;
         if (this.engine && this.aiPool && !this.aiPool.isCardDbLoaded) {
           await this.ensureAiPool();
         }
-        this.cardDbError = null;
+        if (isCurrent()) this.cardDbError = null;
       } catch (err) {
+        if (!isCurrent()) return;
         this.cardDbError = err;
         console.warn("Failed to load card database:", err);
       }
@@ -460,10 +467,11 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     // Clear the in-flight ref once settled so a *failed* load (cardDbLoaded
     // still false) can be retried by a later caller. A successful load
     // short-circuits on the `cardDbLoaded` latch above and never re-enters.
-    this.cardDbPromise = pending.finally(() => {
-      this.cardDbPromise = null;
+    const flight = pending.finally(() => {
+      if (this.cardDbPromise === flight) this.cardDbPromise = null;
     });
-    return this.cardDbPromise;
+    this.cardDbPromise = flight;
+    return flight;
   }
 
   /** Drain the captured panic, defaulting to `null` for the main-thread
@@ -983,12 +991,29 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   /** Preserve engine-exported integers and private runtime without JS decoding. */
-  async restoreTrustedState(json: string): Promise<void> {
+  async restoreTrustedState(json: string, isCurrent?: () => boolean): Promise<void> {
     this.assertInitialized("restoreTrustedState");
+    const generation = this.lifecycleGeneration;
+    const engine = this.engine;
+    const fallback = this.fallback;
+    const assertOwner = () => {
+      if (this.disposed || !this.initialized || generation !== this.lifecycleGeneration
+        || engine !== this.engine || fallback !== this.fallback || (isCurrent && !isCurrent())) {
+        throw new AdapterError(AdapterErrorCode.NOT_INITIALIZED, INITIALIZATION_CANCELED_MESSAGE, true);
+      }
+    };
+    assertOwner();
     this.hostUndoObservationGeneration = Symbol();
-    await this.requireCardDb();
-    if (this.engine) await this.engine.restoreState(json);
-    else await this.fallback!.restoreState(json);
+    try {
+      await this.requireCardDb();
+    } catch (error) {
+      assertOwner();
+      throw error;
+    }
+    assertOwner();
+    if (engine) await engine.restoreState(json);
+    else await fallback!.restoreState(json);
+    assertOwner();
     this.invalidateAiDecisionDiagnostics();
   }
 
@@ -1421,12 +1446,20 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const capturedFallback = this.fallback;
     const lifecycle = this.lifecycleGeneration;
     const lease: InstalledHostLease | null = owner ? { owner, key: crypto.randomUUID(), generation: null } : null;
+    const assertExecutor = () => {
+      if (executor !== (this.engine ?? this.fallback) || lifecycle !== this.lifecycleGeneration) {
+        throw new Error("Host session executor changed before initialization");
+      }
+    };
     if (deckData) {
-      await this.requireCardDb();
+      try {
+        await this.requireCardDb();
+      } catch (error) {
+        assertExecutor();
+        throw error;
+      }
     }
-    if (executor !== (this.engine ?? this.fallback) || lifecycle !== this.lifecycleGeneration) {
-      throw new Error("Host session executor changed before initialization");
-    }
+    assertExecutor();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     if (this.engine) {
       const result = await this.engine.initializeMultiplayerHostGame(

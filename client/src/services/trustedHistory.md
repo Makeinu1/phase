@@ -21,8 +21,14 @@ restore authority, including its existing multiplayer rejection.
   required choices). It must not publish a competing client commit itself.
   Only a terminal, non-mutating rejection may return `rejected`. A throw or
   timeout is uncertain even if transport work continues.
-- Exactly one accepted receipt matching root and the entire committed parent
-  changes the cursor/history. New acceptance drops future checkpoints. Rejection
+- An accepted receipt matching root and the entire committed parent is validated
+  before the required synchronous `commitAccepted` adopts its corresponding
+  paired snapshot. Only a `true` result then changes the cursor/history, with
+  no await between adoption and ledger swap. False/throw (including partial
+  adoption) retains the old ledger/future and pending PRE under recovery lock.
+  Synchronous store subscribers may invalidate ownership or cancel: the manager
+  checks the adopted binding and session again before swapping its ledger.
+  New acceptance drops future checkpoints. Rejection
   or cancellation before submit drops only the pending PRE.
 - Once submit starts, cancellation waits for its terminal result. A canceled or
   stale acceptance, invalid receipt or exception keeps history unchanged and
@@ -39,6 +45,9 @@ restore authority, including its existing multiplayer rejection.
 - Engine/commit failure retains the recovery target. Explicit `recover` repeats
   fence, restore, paired snapshot and fresh-authority commit. The commit port
   must handle a prior partial commit idempotently without reviving old authority.
+  The restore port receives a per-call ownership guard, checked by the adapter
+  at entry, after DB loading and after restore completion. It cannot cancel a
+  posted RPC: same-engine session handoff must first drain all owned RPCs.
   A departed session cannot commit a stale result. Teardown can dispose retained
   checkpoint references after the owning engine session is terminated.
 
@@ -62,7 +71,25 @@ Live retained heap and device measurements are required before choosing a budget
 Before real integration, prove operation-root grouping and accepted engine
 commit mapping, serialization with every mutation route, terminal submit/fence
 behavior, stale-session rejection and partial-commit recovery on the actual
-adapter. Then prove two-seat agreement, ACK/lock/unlock, privacy, old-capability
+  adapter. Then prove two-seat agreement, ACK/lock/unlock, privacy, old-capability
 rejection and fresh continuation. Initial/non-Priority restore eligibility and
 active offers remain separate engine evidence requirements. None of those are
 claimed by the injected unit tests.
+
+The separate `undo-history-adapter.yml` QA campaign uses the normal WasmAdapter
+and module Worker with retained exact e109 WASM. It holds only response delivery,
+including a real 65-second delay past the existing 60-second notification. Its
+fence drains every owned RPC before pinging the captured Worker; ping alone is
+not a fence because the Worker handles asynchronous setup requests concurrently.
+Casting/payment has one actor; resolving/searching/shuffling and advancing past
+required empty combat prompts explicitly group the engine's multiple actor
+continuations. The first submitted actor is checked against the root actor.
+
+Memory observations compare six ordinary roots with identical seed/action trace,
+with and without retained checkpoints, after branch discard and after session
+teardown. Three forced CDP GC rounds separate main/Worker JS heap from the WASM
+allocated region and process RSS peak. A numeric byte-length-only QA observer is
+appended to verified generated bindings; both binding hashes are recorded. The
+store retains the same display histories in the paired runs. These conditional
+measurements do not establish a device budget or a reclamation guarantee. No
+product dispatch, P2P, two-seat agreement or durable format is connected.

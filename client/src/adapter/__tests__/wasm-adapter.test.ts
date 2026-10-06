@@ -891,6 +891,91 @@ describe("WasmAdapter", () => {
   });
 
   describe("restoreState", () => {
+    it("refuses a changed store session on the same adapter after its DB wait", async () => {
+      await adapter.initialize();
+      let finishDb!: (count: number) => void;
+      mockWorkerClient.loadCardDbFromUrl.mockReturnValueOnce(new Promise<number>((resolve) => { finishDb = resolve; }));
+      let current = true;
+      const pending = adapter.restoreTrustedState("old store PRE", () => current);
+      const rejected = expect(pending).rejects.toThrow(AdapterError);
+      await vi.waitFor(() => expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce());
+      current = false; finishDb(9); await rejected;
+      expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+    });
+
+    it("refuses changed store ownership after an already-submitted restore finishes", async () => {
+      await adapter.initialize(); await adapter.restoreTrustedState("baseline");
+      let finishRestore!: () => void;
+      mockWorkerClient.restoreState.mockReturnValueOnce(new Promise<void>((resolve) => { finishRestore = resolve; }));
+      let current = true;
+      const pending = adapter.restoreTrustedState("old store PRE", () => current);
+      const rejected = expect(pending).rejects.toThrow(AdapterError);
+      await vi.waitFor(() => expect(mockWorkerClient.restoreState).toHaveBeenCalledTimes(2));
+      current = false; finishRestore(); await rejected;
+      expect(mockWorkerClient.restoreState).toHaveBeenCalledTimes(2);
+    });
+
+    it("cannot clear a newer DB flight when an old worker load finishes", async () => {
+      await adapter.initialize();
+      let oldDb!: (count: number) => void;
+      mockWorkerClient.loadCardDbFromUrl.mockReturnValueOnce(new Promise<number>((resolve) => { oldDb = resolve; }));
+      const oldRestore = adapter.restoreTrustedState("old PRE");
+      const oldRejected = expect(oldRestore).rejects.toThrow(AdapterError);
+      await vi.waitFor(() => expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce());
+      adapter.dispose();
+      let freshDb!: (count: number) => void;
+      const freshWorker = { ...mockWorkerClient, restoreState: vi.fn().mockResolvedValue(undefined),
+        loadCardDbFromUrl: vi.fn().mockReturnValue(new Promise<number>((resolve) => { freshDb = resolve; })),
+        dispose: vi.fn(), initialize: vi.fn().mockResolvedValue(undefined) };
+      vi.mocked(EngineWorkerClient).mockImplementationOnce(function () { return freshWorker as unknown as EngineWorkerClient; });
+      await adapter.initialize();
+      const first = adapter.restoreTrustedState("fresh first");
+      await vi.waitFor(() => expect(freshWorker.loadCardDbFromUrl).toHaveBeenCalledOnce());
+      oldDb(9); await oldRejected;
+      const second = adapter.restoreTrustedState("fresh second");
+      await Promise.resolve(); expect(freshWorker.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      freshDb(9); await Promise.all([first, second]);
+      expect(freshWorker.loadCardDbFromUrl).toHaveBeenCalledOnce();
+    });
+
+    it("refuses an old trusted restore after DB wait and cannot poison a reincarnated worker", async () => {
+      await adapter.initialize();
+      let finishDb!: (count: number) => void;
+      mockWorkerClient.loadCardDbFromUrl.mockReturnValueOnce(new Promise<number>((resolve) => { finishDb = resolve; }));
+      const pending = adapter.restoreTrustedState("old trusted PRE");
+      const rejected = expect(pending).rejects.toThrow(AdapterError);
+      await vi.waitFor(() => expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce());
+      adapter.dispose();
+      const freshWorker = { ...mockWorkerClient,
+        restoreState: vi.fn().mockResolvedValue(undefined), loadCardDbFromUrl: vi.fn().mockResolvedValue(9),
+        dispose: vi.fn(), initialize: vi.fn().mockResolvedValue(undefined) };
+      vi.mocked(EngineWorkerClient).mockImplementationOnce(function () { return freshWorker as unknown as EngineWorkerClient; });
+      await adapter.initialize();
+      finishDb(9);
+      await rejected;
+      expect(freshWorker.restoreState).not.toHaveBeenCalled();
+      expect(adapter.cardDbLoaded).toBe(false);
+      await adapter.restoreTrustedState("new trusted PRE");
+      expect(freshWorker.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(freshWorker.restoreState).toHaveBeenCalledExactlyOnceWith("new trusted PRE");
+    });
+
+    it("rejects an old restore completion after worker reincarnation", async () => {
+      await adapter.initialize();
+      await adapter.restoreTrustedState("baseline");
+      let finishRestore!: () => void;
+      mockWorkerClient.restoreState.mockReturnValueOnce(new Promise<void>((resolve) => { finishRestore = resolve; }));
+      const pending = adapter.restoreTrustedState("old pending PRE");
+      const rejected = expect(pending).rejects.toThrow(AdapterError);
+      await vi.waitFor(() => expect(mockWorkerClient.restoreState).toHaveBeenCalledTimes(2));
+      adapter.dispose();
+      const freshWorker = { ...mockWorkerClient, restoreState: vi.fn().mockResolvedValue(undefined), dispose: vi.fn(), initialize: vi.fn().mockResolvedValue(undefined) };
+      vi.mocked(EngineWorkerClient).mockImplementationOnce(function () { return freshWorker as unknown as EngineWorkerClient; });
+      await adapter.initialize();
+      finishRestore(); await rejected;
+      expect(freshWorker.restoreState).not.toHaveBeenCalled();
+    });
+
     it("passes trusted raw unsafe integers unchanged to the worker after loading the DB", async () => {
       await adapter.initialize();
       const raw = ' { "u64":18446744073709551615,"u128":340282366920938463463374607431768211455 }\n';

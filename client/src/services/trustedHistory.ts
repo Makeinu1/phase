@@ -35,6 +35,11 @@ export interface HistoryPorts {
   isSessionCurrent(binding: HistoryBinding): boolean;
   /** Resolves only after the entire operation root has been accepted. Rejection is non-mutating. */
   submit(operation: HistoryOperation, parent: HistoryBinding): Promise<HistoryAcceptance>;
+  /**
+   * Synchronously adopt the corresponding engine snapshot before history changes.
+   * False/throw may follow partial store effects: retain PRE and recovery lock.
+   */
+  commitAccepted(receipt: Extract<HistoryAcceptance, { status: "accepted" }>): boolean;
   /** Non-mutating preflight. No engine calls may occur here. */
   beforeRestore?(): Promise<void>;
   /** Drain/fence ALL previously submitted mutations. No old submit may mutate after resolution. */
@@ -123,6 +128,7 @@ export class TrustedHistory {
     const parent = this.binding;
     let checkpoint: TrustedCheckpointString | null = null;
     let submitted = false;
+    let commitAttempted = false;
     try {
       const root = Object.freeze({ rootId: operation.rootId, actor: operation.actor });
       if (!root.rootId || this.entries.some((entry) => entry.operation.rootId === root.rootId
@@ -149,6 +155,11 @@ export class TrustedHistory {
         || receipt.commitSeq <= parent.commitSeq) throw new Error("Stale or invalid acceptance");
       const nextBinding = copyBinding({ ...parent, commitSeq: receipt.commitSeq });
       candidate.acceptedCommitSeq = receipt.commitSeq;
+      commitAttempted = true;
+      if (this.ports.commitAccepted(receipt) !== true) throw new Error("Accepted snapshot adoption failed");
+      if (this.canceled || !this.ports.isSessionCurrent(nextBinding) || !this.ports.isCurrent(nextBinding)) {
+        throw new Error("Stale adopted snapshot");
+      }
       this.entries = nextEntries;
       this.cursor = nextEntries.length;
       this.binding = nextBinding;
@@ -159,7 +170,7 @@ export class TrustedHistory {
       if (submitted && checkpoint) {
         // A throw or stale acceptance can follow an engine mutation. Roll back to
         // the captured PRE with fresh authority; never unlock using the old cursor.
-        this.recovery = { checkpoint, cursor: this.cursor, pending: true, commitAttempted: false };
+        this.recovery = { checkpoint, cursor: this.cursor, pending: true, commitAttempted };
         checkpoint = null;
         this.phase = "recovery";
       }
@@ -202,7 +213,9 @@ export class TrustedHistory {
       await this.ports.fenceMutations();
       if (!this.ports.isSessionCurrent(previous)) throw new Error("Stale restore session");
       if (!recovery.commitAttempted && !this.ports.isCurrent(previous)) throw new Error("Stale restore binding");
-      await restoreTrustedCheckpointString(this.ports.adapter, recovery.checkpoint);
+      await restoreTrustedCheckpointString(this.ports.adapter, recovery.checkpoint,
+        () => this.ports.isSessionCurrent(previous)
+          && (recovery.commitAttempted || this.ports.isCurrent(previous)));
       const snapshot = await this.ports.adapter.getSnapshot();
       if (!this.ports.isSessionCurrent(previous)
         || (!recovery.commitAttempted && !this.ports.isCurrent(previous))) throw new Error("Stale restore result");
@@ -213,7 +226,11 @@ export class TrustedHistory {
         || !Number.isSafeInteger(fresh.commitSeq) || fresh.commitSeq !== snapshot.seq || fresh.commitSeq <= previous.commitSeq) {
         throw new Error("Restore commit did not invalidate old authority");
       }
-      this.binding = copyBinding(fresh);
+      const adopted = copyBinding(fresh);
+      if (!this.ports.isSessionCurrent(adopted) || !this.ports.isCurrent(adopted)) {
+        throw new Error("Stale adopted restore");
+      }
+      this.binding = adopted;
       this.cursor = recovery.cursor;
       if (recovery.pending) releaseTrustedCheckpointString(recovery.checkpoint);
       this.pendingBytes = 0;

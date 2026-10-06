@@ -30,9 +30,13 @@ function setup(budget?: number) {
       raw = `POST-${operation.rootId}`;
       return { status: "accepted", rootId: operation.rootId, parent, commitSeq: ++seq };
     }),
+    commitAccepted: vi.fn(() => true),
     beforeRestore: vi.fn(async () => {}),
     fenceMutations: vi.fn(async () => {}),
-    commitRestore: vi.fn((snapshot, previous) => ({ ...previous, branchId: `branch-${snapshot.seq}`, generation: previous.generation + 1, commitSeq: snapshot.seq })),
+    commitRestore: vi.fn((snapshot, previous) => {
+      current = true;
+      return { ...previous, branchId: `branch-${snapshot.seq}`, generation: previous.generation + 1, commitSeq: snapshot.seq };
+    }),
     prepareStorage: vi.fn(),
   };
   const history = new TrustedHistory(ports, binding, budget);
@@ -46,6 +50,61 @@ function timeline(history: TrustedHistory) {
 }
 
 describe("unconnected trusted history transaction", () => {
+  it.each(["session", "binding"])("keeps restore PRE/cursor locked if adopted restore loses %s", async (fault) => {
+    const s = setup(); await s.perform("a"); const before = timeline(s.history);
+    const bytes = s.history.inspect().retainedBytes;
+    vi.mocked(s.ports.commitRestore).mockImplementationOnce((snapshot, previous) => {
+      if (fault === "session") s.newSession(); else s.stale();
+      return { ...previous, branchId: "fresh", generation: previous.generation + 1, commitSeq: snapshot.seq };
+    });
+    await expect(s.history.undo()).rejects.toThrow("Stale adopted restore");
+    expect(timeline(s.history)).toEqual(before);
+    expect(s.history.inspect()).toMatchObject({ phase: "recovery", retainedBytes: bytes });
+    await expect(s.perform("blocked")).rejects.toThrow("locked");
+    if (fault === "session") { await expect(s.history.recover()).rejects.toThrow("Stale restore session"); s.history.dispose(); }
+    else { await s.history.recover(); expect(s.history.inspect()).toMatchObject({ phase: "idle", cursor: 0, retainedBytes: bytes }); }
+  });
+
+  it("adopts the accepted pair while locked before replacing history", async () => {
+    const s = setup();
+    vi.mocked(s.ports.commitAccepted).mockImplementationOnce((receipt) => {
+      expect(s.history.inspect()).toMatchObject({ phase: "submit", cursor: 0, entries: [] });
+      expect(receipt).toMatchObject({ rootId: "a", parent: s.binding, commitSeq: 2 });
+      return true;
+    });
+    await expect(s.perform("a")).resolves.toBe("accepted");
+    expect(s.ports.commitAccepted).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["false", "throw", "partial", "session", "cancel", "binding"])(
+    "keeps old history/future and pending PRE locked after %s adoption", async (fault) => {
+      const s = setup(); await s.perform("a"); await s.perform("b"); await s.history.undo();
+      const before = timeline(s.history); const bytes = s.history.inspect().retainedBytes;
+      vi.mocked(s.ports.commitAccepted).mockImplementationOnce(() => {
+        if (fault === "false") return false;
+        if (fault === "throw") throw new Error("before adoption");
+        if (fault === "partial") { s.stale(); throw new Error("partial adoption"); }
+        if (fault === "session") s.newSession();
+        if (fault === "cancel") s.history.cancelPending();
+        if (fault === "binding") s.stale();
+        return true;
+      });
+      await expect(s.perform("new")).rejects.toThrow();
+      expect(timeline(s.history)).toEqual(before);
+      expect(s.history.inspect()).toMatchObject({ phase: "recovery", retainedBytes: bytes + 6 });
+      await expect(s.perform("forbidden")).rejects.toThrow("locked");
+      if (fault === "session") {
+        await expect(s.history.recover()).rejects.toThrow("Stale restore session");
+        s.history.dispose();
+      } else {
+        await s.history.recover();
+        expect(s.raw()).toBe("POST-a");
+        expect(s.history.inspect()).toMatchObject({ phase: "idle", cursor: before.cursor,
+          entries: before.entries, retainedBytes: bytes });
+      }
+    },
+  );
+
   it("captures and reserves BEFORE submit, binds actor/root/parent and confirms once", async () => {
     const s = setup();
     await expect(s.perform("cast-and-payment", 1)).resolves.toBe("accepted");
