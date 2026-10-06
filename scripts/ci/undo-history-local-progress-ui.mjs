@@ -9,6 +9,7 @@ import { useGameStore } from './src/stores/gameStore';
 import { usePreferencesStore } from './src/stores/preferencesStore';
 import { useConnectivityStore } from './src/stores/connectivityStore';
 import { getPlayerId } from './src/hooks/usePlayerId';
+import { isDispatchIdle } from './src/game/dispatch';
 import { currentLocalHistory } from './src/game/localHistorySession';
 
 const check = (ok, code) => { if (!ok) throw Error(code); };
@@ -79,10 +80,26 @@ async function localStart(id, enabled, first = false) {
   } else route(localPath(id, enabled));
   await until(() => game().gameId === id && game().gameMode === 'local' && pending().includes(0) && pending().includes(1), 'real-Local-initialized-both-mulligans-pending');
   await until(() => enabled ? currentLocalHistory()?.ownsSession() && game().localHistory?.phase === 'idle' : !currentLocalHistory() && !game().localHistory, 'expected-history-mode');
-  return sessionWorker(beforeInitialization);
+  const worker = sessionWorker(beforeInitialization);
+  const initialization = worker.sessions.findLast(s => s.serial > beforeInitialization && s.adapter === game().adapter);
+  const actionStart = initialization.actionStart;
+  // ON prepares these before adoption; OFF sends them from the existing
+  // preferences hook after adoption. Wait for that normal startup boundary.
+  await until(() => {
+    const actions = worker.actions.slice(actionStart);
+    return actions.some(a => a.action.type === 'SetPhaseStops' && a.responseType === 'result')
+      && actions.some(a => a.action.type === 'SetPriorityPassingMode' && a.responseType === 'result')
+      && isDispatchIdle() && game().gameState?.priority_passing_modes?.[0] === 'FullControl'
+      && JSON.stringify(game().gameState?.phase_stops?.[0] ?? []) === '[]';
+  }, 'normal-Local-startup-preferences-acknowledged');
+  const setupActions = worker.actions.slice(actionStart);
+  check(setupActions.length === 2 && setupActions.every(a => a.transport === 'submitAction' && a.actor === 0 && a.responseType === 'result')
+    && setupActions.some(a => a.action.type === 'SetPhaseStops' && JSON.stringify(a.action.data.stops) === '[]')
+    && setupActions.some(a => a.action.type === 'SetPriorityPassingMode' && a.action.data.mode === 'FullControl'), 'only-two-existing-startup-preferences-with-exact-values');
+  return { worker, setupActions, initialization: { serial: initialization.serial, actionStart } };
 }
 async function localBlocked(id, enabled, first = false) {
-  const worker = await localStart(id, enabled, first), start = worker.actions.length;
+  const { worker, setupActions, initialization } = await localStart(id, enabled, first), start = worker.actions.length;
   stage = `Local-history-${enabled ? 'ON' : 'OFF'}-after-real-Keep`;
   await button('Keep Hand');
   await until(() => pending().length === 1 && pending()[0] === 1 && (!enabled || game().localHistory.phase === 'idle'), 'seat-zero-Keep-committed-seat-one-remains-pending');
@@ -102,7 +119,8 @@ async function localBlocked(id, enabled, first = false) {
   await input(null, enabled ? 'local-history-on-blocked' : 'local-history-off-blocked', null, true);
   scenarios.push({ mode: 'local', historyEnabled: enabled, gameId: id, worker: worker.identity, pass: true,
     result: 'existing-product-progression-blocked', pending: pending(), operationSeat: getPlayerId(), keepControls,
-    visibleMessage: message, submissions: submitted, observationMs: 1200, stateStationary: true,
+    visibleMessage: message, initialization, setupActions, submissions: submitted,
+    actionCounts: { beforeKeep: start, committedKeep: count, afterStationaryWindow: worker.actions.length }, observationMs: 1200, stateStationary: true,
     rawStateSha256: await hash(after), landReached: false, landUndoReexecution: 'NOT RUN: no product seat-one decision path' });
   mark(`Local-history-${enabled ? 'ON' : 'OFF'}-same-seat-one-progress-blocker-confirmed`);
   return worker;
