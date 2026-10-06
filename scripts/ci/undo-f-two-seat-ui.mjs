@@ -260,24 +260,29 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
       const started=Date.now(), deadline=started+30000;
       const witness=result[key]={samples:[],sampleCount:0,ready:false};
       const timeout = () => Object.assign(Error("app hand target not pointer-ready"), {qaDeadline:true});
-      const read = async expression => {
+      const run = async operation => {
         const remaining=deadline-Date.now(); if(remaining<=0)throw timeout();
         let timer;
         try {
           // No read outlives the remaining budget or the existing15s CDP limit.
-          const value=await Promise.race([evaluate(expression),new Promise((_,reject)=>{timer=setTimeout(()=>reject(timeout()),Math.min(remaining,15000));})]);
+          const value=await Promise.race([operation(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(timeout()),Math.min(remaining,15000));})]);
           if(Date.now()>=deadline)throw timeout(); return value;
         } finally { clearTimeout(timer); }
       };
+      const read = expression => run(() => evaluate(expression));
       try {
         // One initial target selection; all later samples keep that node locked.
         const initial=await read("window.__twoSeatQa.cardPoint()"); witness.initialPoint=initial;
         assert(initial, "app hand target not pointer-ready");
+        // Ordinary pointer arrival precedes hover-sensitive readiness. Keep
+        // this exact coordinate through settling and both original clicks.
+        await run(() => cdp("Input.dispatchMouseEvent", {type:"mouseMoved",x:initial.x,y:initial.y,button:"none",buttons:0}, sessionId));
+        witness.nativePointerArrivalCompleted=true;
         let previous, stable=0;
         while (Date.now()<deadline) {
           await read("new Promise(resolve=>requestAnimationFrame(resolve))");
-          const sample=await read(`(()=>{const p=window.__twoSeatQa.lockedCardPoint();const x=p?.x??${initial.x},y=p?.y??${initial.y};
-const shape=(${publicNodeShape});return {pointAvailable:Boolean(p),...window.__twoSeatQa.handPointerSnapshot(x,y),
+          const sample=await read(`(()=>{const x=${initial.x},y=${initial.y},snapshot=window.__twoSeatQa.handPointerSnapshot(x,y);
+const shape=(${publicNodeShape});return {pointAvailable:Boolean(snapshot.intendedNodeConnected&&snapshot.hitIntended),...snapshot,
 pointer:{x,y},hitElements:document.elementsFromPoint(x,y).slice(0,3).map(shape)};})()`);
           if(Date.now()>=deadline)throw timeout();
           witness.sampleCount++; witness.samples.push(sample); if(witness.samples.length>10)witness.samples.shift();
