@@ -1122,8 +1122,8 @@ jobs:
                 elif .name == "experimental_availability" then .evidence | {
                   initialize_experimental_local_game:(.initialize_experimental_local_game | boolean), experimental_local_actor:(.experimental_local_actor | boolean)}
                 else null end)}]}' > "$MANUAL_EVIDENCE/baseline-terminal.json"
-          jq '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
-            (if (.evidence | type) == "array" then [.evidence[] | {name,status}] else null end)}]}' \
+          jq -c '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
+            (if (.evidence | type) == "array" then (.evidence | length) else null end)}]}' \
             "$MANUAL_EVIDENCE/baseline-terminal.json"
           jq -e '.status == "fail" and .reason == "expected-experimental-availability" and
             (.rows | length == 4) and
