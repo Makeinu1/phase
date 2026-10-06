@@ -65,7 +65,7 @@ process.env.MULTIPLAYER_SERVER_URL = 'ws://127.0.0.1:9';
 const { createServer } = await import(pathToFileURL(path.join(candidate, 'client/node_modules/vite/dist/node/index.js')));
 vite = await createServer({ root: client, configFile: path.join(client, 'vite.config.ts'),
   server: { host: '127.0.0.1', port: 0, strictPort: false },
-  plugins: [{ name: 'isolated-history-QA-entry', transformIndexHtml: () => '<!doctype html><title>isolated history QA</title><script type="module" src="/qa-history-adapter.mjs"></script>' }],
+  plugins: [{ name: 'isolated-history-QA-entry', transformIndexHtml: { order: 'pre', handler: () => '<!doctype html><title>isolated history QA</title><script type="module" src="/qa-history-adapter.mjs"></script>' } }],
 });
 await vite.listen();
 }
@@ -154,11 +154,13 @@ try {
   await call('Page.navigate', { url: `http://127.0.0.1:${vite.httpServer.address().port}/` }, pageSession);
   let ready = false;
   for (let n = 0; n < 120 && !ready; n++) { ready = await evaluate('typeof globalThis.__qaStart === "function"'); if (!ready) await pause(250); }
+  const devRuntimeDefines = await evaluate('({telemetryDisabled: typeof __TELEMETRY_URL__ !== "undefined" && __TELEMETRY_URL__ === "", cardFixture: typeof __CARD_DATA_URL__ !== "undefined" && __CARD_DATA_URL__ === "/qa-history-cards.json"})');
   moduleDiagnosticsActive = false;
-  await writeFile(path.join(evidence, 'qa-module-selfcheck.json'), JSON.stringify({ pass: ready && moduleErrors.length === 0 && !bootstrapEngineWorkerSeen,
-    candidateSha: process.env.GITHUB_SHA, mode, ready, moduleErrors, phaseEngineStarted: bootstrapEngineWorkerSeen ? 'unknown' : false,
+  const modulePass = ready && moduleErrors.length === 0 && !bootstrapEngineWorkerSeen && devRuntimeDefines.telemetryDisabled && devRuntimeDefines.cardFixture;
+  await writeFile(path.join(evidence, 'qa-module-selfcheck.json'), JSON.stringify({ pass: modulePass,
+    candidateSha: process.env.GITHUB_SHA, mode, ready, moduleErrors, devRuntimeDefines, phaseEngineStarted: bootstrapEngineWorkerSeen ? 'unknown' : false,
     engineWorkerEverAttached: bootstrapEngineWorkerSeen, draftBindingUnmodified: true, draftBindingSha256: digest(draftGlue) }, null, 2) + '\n');
-  assert(ready && moduleErrors.length === 0 && !bootstrapEngineWorkerSeen, 'QA module dependency selfcheck failed before campaign');
+  assert(modulePass, 'QA module dependency selfcheck failed before campaign');
   if (moduleOnly) console.log(JSON.stringify({ pass: true, stage, phaseEngineStarted: false }));
   else {
   await evaluate('globalThis.__qaStart(); true');
