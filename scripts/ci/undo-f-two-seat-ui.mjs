@@ -133,7 +133,9 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
       assert(!a.exceptionDetails, "app operation failed"); return a.result.value;
     };
     const wait = async (expression, seconds = 30) => {
-      for (let i = 0; i < seconds * 10; i++) { if (await evaluate(expression)) return; await pause(100); }
+      // DOM readiness predicates stay inside the page. Serializing a React DOM
+      // node by value traverses its cyclic fiber properties and fails in CDP.
+      for (let i = 0; i < seconds * 10; i++) { if (await evaluate(`Boolean(${expression})`)) return; await pause(100); }
       throw Object.assign(Error("app stage deadline"), { qaDeadline: true });
     };
     const point = async (x, y, double = false) => {
