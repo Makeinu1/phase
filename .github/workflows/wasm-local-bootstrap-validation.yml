@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
@@ -14,9 +15,22 @@ concurrency:
 
 env:
   # Product source is admitted only after a measured qualifying baseline RED.
-  # The later product checkpoint must explicitly replace this fixed lane.
-  BOOTSTRAP_CHECKPOINT_MODE: baseline-red
+  # P builds once. C changes only this mode and measured public pin literals.
+  BOOTSTRAP_CHECKPOINT_MODE: baseline-runtime-producer
   BOOTSTRAP_BASE_SHA: 8fcd0f33451058f55b110e707d50497545763615
+  BOOTSTRAP_BASE_TREE: 85f6682f6a2db68e5a67e23719f2126e3d241133
+  BOOTSTRAP_GUARD_SHA256: c81e0b02104ff4bbb4a9249faf26bedb70c23cb0bfc08b6138767c60a85d6dcc
+  BOOTSTRAP_PRODUCER_SHA: ''
+  BOOTSTRAP_PRODUCER_TREE: ''
+  BOOTSTRAP_PRODUCER_WORKFLOW_SHA256: ''
+  BOOTSTRAP_PRODUCER_GUARD_SHA256: ''
+  BOOTSTRAP_PRODUCER_RUN_ID: ''
+  BOOTSTRAP_PRODUCER_RUN_ATTEMPT: ''
+  BOOTSTRAP_RUNTIME_ARTIFACT_ID: ''
+  BOOTSTRAP_RUNTIME_ZIP_SHA256: ''
+  BOOTSTRAP_RUNTIME_ZIP_SIZE: ''
+  BOOTSTRAP_PROVENANCE_SHA256: ''
+  BOOTSTRAP_RUNTIME_FILES: ''
   MANUAL_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
   MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-evidence
   CARGO_INCREMENTAL: '0'
@@ -32,12 +46,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Checkout immutable candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: candidate-source
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Checkout immutable baseline source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.BOOTSTRAP_BASE_SHA }}
           path: baseline-source
@@ -45,7 +61,10 @@ jobs:
       - name: Require explicit baseline checkpoint and clean independent sources
         working-directory: candidate-source
         run: |
-          test "$BOOTSTRAP_CHECKPOINT_MODE" = baseline-red
+          case "$BOOTSTRAP_CHECKPOINT_MODE" in
+            baseline-runtime-producer|baseline-red) ;;
+            *) printf '{"error":"runtime-pin-invalid"}\n'; exit 1 ;;
+          esac
           mkdir -p "$MANUAL_EVIDENCE" "$RUNNER_TEMP/bootstrap-bindgen-baseline"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-wasm-target"
           printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
@@ -57,23 +76,112 @@ jobs:
           git -C ../candidate-source rev-parse HEAD HEAD^{tree} > "$MANUAL_EVIDENCE/candidate-source.txt"
           sha256sum Cargo.lock client/pnpm-lock.yaml rust-toolchain.toml .cargo/config.toml \
             > "$MANUAL_EVIDENCE/baseline-inputs.sha256"
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      - name: Verify fixed public source and recipe inputs
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py baseline-runtime-inputs python3 - 2>/dev/null <<'INPUTS'
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+          try:
+              pins = {
+                  'Cargo.lock': '5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0',
+                  'client/pnpm-lock.yaml': 'bc13ba1f6de5efd5bc724d9945aa541136df1d6938a41c53768f76c7b36c4ea4',
+                  'rust-toolchain.toml': '52562c175563386d0f9f19afafd2855662ef2590765204b35bd624de13fe67af',
+                  '.cargo/config.toml': 'da039ac38eb9d43e236e9eb89c65ef30a149d0539ed7ebfb3ee8f1d78b383c66',
+              }
+              for source in [Path('.'), Path('../baseline-source')]:
+                  assert all(hashlib.sha256((source / name).read_bytes()).hexdigest() == value
+                             for name, value in pins.items())
+              tree = subprocess.check_output(['git', '-C', '../baseline-source', 'rev-parse', 'HEAD^{tree}'],
+                                             stderr=subprocess.DEVNULL, text=True).strip()
+              assert tree == os.environ['BOOTSTRAP_BASE_TREE']
+              assert hashlib.sha256(Path('scripts/ci/manual-integration-guard.py').read_bytes()).hexdigest() == os.environ['BOOTSTRAP_GUARD_SHA256']
+              assert os.environ['GITHUB_REPOSITORY'] == 'Makeinu1/phase'
+              assert os.environ['GITHUB_REPOSITORY_ID'] == '1377698441'
+              assert os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
+              assert os.environ['CARGO_BUILD_JOBS'] == '1' and os.environ['CARGO_INCREMENTAL'] == '0'
+              assert not any(value for name, value in os.environ.items() if
+                             name.startswith('CARGO_PROFILE_') or name in [
+                                 'CARGO_BUILD_TARGET', 'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTDOC',
+                                 'RUSTC', 'RUSTDOC', 'ENGINE_WASM_URL'])
+              if os.environ['BOOTSTRAP_CHECKPOINT_MODE'] == 'baseline-red':
+                  for name, length in [
+                      ('BOOTSTRAP_PRODUCER_SHA', 40), ('BOOTSTRAP_PRODUCER_TREE', 40),
+                      ('BOOTSTRAP_PRODUCER_WORKFLOW_SHA256', 64), ('BOOTSTRAP_PRODUCER_GUARD_SHA256', 64),
+                      ('BOOTSTRAP_RUNTIME_ZIP_SHA256', 64), ('BOOTSTRAP_PROVENANCE_SHA256', 64),
+                  ]:
+                      assert re.fullmatch('[a-f0-9]{' + str(length) + '}', os.environ[name])
+                  assert os.environ['BOOTSTRAP_PRODUCER_GUARD_SHA256'] == os.environ['BOOTSTRAP_GUARD_SHA256']
+                  for name in ['BOOTSTRAP_PRODUCER_RUN_ID', 'BOOTSTRAP_PRODUCER_RUN_ATTEMPT',
+                               'BOOTSTRAP_RUNTIME_ARTIFACT_ID', 'BOOTSTRAP_RUNTIME_ZIP_SIZE']:
+                      assert re.fullmatch('[1-9][0-9]*', os.environ[name])
+                  files = json.loads(os.environ['BOOTSTRAP_RUNTIME_FILES'])
+                  assert set(files) == {'engine_wasm.js', 'engine_wasm_bg.wasm', 'engine_wasm.d.ts', 'engine_wasm_bg.wasm.d.ts'}
+                  assert all(set(value) == {'size', 'sha256'} and type(value['size']) is int and value['size'] > 0 and
+                             re.fullmatch('[a-f0-9]{64}', value['sha256']) for value in files.values())
+              print('{"runtime_inputs_verified":true}')
+          except Exception:
+              print('{"error":"runtime-pin-invalid"}')
+              raise SystemExit(1)
+          INPUTS
+      - name: Install pinned producer Rust toolchain
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: nightly-2026-04-19
           target: wasm32-unknown-unknown
           rust-src-dir: baseline-source
           cache: false
           rustflags: ''
-      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+      - name: Install pinned producer bindgen
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: wasm-bindgen-cli@0.2.121
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Verify actual pinned producer tools
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py producer-tools python3 - 2>/dev/null <<'PRODUCER_TOOLS'
+          import datetime, os, re, subprocess
+          try:
+              assert os.environ['CARGO_BUILD_JOBS'] == '1' and os.environ['CARGO_INCREMENTAL'] == '0'
+              assert not any(value for name, value in os.environ.items() if name.startswith('CARGO_PROFILE_'))
+              def read(argv):
+                  return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True).strip()
+              active = read(['rustup', 'show', 'active-toolchain']).split()[0]
+              assert active == 'nightly-2026-04-19-x86_64-unknown-linux-gnu'
+              verbose = read(['rustc', '-Vv'])
+              assert verbose == read(['rustup', 'run', 'nightly-2026-04-19', 'rustc', '-Vv'])
+              fields = dict(line.split(': ', 1) for line in verbose.splitlines()[1:])
+              assert set(fields) == {'binary', 'commit-hash', 'commit-date', 'host', 'release', 'LLVM version'}
+              assert fields['binary'] == 'rustc' and fields['host'] == 'x86_64-unknown-linux-gnu'
+              assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+-nightly', fields['release'])
+              assert re.fullmatch('[a-f0-9]{40}', fields['commit-hash'])
+              assert datetime.date.fromisoformat(fields['commit-date']) <= datetime.date(2026, 4, 19)
+              assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+', fields['LLVM version'])
+              cargo = read(['cargo', '-V'])
+              assert cargo == read(['rustup', 'run', 'nightly-2026-04-19', 'cargo', '-V'])
+              assert re.fullmatch(r'cargo [0-9]+[.][0-9]+[.][0-9]+-nightly \([a-f0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)', cargo)
+              assert read(['wasm-bindgen', '--version']) == 'wasm-bindgen 0.2.121'
+              assert 'wasm32-unknown-unknown' in read(['rustup', 'target', 'list', '--installed']).splitlines()
+              print('{"producer_tools_verified":true}')
+          except Exception:
+              print('{"error":"runtime-provenance-mismatch"}')
+              raise SystemExit(1)
+          PRODUCER_TOOLS
+      - name: Install pinned consumer pnpm
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 9.15.9
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - name: Install pinned consumer Node
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.16.0
       - name: Verify actual hosted tools without browser downloads
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py hosted-tools bash -euo pipefail <<'TOOLS'
@@ -86,9 +194,6 @@ jobs:
           test -n "$driver_binary"
           test -x "$driver_binary"
           printf 'BOOTSTRAP_CHROMEDRIVER=%s\n' "$driver_binary" >> "$GITHUB_ENV"
-          rustc -Vv >/dev/null
-          cargo -V >/dev/null
-          test "$(wasm-bindgen --version)" = 'wasm-bindgen 0.2.121'
           test "$(node --version)" = v22.16.0
           test "$(pnpm --version)" = 9.15.9
           chrome_major=$(google-chrome --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
@@ -98,26 +203,31 @@ jobs:
           printf '{"hosted_tools_verified":true}\n'
           TOOLS
       - name: Install one frozen candidate client dependency tree
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py client-dependencies \
             bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile >/dev/null 2>&1'
       - name: Check full candidate client types
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py client-types \
             bash -euo pipefail -c 'pnpm --dir client run type-check >/dev/null 2>&1'
       - name: Lint full candidate client
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py client-lint \
             bash -euo pipefail -c 'pnpm --dir client run lint >/dev/null 2>&1'
       - name: Check candidate protocol
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py client-protocol \
             bash -euo pipefail -c 'pnpm --dir client run protocol:check >/dev/null 2>&1'
       - name: Compile immutable baseline engine WASM once, default off
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
         working-directory: baseline-source
         run: |
           MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
@@ -125,6 +235,7 @@ jobs:
             bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown \
             --profile wasm-dev --no-default-features >/dev/null 2>&1'
       - name: Bind the baseline artifact outside both source trees
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
         working-directory: baseline-source
         run: |
           MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
@@ -132,7 +243,522 @@ jobs:
             bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm \
             --out-dir "$RUNNER_TEMP/bootstrap-bindgen-baseline" \
             "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm" >/dev/null 2>&1'
+      - name: Independently check producer source trees after build
+        if: always() && env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py candidate-source-after true
+          cd ../baseline-source
+          MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA" \
+            python3 ../candidate-source/scripts/ci/manual-integration-guard.py baseline-source-after true
+      - name: Package exact public baseline runtime
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
+        working-directory: candidate-source
+        run: |
+          python3 scripts/ci/manual-integration-guard.py baseline-runtime-package python3 - 2>/dev/null <<'PACKAGE'
+          import datetime, hashlib, json, os, re, shutil, subprocess
+          from pathlib import Path
+          try:
+              def read(argv):
+                  return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True).strip()
+              def digest(path):
+                  return hashlib.sha256(path.read_bytes()).hexdigest()
+              inputs = {
+                  'Cargo.lock': '5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0',
+                  'client/pnpm-lock.yaml': 'bc13ba1f6de5efd5bc724d9945aa541136df1d6938a41c53768f76c7b36c4ea4',
+                  'rust-toolchain.toml': '52562c175563386d0f9f19afafd2855662ef2590765204b35bd624de13fe67af',
+                  '.cargo/config.toml': 'da039ac38eb9d43e236e9eb89c65ef30a149d0539ed7ebfb3ee8f1d78b383c66',
+              }
+              base_sha, base_tree = os.environ['BOOTSTRAP_BASE_SHA'], os.environ['BOOTSTRAP_BASE_TREE']
+              producer_sha, producer_tree = read(['git', 'rev-parse', 'HEAD']), read(['git', 'rev-parse', 'HEAD^{tree}'])
+              assert producer_sha == os.environ['MANUAL_EXPECTED_SOURCE_SHA']
+              assert read(['git', '-C', '../baseline-source', 'rev-parse', 'HEAD']) == base_sha
+              assert read(['git', '-C', '../baseline-source', 'rev-parse', 'HEAD^{tree}']) == base_tree
+              assert all(digest(source / name) == value for source in [Path('.'), Path('../baseline-source')]
+                         for name, value in inputs.items())
+              guard_hash = digest(Path('scripts/ci/manual-integration-guard.py'))
+              assert guard_hash == os.environ['BOOTSTRAP_GUARD_SHA256']
+              assert os.environ['CARGO_BUILD_JOBS'] == '1' and os.environ['CARGO_INCREMENTAL'] == '0'
+              assert not any(value for name, value in os.environ.items() if name.startswith('CARGO_PROFILE_'))
+              active = read(['rustup', 'show', 'active-toolchain']).split()[0]
+              assert active == 'nightly-2026-04-19-x86_64-unknown-linux-gnu'
+              verbose = read(['rustc', '-Vv'])
+              assert verbose == read(['rustup', 'run', 'nightly-2026-04-19', 'rustc', '-Vv'])
+              fields = dict(line.split(': ', 1) for line in verbose.splitlines()[1:])
+              assert set(fields) == {'binary', 'commit-hash', 'commit-date', 'host', 'release', 'LLVM version'}
+              assert fields['binary'] == 'rustc' and fields['host'] == 'x86_64-unknown-linux-gnu'
+              assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+-nightly', fields['release'])
+              assert re.fullmatch('[a-f0-9]{40}', fields['commit-hash'])
+              assert datetime.date.fromisoformat(fields['commit-date']) <= datetime.date(2026, 4, 19)
+              assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+', fields['LLVM version'])
+              cargo = read(['cargo', '-V'])
+              assert cargo == read(['rustup', 'run', 'nightly-2026-04-19', 'cargo', '-V'])
+              assert re.fullmatch(r'cargo [0-9]+[.][0-9]+[.][0-9]+-nightly \([a-f0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)', cargo)
+              assert read(['wasm-bindgen', '--version']) == 'wasm-bindgen 0.2.121'
+              toolchain = {'active': active, 'release': fields['release'], 'commit_hash': fields['commit-hash'],
+                           'commit_date': fields['commit-date'], 'host': fields['host'], 'llvm': fields['LLVM version'],
+                           'cargo': cargo, 'bindgen': 'wasm-bindgen 0.2.121'}
+              compile_argv = ['cargo', 'build', '--locked', '-p', 'engine-wasm', '--target',
+                              'wasm32-unknown-unknown', '--profile', 'wasm-dev', '--no-default-features']
+              bindgen_argv = ['wasm-bindgen', '--target', 'web', '--out-name', 'engine_wasm', '--out-dir',
+                              '"$RUNNER_TEMP/bootstrap-bindgen-baseline"',
+                              '"$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"']
+              recipe = {'compile': compile_argv, 'bindgen': bindgen_argv, 'features': [], 'codegen_backend': 'llvm',
+                        'opt_level': 2, 'stack_size': 16777216, 'jobs': 1, 'incremental': 0}
+              labels = ['candidate-source-before', 'baseline-source-before', 'baseline-runtime-inputs',
+                        'producer-tools', 'baseline-wasm-build', 'baseline-bindgen',
+                        'candidate-source-after', 'baseline-source-after']
+              receipts = {}
+              receipt_keys = {'label', 'started_at', 'source_sha', 'event_sha', 'source_tree', 'argv',
+                              'input_sha256', 'environment', 'guard', 'preflight', 'finished_at', 'exit_code',
+                              'effective_exit', 'stop_reason', 'source_unchanged', '.log_sha256', '.jsonl_sha256'}
+              for label in labels:
+                  item = json.loads((Path(os.environ['MANUAL_EVIDENCE']) / (label + '.json')).read_text())
+                  baseline = label.startswith('baseline-source-') or label in ['baseline-wasm-build', 'baseline-bindgen']
+                  assert set(item) == receipt_keys and item['label'] == label
+                  assert item['source_sha'] == (base_sha if baseline else producer_sha)
+                  assert item['source_tree'] == (base_tree if baseline else producer_tree)
+                  assert type(item['exit_code']) is int and item['exit_code'] == item['effective_exit'] == 0
+                  assert item['stop_reason'] is None and item['source_unchanged'] is True
+                  assert item['input_sha256'] == {key: inputs[key] for key in list(inputs)[:3]}
+                  assert item['guard'] == {'working_set_bytes': 13 * 1024**3, 'disk_free_min_bytes': 4 * 1024**3,
+                                           'sample_interval_seconds': 1, 'timeout_seconds': 1500}
+                  environment = item['environment']
+                  assert set(environment) == {'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RUST_MIN_STACK',
+                                              'CARGO_INCREMENTAL', 'CARGO_PROFILE_DEV_DEBUG'}
+                  assert environment['CARGO_TARGET_DIR'] == os.environ['CARGO_TARGET_DIR']
+                  assert environment['CARGO_BUILD_JOBS'] == '1' and environment['CARGO_INCREMENTAL'] == '0'
+                  assert environment['CARGO_PROFILE_DEV_DEBUG'] is None
+                  assert environment['RUST_MIN_STACK'] in [None, '16777216']
+                  reading = item['preflight']
+                  assert reading['cap_bytes'] >= 13 * 1024**3 and reading['working_set_bytes'] <= 13 * 1024**3
+                  assert min(reading['workspace_free_bytes'], reading['temp_free_bytes']) >= 4 * 1024**3
+                  assert all(re.fullmatch('[a-f0-9]{64}', item[key]) for key in ['.log_sha256', '.jsonl_sha256'])
+                  assert re.fullmatch('[a-f0-9]{40}', item['event_sha'])
+                  assert datetime.datetime.fromisoformat(item['finished_at']) >= datetime.datetime.fromisoformat(item['started_at'])
+                  if label in ['baseline-wasm-build', 'baseline-bindgen']:
+                      assert item['argv'][:4] == ['bash', '-euo', 'pipefail', '-c'] and len(item['argv']) == 5
+                      expected = compile_argv if label == 'baseline-wasm-build' else bindgen_argv
+                      assert item['argv'][4].replace('\\\n', ' ').split() == expected + ['>/dev/null', '2>&1']
+                  else:
+                      assert item['argv'] == (['python3', '-'] if label in ['baseline-runtime-inputs', 'producer-tools'] else ['true'])
+                  receipts[label] = item
+              artifact = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-bindgen-baseline'
+              names = {'engine_wasm.js', 'engine_wasm_bg.wasm', 'engine_wasm.d.ts', 'engine_wasm_bg.wasm.d.ts'}
+              assert {path.name for path in artifact.iterdir()} == names
+              assert all((artifact / name).is_file() and not (artifact / name).is_symlink() and
+                         (artifact / name).stat().st_size > 0 for name in names)
+              files = {name: {'size': (artifact / name).stat().st_size, 'sha256': digest(artifact / name)}
+                       for name in sorted(names)}
+              workflow_path = '.github/workflows/wasm-local-bootstrap-validation.yml'
+              assert os.environ['GITHUB_REPOSITORY'] == 'Makeinu1/phase' and os.environ['GITHUB_REPOSITORY_ID'] == '1377698441'
+              assert os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
+              assert all(re.fullmatch('[1-9][0-9]*', os.environ[key]) for key in ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'])
+              producer = {'repository': 'Makeinu1/phase', 'repository_id': 1377698441,
+                          'sha': producer_sha, 'tree': producer_tree, 'workflow_path': workflow_path,
+                          'workflow_sha256': digest(Path(workflow_path)), 'guard_sha256': guard_hash,
+                          'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+                          'mode': 'baseline-runtime-producer'}
+              descriptor = {'schema_version': 1, 'baseline': {'sha': base_sha, 'tree': base_tree},
+                            'producer': producer, 'inputs': inputs, 'toolchain': toolchain,
+                            'recipe': recipe, 'files': files, 'receipts': receipts}
+              staging = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-runtime-public'
+              staging.mkdir(exist_ok=False)
+              for name in sorted(names):
+                  shutil.copyfile(artifact / name, staging / name)
+                  assert digest(staging / name) == files[name]['sha256']
+              descriptor_path = staging / 'baseline-runtime-provenance.json'
+              descriptor_path.write_text(json.dumps(descriptor, sort_keys=True, indent=2) + '\n')
+              lines = [files[name]['sha256'] + '  ' + name for name in sorted(names)]
+              lines.append(digest(descriptor_path) + '  baseline-runtime-provenance.json')
+              (Path(os.environ['MANUAL_EVIDENCE']) / 'baseline-artifacts.sha256').write_text('\n'.join(lines) + '\n')
+              print('{"runtime_package_verified":true}')
+          except Exception:
+              print('{"error":"runtime-receipt-mismatch"}')
+              raise SystemExit(1)
+          PACKAGE
+      - name: Upload exact public baseline runtime
+        id: baseline-runtime-upload
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: local-worker-bootstrap-baseline-runtime
+          path: |
+            ${{ runner.temp }}/bootstrap-runtime-public/engine_wasm.js
+            ${{ runner.temp }}/bootstrap-runtime-public/engine_wasm_bg.wasm
+            ${{ runner.temp }}/bootstrap-runtime-public/engine_wasm.d.ts
+            ${{ runner.temp }}/bootstrap-runtime-public/engine_wasm_bg.wasm.d.ts
+            ${{ runner.temp }}/bootstrap-runtime-public/baseline-runtime-provenance.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+      - name: Verify and expose measured public activation pins
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-runtime-producer'
+        working-directory: candidate-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_UPLOAD_ID: ${{ steps.baseline-runtime-upload.outputs.artifact-id }}
+          RUNTIME_UPLOAD_DIGEST: ${{ steps.baseline-runtime-upload.outputs.artifact-digest }}
+        run: |
+          python3 scripts/ci/manual-integration-guard.py baseline-runtime-pins python3 - 2>/dev/null <<'PINS'
+          import datetime, hashlib, json, os, re, urllib.request
+          from pathlib import Path
+          try:
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, req, fp, code, msg, headers, newurl):
+                      return None
+              identifier = os.environ['RUNTIME_UPLOAD_ID']
+              archive_hash = os.environ['RUNTIME_UPLOAD_DIGEST'].removeprefix('sha256:')
+              assert re.fullmatch('[1-9][0-9]*', identifier) and re.fullmatch('[a-f0-9]{64}', archive_hash)
+              request = urllib.request.Request('https://api.github.com/repos/Makeinu1/phase/actions/artifacts/' + identifier,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+                           'X-GitHub-Api-Version': '2026-03-10'})
+              with urllib.request.build_opener(NoRedirect()).open(request, timeout=60) as response:
+                  metadata = json.loads(response.read())
+              assert metadata['id'] == int(identifier) and metadata['name'] == 'local-worker-bootstrap-baseline-runtime'
+              assert metadata['digest'] == 'sha256:' + archive_hash
+              assert type(metadata['size_in_bytes']) is int and metadata['size_in_bytes'] > 0
+              assert metadata['expired'] is False
+              expiry = datetime.datetime.fromisoformat(metadata['expires_at'].replace('Z', '+00:00'))
+              assert expiry > datetime.datetime.now(datetime.timezone.utc)
+              staging = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-runtime-public'
+              descriptor_bytes = (staging / 'baseline-runtime-provenance.json').read_bytes()
+              descriptor = json.loads(descriptor_bytes)
+              producer = descriptor['producer']
+              assert producer['sha'] == os.environ['MANUAL_EXPECTED_SOURCE_SHA']
+              assert producer['run_id'] == int(os.environ['GITHUB_RUN_ID'])
+              assert producer['run_attempt'] == int(os.environ['GITHUB_RUN_ATTEMPT'])
+              run = metadata['workflow_run']
+              assert run['id'] == producer['run_id'] and run['head_sha'] == producer['sha']
+              assert run['repository_id'] == run['head_repository_id'] == 1377698441
+              assert run['head_branch'] == 'experiment/manual-wasm-local-bootstrap'
+              for name, item in descriptor['files'].items():
+                  content = (staging / name).read_bytes()
+                  assert len(content) == item['size'] and hashlib.sha256(content).hexdigest() == item['sha256']
+              public = {'producer_sha': producer['sha'], 'producer_tree': producer['tree'],
+                        'producer_workflow_sha256': producer['workflow_sha256'], 'producer_guard_sha256': producer['guard_sha256'],
+                        'producer_run_id': producer['run_id'], 'producer_run_attempt': producer['run_attempt'],
+                        'artifact_id': int(identifier), 'archive_sha256': archive_hash, 'archive_size': metadata['size_in_bytes'],
+                        'provenance_sha256': hashlib.sha256(descriptor_bytes).hexdigest(), 'files': descriptor['files']}
+              (Path(os.environ['MANUAL_EVIDENCE']) / 'red-adjudication.json').write_text(
+                  json.dumps({'public_runtime': public}, sort_keys=True) + '\n')
+              print('{"runtime_pins_verified":true}')
+          except Exception:
+              print('{"error":"runtime-metadata-mismatch"}')
+              raise SystemExit(1)
+          PINS
+          # The guard captures successful child stdout. This separate boundary
+          # emits only validated public pins after the actual guard succeeds.
+          python3 - 2>/dev/null <<'PUBLIC'
+          import json, os, re
+          from pathlib import Path
+          root = Path(os.environ['MANUAL_EVIDENCE'])
+          receipt = json.loads((root / 'baseline-runtime-pins.json').read_text())
+          assert receipt['exit_code'] == receipt['effective_exit'] == 0 and receipt['stop_reason'] is None
+          assert receipt['source_sha'] == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] and receipt['source_unchanged'] is True
+          public = json.loads((root / 'red-adjudication.json').read_text())['public_runtime']
+          assert set(public) == {'producer_sha', 'producer_tree', 'producer_workflow_sha256', 'producer_guard_sha256',
+                                 'producer_run_id', 'producer_run_attempt', 'artifact_id', 'archive_sha256',
+                                 'archive_size', 'provenance_sha256', 'files'}
+          for key in ['producer_sha', 'producer_tree', 'producer_workflow_sha256', 'producer_guard_sha256',
+                      'archive_sha256', 'provenance_sha256']:
+              assert re.fullmatch('[a-f0-9]{' + str(40 if key in ['producer_sha', 'producer_tree'] else 64) + '}', public[key])
+          assert public['producer_sha'] == os.environ['MANUAL_EXPECTED_SOURCE_SHA']
+          assert public['producer_tree'] == receipt['source_tree']
+          assert public['producer_guard_sha256'] == os.environ['BOOTSTRAP_GUARD_SHA256']
+          assert all(type(public[key]) is int and public[key] > 0 for key in [
+              'producer_run_id', 'producer_run_attempt', 'artifact_id', 'archive_size'])
+          assert set(public['files']) == {'engine_wasm.js', 'engine_wasm_bg.wasm', 'engine_wasm.d.ts', 'engine_wasm_bg.wasm.d.ts'}
+          assert all(set(item) == {'size', 'sha256'} and type(item['size']) is int and item['size'] > 0 and
+                     re.fullmatch('[a-f0-9]{64}', item['sha256']) for item in public['files'].values())
+          text = json.dumps({'validated_public_runtime_pins': public}, sort_keys=True)
+          print(text)
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write('Measured public runtime activation pins:\n\n' + text + '\n')
+          PUBLIC
+      - name: Fetch and verify exact pinned baseline runtime
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
+        working-directory: candidate-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Authorization stays inside stdin/env, never in recorded guard argv.
+          python3 scripts/ci/manual-integration-guard.py baseline-runtime-fetch python3 - 2>/dev/null <<'FETCH'
+          import base64, datetime, hashlib, io, json, os, re, stat, urllib.error, urllib.parse, urllib.request, zipfile
+          from pathlib import Path
+          code = 'runtime-pin-invalid'
+          root = Path(os.environ['MANUAL_EVIDENCE'])
+          try:
+              def unique(pairs):
+                  result = {}
+                  for key, value in pairs:
+                      assert key not in result
+                      result[key] = value
+                  return result
+              def decode(content):
+                  return json.loads(content, object_pairs_hook=unique)
+              def sha(content):
+                  return hashlib.sha256(content).hexdigest()
+              def instant(value):
+                  result = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+                  assert result.tzinfo is not None
+                  return result
+              names = {'engine_wasm.js', 'engine_wasm_bg.wasm', 'engine_wasm.d.ts', 'engine_wasm_bg.wasm.d.ts'}
+              files = decode(os.environ['BOOTSTRAP_RUNTIME_FILES'])
+              assert set(files) == names
+              assert all(set(item) == {'size', 'sha256'} and type(item['size']) is int and item['size'] > 0 and
+                         re.fullmatch('[a-f0-9]{64}', item['sha256']) for item in files.values())
+              for name, length in [
+                  ('BOOTSTRAP_PRODUCER_SHA', 40), ('BOOTSTRAP_PRODUCER_TREE', 40),
+                  ('BOOTSTRAP_PRODUCER_WORKFLOW_SHA256', 64), ('BOOTSTRAP_PRODUCER_GUARD_SHA256', 64),
+                  ('BOOTSTRAP_RUNTIME_ZIP_SHA256', 64), ('BOOTSTRAP_PROVENANCE_SHA256', 64),
+              ]:
+                  assert re.fullmatch('[a-f0-9]{' + str(length) + '}', os.environ[name])
+              for name in ['BOOTSTRAP_PRODUCER_RUN_ID', 'BOOTSTRAP_PRODUCER_RUN_ATTEMPT',
+                           'BOOTSTRAP_RUNTIME_ARTIFACT_ID', 'BOOTSTRAP_RUNTIME_ZIP_SIZE']:
+                  assert re.fullmatch('[1-9][0-9]*', os.environ[name])
+              producer_sha, producer_tree = os.environ['BOOTSTRAP_PRODUCER_SHA'], os.environ['BOOTSTRAP_PRODUCER_TREE']
+              run_id, attempt = int(os.environ['BOOTSTRAP_PRODUCER_RUN_ID']), int(os.environ['BOOTSTRAP_PRODUCER_RUN_ATTEMPT'])
+              artifact_id, archive_size = int(os.environ['BOOTSTRAP_RUNTIME_ARTIFACT_ID']), int(os.environ['BOOTSTRAP_RUNTIME_ZIP_SIZE'])
+              archive_hash, provenance_hash = os.environ['BOOTSTRAP_RUNTIME_ZIP_SHA256'], os.environ['BOOTSTRAP_PROVENANCE_SHA256']
+              workflow_path = '.github/workflows/wasm-local-bootstrap-validation.yml'
+              guard_hash = os.environ['BOOTSTRAP_PRODUCER_GUARD_SHA256']
+              assert guard_hash == os.environ['BOOTSTRAP_GUARD_SHA256']
+              assert sha(Path('scripts/ci/manual-integration-guard.py').read_bytes()) == guard_hash
+              assert os.environ['GITHUB_REPOSITORY'] == 'Makeinu1/phase' and os.environ['GITHUB_REPOSITORY_ID'] == '1377698441'
+              assert not os.environ.get('ENGINE_WASM_URL')
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, req, fp, status, message, headers, newurl):
+                      return None
+              authenticated = urllib.request.build_opener(NoRedirect())
+              def request(path):
+                  return urllib.request.Request('https://api.github.com/repos/Makeinu1/phase/' + path,
+                      headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+                               'X-GitHub-Api-Version': '2026-03-10'})
+              def api(path):
+                  with authenticated.open(request(path), timeout=60) as response:
+                      assert not response.headers.get('Link')
+                      content = response.read(2 * 1024**2 + 1)
+                      assert len(content) <= 2 * 1024**2
+                      return decode(content)
+              code = 'runtime-fetch-failed'
+              run = api('actions/runs/' + str(run_id) + '/attempts/' + str(attempt))
+              code = 'runtime-metadata-mismatch'
+              assert run['id'] == run_id and run['run_attempt'] == attempt
+              assert run['repository']['id'] == run['head_repository']['id'] == 1377698441
+              assert run['repository']['full_name'] == run['head_repository']['full_name'] == 'Makeinu1/phase'
+              assert run['head_sha'] == producer_sha and run['head_commit']['tree_id'] == producer_tree
+              assert run['path'] == workflow_path and run['event'] == 'pull_request'
+              assert run['head_branch'] == 'experiment/manual-wasm-local-bootstrap'
+              assert run['status'] == 'completed' and run['conclusion'] == 'success'
+              code = 'runtime-fetch-failed'
+              population = api('actions/runs/' + str(run_id) + '/attempts/' + str(attempt) + '/jobs?per_page=100&page=1')
+              code = 'runtime-metadata-mismatch'
+              assert population['total_count'] == 1 and len(population['jobs']) == 1
+              job = population['jobs'][0]
+              assert job['run_id'] == run_id and job['run_attempt'] == attempt and job['head_sha'] == producer_sha
+              assert job['name'] == 'baseline-red' and job['status'] == 'completed' and job['conclusion'] == 'success'
+              succeeded = {
+                  'Checkout immutable candidate source', 'Checkout immutable baseline source',
+                  'Require explicit baseline checkpoint and clean independent sources',
+                  'Verify fixed public source and recipe inputs', 'Install pinned producer Rust toolchain',
+                  'Install pinned producer bindgen', 'Verify actual pinned producer tools',
+                  'Compile immutable baseline engine WASM once, default off',
+                  'Bind the baseline artifact outside both source trees',
+                  'Independently check producer source trees after build', 'Package exact public baseline runtime',
+                  'Upload exact public baseline runtime', 'Verify and expose measured public activation pins',
+                  'Adjudicate complete RED from retained evidence', 'Upload exact safe evidence allowlist',
+              }
+              skipped = {
+                  'Install pinned consumer pnpm', 'Install pinned consumer Node',
+                  'Verify actual hosted tools without browser downloads', 'Install one frozen candidate client dependency tree',
+                  'Check full candidate client types', 'Lint full candidate client', 'Check candidate protocol',
+                  'Fetch and verify exact pinned baseline runtime',
+                  'Copy only ignored runtime glue and WASM to the candidate alias',
+                  'Run existing affected adapter tests with one worker',
+                  'Run actual baseline page and retain its terminal failure',
+                  'Independently check both source trees after execution',
+              }
+              housekeeping = {'Set up job', 'Complete job', 'Post Checkout immutable candidate source',
+                              'Post Checkout immutable baseline source', 'Post Install pinned producer Rust toolchain',
+                              'Post Install pinned producer bindgen'}
+              steps = job['steps']
+              assert [step['number'] for step in steps] == list(range(1, len(steps) + 1))
+              step_map = {step['name']: step for step in steps}
+              assert len(step_map) == len(steps) and succeeded | skipped <= set(step_map)
+              assert set(step_map) <= succeeded | skipped | housekeeping
+              assert {'Set up job', 'Complete job'} <= set(step_map)
+              for name, step in step_map.items():
+                  assert step['status'] == 'completed'
+                  assert step['conclusion'] == ('skipped' if name in skipped else 'success')
+              code = 'runtime-fetch-failed'
+              metadata = api('actions/artifacts/' + str(artifact_id))
+              contents = api('contents/' + workflow_path + '?ref=' + producer_sha)
+              code = 'runtime-metadata-mismatch'
+              assert metadata['id'] == artifact_id and metadata['name'] == 'local-worker-bootstrap-baseline-runtime'
+              assert metadata['size_in_bytes'] == archive_size and metadata['digest'] == 'sha256:' + archive_hash
+              artifact_run = metadata['workflow_run']
+              assert artifact_run['id'] == run_id and artifact_run['head_sha'] == producer_sha
+              assert artifact_run['repository_id'] == artifact_run['head_repository_id'] == 1377698441
+              assert artifact_run['head_branch'] == 'experiment/manual-wasm-local-bootstrap'
+              upload = step_map['Upload exact public baseline runtime']
+              assert instant(upload['started_at']) <= instant(metadata['created_at']) <= instant(upload['completed_at'])
+              assert contents['type'] == 'file' and contents['path'] == workflow_path and contents['encoding'] == 'base64'
+              workflow_bytes = base64.b64decode(''.join(contents['content'].split()), validate=True)
+              assert sha(workflow_bytes) == os.environ['BOOTSTRAP_PRODUCER_WORKFLOW_SHA256']
+              code = 'runtime-expired'
+              assert metadata['expired'] is False and instant(metadata['expires_at']) > datetime.datetime.now(datetime.timezone.utc)
+              code = 'runtime-fetch-failed'
+              try:
+                  authenticated.open(request('actions/artifacts/' + str(artifact_id) + '/zip'), timeout=60)
+                  raise ValueError()
+              except urllib.error.HTTPError as error:
+                  if error.code == 410:
+                      code = 'runtime-expired'
+                      raise ValueError()
+                  assert error.code == 302
+                  location = error.headers['Location']
+              def https(url):
+                  parsed = urllib.parse.urlsplit(url)
+                  assert parsed.scheme == 'https' and parsed.hostname and parsed.port in [None, 443]
+                  assert parsed.username is None and parsed.password is None and not parsed.fragment
+              https(location)
+              class HTTPSRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, req, fp, status, message, headers, newurl):
+                      https(newurl)
+                      return super().redirect_request(req, fp, status, message, headers, newurl)
+              # Independent opener/request: GitHub authorization is never forwarded.
+              with urllib.request.build_opener(HTTPSRedirect()).open(
+                  urllib.request.Request(location, headers={'Accept': 'application/zip'}), timeout=60) as response:
+                  https(response.geturl())
+                  archive = response.read(archive_size + 1)
+              code = 'runtime-archive-mismatch'
+              assert len(archive) == archive_size and sha(archive) == archive_hash
+              (Path(os.environ['RUNNER_TEMP']) / 'bootstrap-baseline-runtime.zip').write_bytes(archive)
+              code = 'runtime-members-invalid'
+              with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+                  members = zipped.infolist()
+                  allowlist = names | {'baseline-runtime-provenance.json'}
+                  assert len(members) == 5 and {member.filename for member in members} == allowlist
+                  assert len({member.filename for member in members}) == len(members)
+                  for member in members:
+                      assert not member.is_dir() and '/' not in member.filename and '\\' not in member.filename
+                      assert stat.S_IFMT(member.external_attr >> 16) in [0, stat.S_IFREG]
+                      assert not member.external_attr & 0x10 and not member.flag_bits & 1
+                      assert member.compress_type in [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED]
+                      assert member.file_size > 0
+                  assert zipped.getinfo('baseline-runtime-provenance.json').file_size <= 1024**2
+                  code = 'runtime-provenance-mismatch'
+                  descriptor_bytes = zipped.read('baseline-runtime-provenance.json')
+                  assert sha(descriptor_bytes) == provenance_hash
+                  descriptor = decode(descriptor_bytes)
+                  assert set(descriptor) == {'schema_version', 'baseline', 'producer', 'inputs', 'toolchain', 'recipe', 'files', 'receipts'}
+                  assert type(descriptor['schema_version']) is int and descriptor['schema_version'] == 1
+                  assert descriptor['baseline'] == {'sha': os.environ['BOOTSTRAP_BASE_SHA'], 'tree': os.environ['BOOTSTRAP_BASE_TREE']}
+                  producer = {'repository': 'Makeinu1/phase', 'repository_id': 1377698441, 'sha': producer_sha,
+                              'tree': producer_tree, 'workflow_path': workflow_path,
+                              'workflow_sha256': os.environ['BOOTSTRAP_PRODUCER_WORKFLOW_SHA256'], 'guard_sha256': guard_hash,
+                              'run_id': run_id, 'run_attempt': attempt, 'mode': 'baseline-runtime-producer'}
+                  assert descriptor['producer'] == producer
+                  inputs = {
+                      'Cargo.lock': '5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0',
+                      'client/pnpm-lock.yaml': 'bc13ba1f6de5efd5bc724d9945aa541136df1d6938a41c53768f76c7b36c4ea4',
+                      'rust-toolchain.toml': '52562c175563386d0f9f19afafd2855662ef2590765204b35bd624de13fe67af',
+                      '.cargo/config.toml': 'da039ac38eb9d43e236e9eb89c65ef30a149d0539ed7ebfb3ee8f1d78b383c66',
+                  }
+                  assert descriptor['inputs'] == inputs
+                  assert all(sha((source / name).read_bytes()) == value
+                             for source in [Path('.'), Path('../baseline-source')] for name, value in inputs.items())
+                  tools = descriptor['toolchain']
+                  assert set(tools) == {'active', 'release', 'commit_hash', 'commit_date', 'host', 'llvm', 'cargo', 'bindgen'}
+                  assert tools['active'] == 'nightly-2026-04-19-x86_64-unknown-linux-gnu'
+                  assert tools['host'] == 'x86_64-unknown-linux-gnu' and tools['bindgen'] == 'wasm-bindgen 0.2.121'
+                  assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+-nightly', tools['release'])
+                  assert re.fullmatch('[a-f0-9]{40}', tools['commit_hash'])
+                  assert datetime.date.fromisoformat(tools['commit_date']) <= datetime.date(2026, 4, 19)
+                  assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+', tools['llvm'])
+                  assert re.fullmatch(r'cargo [0-9]+[.][0-9]+[.][0-9]+-nightly \([a-f0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)', tools['cargo'])
+                  compile_argv = ['cargo', 'build', '--locked', '-p', 'engine-wasm', '--target',
+                                  'wasm32-unknown-unknown', '--profile', 'wasm-dev', '--no-default-features']
+                  bindgen_argv = ['wasm-bindgen', '--target', 'web', '--out-name', 'engine_wasm', '--out-dir',
+                                  '"$RUNNER_TEMP/bootstrap-bindgen-baseline"',
+                                  '"$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"']
+                  assert descriptor['recipe'] == {'compile': compile_argv, 'bindgen': bindgen_argv, 'features': [],
+                      'codegen_backend': 'llvm', 'opt_level': 2, 'stack_size': 16777216, 'jobs': 1, 'incremental': 0}
+                  code = 'runtime-file-mismatch'
+                  assert descriptor['files'] == files
+                  verified = {}
+                  for name in sorted(names):
+                      assert zipped.getinfo(name).file_size == files[name]['size']
+                      content = zipped.read(name)
+                      assert len(content) == files[name]['size'] and sha(content) == files[name]['sha256']
+                      verified[name] = content
+              code = 'runtime-receipt-mismatch'
+              labels = ['candidate-source-before', 'baseline-source-before', 'baseline-runtime-inputs', 'producer-tools',
+                        'baseline-wasm-build', 'baseline-bindgen', 'candidate-source-after', 'baseline-source-after']
+              receipts = descriptor['receipts']
+              assert set(receipts) == set(labels)
+              receipt_keys = {'label', 'started_at', 'source_sha', 'event_sha', 'source_tree', 'argv', 'input_sha256',
+                              'environment', 'guard', 'preflight', 'finished_at', 'exit_code', 'effective_exit',
+                              'stop_reason', 'source_unchanged', '.log_sha256', '.jsonl_sha256'}
+              for label in labels:
+                  item = receipts[label]
+                  baseline = label.startswith('baseline-source-') or label in ['baseline-wasm-build', 'baseline-bindgen']
+                  assert set(item) == receipt_keys and item['label'] == label
+                  assert item['source_sha'] == (os.environ['BOOTSTRAP_BASE_SHA'] if baseline else producer_sha)
+                  assert item['source_tree'] == (os.environ['BOOTSTRAP_BASE_TREE'] if baseline else producer_tree)
+                  assert type(item['exit_code']) is int and type(item['effective_exit']) is int and item['exit_code'] == item['effective_exit'] == 0
+                  assert item['stop_reason'] is None and item['source_unchanged'] is True
+                  assert item['input_sha256'] == {key: inputs[key] for key in list(inputs)[:3]}
+                  assert item['guard'] == {'working_set_bytes': 13 * 1024**3, 'disk_free_min_bytes': 4 * 1024**3,
+                                           'sample_interval_seconds': 1, 'timeout_seconds': 1500}
+                  environment = item['environment']
+                  assert set(environment) == {'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RUST_MIN_STACK',
+                                              'CARGO_INCREMENTAL', 'CARGO_PROFILE_DEV_DEBUG'}
+                  assert environment['CARGO_BUILD_JOBS'] == '1' and environment['CARGO_INCREMENTAL'] == '0'
+                  assert environment['CARGO_PROFILE_DEV_DEBUG'] is None and environment['RUST_MIN_STACK'] in [None, '16777216']
+                  assert re.fullmatch('/[^\\n]+/bootstrap-wasm-target', environment['CARGO_TARGET_DIR'])
+                  reading = item['preflight']
+                  assert set(reading) == {'at', 'scope', 'cap_bytes', 'used_bytes', 'working_set_bytes', 'active_file',
+                                          'inactive_file', 'anon', 'kernel', 'workspace_free_bytes', 'temp_free_bytes'}
+                  assert reading['scope'] in ['cgroup', 'host_vm']
+                  assert all(type(reading[key]) is int and reading[key] >= 0 for key in set(reading) - {'at', 'scope'})
+                  assert reading['cap_bytes'] >= 13 * 1024**3 and reading['working_set_bytes'] <= 13 * 1024**3
+                  assert reading['working_set_bytes'] == reading['used_bytes'] - reading['inactive_file']
+                  assert min(reading['workspace_free_bytes'], reading['temp_free_bytes']) >= 4 * 1024**3
+                  assert all(re.fullmatch('[a-f0-9]{64}', item[key]) for key in ['.log_sha256', '.jsonl_sha256'])
+                  assert re.fullmatch('[a-f0-9]{40}', item['event_sha'])
+                  assert instant(job['started_at']) <= instant(item['started_at']) <= instant(item['finished_at']) <= instant(job['completed_at'])
+                  assert instant(item['started_at']) <= instant(reading['at']) <= instant(item['finished_at'])
+                  if label in ['baseline-wasm-build', 'baseline-bindgen']:
+                      assert item['argv'][:4] == ['bash', '-euo', 'pipefail', '-c'] and len(item['argv']) == 5
+                      expected = compile_argv if label == 'baseline-wasm-build' else bindgen_argv
+                      assert item['argv'][4].replace('\\\n', ' ').split() == expected + ['>/dev/null', '2>&1']
+                  else:
+                      assert item['argv'] == (['python3', '-'] if label in ['baseline-runtime-inputs', 'producer-tools'] else ['true'])
+              # All metadata/member/descriptor/file/receipt checks precede extraction.
+              artifact = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-bindgen-baseline'
+              assert artifact.is_dir() and not any(artifact.iterdir())
+              for name, content in verified.items():
+                  (artifact / name).write_bytes(content)
+              (artifact / 'baseline-runtime-provenance.json').write_bytes(descriptor_bytes)
+              public = {'producer_sha': producer_sha, 'producer_tree': producer_tree,
+                        'producer_workflow_sha256': producer['workflow_sha256'], 'producer_guard_sha256': guard_hash,
+                        'producer_run_id': run_id, 'producer_run_attempt': attempt, 'artifact_id': artifact_id,
+                        'archive_sha256': archive_hash, 'archive_size': archive_size,
+                        'provenance_sha256': provenance_hash, 'files': files}
+              (root / 'red-adjudication.json').write_text(json.dumps({
+                  'runtime_verified': True, 'public_runtime': public,
+                  'producer_commands': {label: receipts[label] for label in ['baseline-wasm-build', 'baseline-bindgen']},
+              }, sort_keys=True) + '\n')
+              print('{"runtime_verified":true}')
+          except Exception:
+              (root / 'red-adjudication.json').write_text(json.dumps({'runtime_verified': False, 'runtime_error': code}) + '\n')
+              print(json.dumps({'error': code}))
+              raise SystemExit(1)
+          FETCH
       - name: Copy only ignored runtime glue and WASM to the candidate alias
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py baseline-runtime-copy bash -euo pipefail <<'COPY'
@@ -145,12 +771,15 @@ jobs:
           cp "$artifact/engine_wasm.js" client/src/wasm/engine_wasm.js
           cp "$artifact/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
           sha256sum "$artifact/engine_wasm.js" "$artifact/engine_wasm_bg.wasm" \
+            "$artifact/engine_wasm.d.ts" "$artifact/engine_wasm_bg.wasm.d.ts" \
+            "$artifact/baseline-runtime-provenance.json" \
             client/src/wasm/engine_wasm.js client/src/wasm/engine_wasm_bg.wasm \
             client/src/wasm/engine_wasm.d.ts > "$MANUAL_EVIDENCE/baseline-artifacts.sha256"
           cmp -s "$artifact/engine_wasm.js" client/src/wasm/engine_wasm.js
           cmp -s "$artifact/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
           COPY
       - name: Run existing affected adapter tests with one worker
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           # Pinned Vitest 4.1.0's JSON reporter writes to stdout when outputFile
@@ -195,6 +824,7 @@ jobs:
           raise SystemExit(code if code >= 0 else 128 - code)
           TESTS
       - name: Run actual baseline page and retain its terminal failure
+        if: env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         id: baseline-browser
         working-directory: candidate-source
         run: |
@@ -325,7 +955,7 @@ jobs:
           exit 1
           BROWSER
       - name: Independently check both source trees after execution
-        if: always()
+        if: always() && env.BOOTSTRAP_CHECKPOINT_MODE == 'baseline-red'
         working-directory: candidate-source
         run: |
           python3 scripts/ci/manual-integration-guard.py candidate-source-after true
@@ -340,22 +970,86 @@ jobs:
           from pathlib import Path
           root = Path(os.environ['MANUAL_EVIDENCE'])
           root.mkdir(parents=True, exist_ok=True)
-          labels = ['candidate-source-before', 'baseline-source-before', 'hosted-tools',
-                    'baseline-wasm-build', 'baseline-bindgen', 'baseline-runtime-copy',
-                    'client-dependencies', 'client-types', 'client-lint', 'client-protocol',
-                    'client-adapter-tests', 'baseline-browser', 'candidate-source-after', 'baseline-source-after']
-          complete = os.environ['BOOTSTRAP_CHECKPOINT_MODE'] == 'baseline-red'
+          def load(name):
+              try:
+                  value = json.loads((root / name).read_text())
+                  return value if isinstance(value, dict) else {}
+              except Exception:
+                  return {}
+          mode = os.environ['BOOTSTRAP_CHECKPOINT_MODE']
+          runtime = load('red-adjudication.json')
+          producer_mode = mode == 'baseline-runtime-producer'
+          labels = (['candidate-source-before', 'baseline-source-before', 'baseline-runtime-inputs',
+                     'producer-tools', 'baseline-wasm-build', 'baseline-bindgen', 'candidate-source-after',
+                     'baseline-source-after', 'baseline-runtime-package', 'baseline-runtime-pins'] if producer_mode else
+                    ['candidate-source-before', 'baseline-source-before', 'baseline-runtime-inputs', 'hosted-tools',
+                     'baseline-runtime-fetch', 'baseline-runtime-copy', 'client-dependencies', 'client-types',
+                     'client-lint', 'client-protocol', 'client-adapter-tests', 'baseline-browser',
+                     'candidate-source-after', 'baseline-source-after'])
+          complete = mode in ['baseline-runtime-producer', 'baseline-red']
           records = {}
           for label in labels:
-              path = root / (label + '.json')
-              item = json.loads(path.read_text()) if path.is_file() else None
+              item = load(label + '.json')
               records[label] = item
               baseline = label.startswith('baseline-source-') or label in ['baseline-wasm-build', 'baseline-bindgen']
               expected_sha = os.environ['BOOTSTRAP_BASE_SHA'] if baseline else os.environ['MANUAL_EXPECTED_SOURCE_SHA']
               expected_exit = 1 if label == 'baseline-browser' else 0
-              complete &= bool(item and item['source_sha'] == expected_sha and
-                               item['exit_code'] == expected_exit and item['effective_exit'] == expected_exit and
-                               item['stop_reason'] is None and item['source_unchanged'])
+              complete &= bool(item and item.get('source_sha') == expected_sha and
+                               type(item.get('exit_code')) is int and item.get('exit_code') == expected_exit and
+                               type(item.get('effective_exit')) is int and item.get('effective_exit') == expected_exit and
+                               item.get('stop_reason') is None and item.get('source_unchanged') is True)
+          public = runtime.get('public_runtime', {})
+          if producer_mode:
+              complete &= bool(public and public.get('producer_sha') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] and
+                               public.get('producer_tree') == records['candidate-source-before'].get('source_tree') and
+                               public.get('producer_guard_sha256') == os.environ['BOOTSTRAP_GUARD_SHA256'] and
+                               public.get('producer_run_id') == int(os.environ['GITHUB_RUN_ID']) and
+                               public.get('producer_run_attempt') == int(os.environ['GITHUB_RUN_ATTEMPT']))
+              verdict = {'checkpoint_mode': mode, 'producer_complete': bool(complete),
+                         'qualifying_baseline_red': False, 'baseline_browser_executed': False,
+                         'product_green': 'NOT RUN: tests-only checkpoint', 'public_runtime': public, 'commands': records}
+              (root / 'red-adjudication.json').write_text(json.dumps(verdict, indent=2) + '\n')
+              text = ('Baseline runtime producer complete: true. Public bundle pins measured. '
+                      'Qualifying baseline RED: false. Browser: NOT RUN. Product GREEN: NOT RUN.\n') if complete else (
+                      'Baseline runtime producer complete: false. Execution evidence is incomplete. '
+                      'Qualifying baseline RED: false. Browser: NOT RUN. Product GREEN: NOT RUN.\n')
+              print(text)
+              with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+                  summary.write(text)
+              raise SystemExit(0 if complete else 1)
+          complete &= runtime.get('runtime_verified') is True
+          producer_commands = runtime.get('producer_commands', {})
+          try:
+              expected_public = {
+                  'producer_sha': os.environ['BOOTSTRAP_PRODUCER_SHA'], 'producer_tree': os.environ['BOOTSTRAP_PRODUCER_TREE'],
+                  'producer_workflow_sha256': os.environ['BOOTSTRAP_PRODUCER_WORKFLOW_SHA256'],
+                  'producer_guard_sha256': os.environ['BOOTSTRAP_PRODUCER_GUARD_SHA256'],
+                  'producer_run_id': int(os.environ['BOOTSTRAP_PRODUCER_RUN_ID']),
+                  'producer_run_attempt': int(os.environ['BOOTSTRAP_PRODUCER_RUN_ATTEMPT']),
+                  'artifact_id': int(os.environ['BOOTSTRAP_RUNTIME_ARTIFACT_ID']),
+                  'archive_sha256': os.environ['BOOTSTRAP_RUNTIME_ZIP_SHA256'],
+                  'archive_size': int(os.environ['BOOTSTRAP_RUNTIME_ZIP_SIZE']),
+                  'provenance_sha256': os.environ['BOOTSTRAP_PROVENANCE_SHA256'],
+                  'files': json.loads(os.environ['BOOTSTRAP_RUNTIME_FILES']),
+              }
+              complete &= public == expected_public
+              artifact = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-bindgen-baseline'
+              descriptor_bytes = (artifact / 'baseline-runtime-provenance.json').read_bytes()
+              complete &= hashlib.sha256(descriptor_bytes).hexdigest() == expected_public['provenance_sha256']
+              descriptor = json.loads(descriptor_bytes)
+              complete &= producer_commands == {label: descriptor['receipts'][label]
+                  for label in ['baseline-wasm-build', 'baseline-bindgen']}
+              for label in ['baseline-wasm-build', 'baseline-bindgen']:
+                  receipt = producer_commands[label]
+                  complete &= receipt['source_sha'] == os.environ['BOOTSTRAP_BASE_SHA']
+                  complete &= receipt['source_tree'] == os.environ['BOOTSTRAP_BASE_TREE']
+                  complete &= receipt['exit_code'] == receipt['effective_exit'] == 0
+                  complete &= receipt['stop_reason'] is None and receipt['source_unchanged'] is True
+              for name, item in expected_public['files'].items():
+                  content = (artifact / name).read_bytes()
+                  complete &= len(content) == item['size'] and hashlib.sha256(content).hexdigest() == item['sha256']
+          except Exception:
+              complete = False
           terminal_path = root / 'baseline-terminal.json'
           terminal = json.loads(terminal_path.read_text()) if terminal_path.is_file() else {}
           if not isinstance(terminal, dict):
@@ -365,6 +1059,8 @@ jobs:
               'report_valid': False, 'error': 'adapter-tests-not-run'}
           complete &= adapter.get('report_valid') is True and adapter.get('all_selected_tests_passed') is True
           complete &= adapter.get('runner_exit_code') == 0
+          complete &= all(adapter.get(key) == 91 for key in ['tests_total', 'tests_executed', 'tests_passed'])
+          complete &= all(adapter.get(key) == 0 for key in ['tests_failed', 'tests_skipped', 'tests_pending', 'tests_todo', 'tests_disabled'])
           rows = terminal.get('rows', [])
           complete &= terminal.get('status') == 'fail' and terminal.get('reason') == 'expected-experimental-availability'
           complete &= [row.get('name') for row in rows] == [
@@ -417,7 +1113,13 @@ jobs:
                      'qualifying_baseline_red': bool(complete), 'terminal_status': terminal.get('status'),
                      'baseline_browser_executed': (records.get('baseline-browser') or {}).get('exit_code') is not None,
                      'adapter_assertions': adapter,
-                     'product_green': 'NOT RUN: tests-only checkpoint', 'commands': records}
+                     'product_green': 'NOT RUN: tests-only checkpoint', 'commands': records,
+                     'runtime_verified': runtime.get('runtime_verified') is True,
+                     'public_runtime': public, 'producer_commands': producer_commands,
+                     'runtime_error': (runtime.get('runtime_error') if runtime.get('runtime_error') in [
+                         'runtime-pin-invalid', 'runtime-fetch-failed', 'runtime-metadata-mismatch', 'runtime-expired',
+                         'runtime-archive-mismatch', 'runtime-members-invalid', 'runtime-provenance-mismatch',
+                         'runtime-file-mismatch', 'runtime-receipt-mismatch'] else None)}
           (root / 'red-adjudication.json').write_text(json.dumps(verdict, indent=2) + '\n')
           text = ('Qualifying baseline RED: true. All 90 controls and the real Worker action completed; '
                   'the expected experimental availability assertion failed. Product GREEN: NOT RUN.\n') if complete else (
@@ -427,7 +1129,8 @@ jobs:
               summary.write(text)
           raise SystemExit(0 if complete else 1)
           PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload exact safe evidence allowlist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: local-worker-bootstrap-baseline-red-evidence
