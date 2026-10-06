@@ -1667,7 +1667,19 @@ jobs:
         value.setdefault('native_tests', {})[artifact] = {'selected': count, 'executed': len(seen), 'passed': bool(passed)}
         filtered = re.search(r'Summary[^\n]*\b([0-9]+) skipped\b', text)
         value.setdefault('native_filter_counts', {})[artifact] = int(filtered.group(1)) if filtered else None
-        path.write_text(json.dumps(value) + '\n'); print(json.dumps({'native_selected_tests_passed': bool(passed), 'selected': count}))
+        # Fixed failure meanings: nextest-metadata/src/exit_codes.rs at cargo-nextest-0.9.146.
+        classification = ('passed' if passed else 'collector-mismatch') if result.returncode == 0 else {
+            4: 'no-tests-selected', 70: 'double-spawn-error', 96: 'setup-error', 100: 'test-run-failed',
+            104: 'test-list-creation-failed', 105: 'setup-script-failed'}.get(result.returncode, 'unknown-nonzero')
+        diagnostic = {'runner_exit_code': result.returncode, 'classification': classification, 'output_shape': {
+            'status_lines': {status: len(re.findall(rf'^\s*{status}\s+\[', text, re.M)) for status in ['PASS', 'FAIL', 'ABORT', 'TIMEOUT', 'XFAIL']},
+            'start_marker': re.search(r'^\s*Starting\b', text, re.M) is not None,
+            'summary_marker': re.search(r'^\s*Summary\b', text, re.M) is not None,
+            'error_marker': re.search(r'^\s*error\b', text, re.M) is not None,
+            'pass_records': len(pass_names), 'pass_identity_match': len(pass_names) == count and set(pass_names) == expected,
+            'summary_pass_match': re.search(rf'Summary[^\n]*\b{count} tests run: {count} passed\b', text) is not None}}
+        value.setdefault('native_diagnostics', {})[artifact] = diagnostic
+        path.write_text(json.dumps(value) + '\n'); print(json.dumps({'native_selected_tests_passed': bool(passed), 'selected': count, 'native_diagnostic': diagnostic}))
         raise SystemExit(0 if passed else 1)
         NATIVE
          done
