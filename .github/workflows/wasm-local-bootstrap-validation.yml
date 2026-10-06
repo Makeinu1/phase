@@ -2265,6 +2265,7 @@ jobs:
         import datetime, hashlib, json, os, re, subprocess, tomllib
         from pathlib import Path
         stage = 'profile-environment'; classification = 'profile-mismatch'
+        nextest_query = {'exit_code': None, 'public_version': None}
         try:
             assert {key: value for key, value in os.environ.items() if key.startswith('CARGO_PROFILE_')} == {'CARGO_PROFILE_DEV_DEBUG': '0'}
             stage = 'build-jobs'; classification = 'profile-mismatch'
@@ -2348,11 +2349,21 @@ jobs:
             stage = 'cranelift-component'; classification = 'component-missing-or-host-mismatch'
             assert 'rustc-codegen-cranelift-x86_64-unknown-linux-gnu' in read(['rustup', 'component', 'list', '--installed']).splitlines()
             stage = 'nextest-version'; classification = 'version-mismatch'
-            assert re.fullmatch(r'cargo-nextest 0\.9\.146(?: \([^\n]+\))?', read(['cargo-nextest', '--version']))
+            result = subprocess.run(['cargo-nextest', 'nextest', '--version'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            nextest_query['exit_code'] = result.returncode
+            nextest_stdout = result.stdout.decode().replace('\r\n', '\n').replace('\r', '\n').strip()
+            public_version = re.fullmatch(r'(?:cargo-nextest|cargo) (?:0|[1-9][0-9]{0,9})(?:[.](?:0|[1-9][0-9]{0,9})){2}(?: \([a-f0-9]{7,40} ([0-9]{4}-[0-9]{2}-[0-9]{2})\))?', nextest_stdout) if len(nextest_stdout) <= 128 else None
+            if public_version and public_version[1]:
+                try: datetime.date.fromisoformat(public_version[1])
+                except ValueError: public_version = None
+            if public_version: nextest_query['public_version'] = nextest_stdout
+            result.check_returncode()
+            assert re.fullmatch(r'cargo-nextest 0\.9\.146(?: \([^\n]+\))?', nextest_stdout)
             value = {'toolchain': 'nightly-2026-04-19', 'rustc': rustc, 'cargo': cargo, 'nextest': '0.9.146',
                 'codegen_backend': 'cranelift', 'cargo_profile': 'test', 'nextest_profile': 'ci', 'debug': 0,
                 'incremental': False, 'opt_level': 0, 'split_debuginfo': 'unpacked', 'codegen_units': 256,
-                'features': [], 'jobs': 1, 'stack_bytes': 16777216, 'profile_environment': {'CARGO_PROFILE_DEV_DEBUG': '0'}}
+                'features': [], 'jobs': 1, 'stack_bytes': 16777216, 'profile_environment': {'CARGO_PROFILE_DEV_DEBUG': '0'},
+                'nextest_query': nextest_query}
             stage = 'tool-manifest-write'; classification = 'filesystem-error'
             (Path(os.environ['MANUAL_EVIDENCE']) / 'tool-manifest.json').write_text(json.dumps(value) + '\n')
             print('{"native_off_tools_admitted":true}')
@@ -2371,7 +2382,7 @@ jobs:
             elif isinstance(error, OSError): classification = 'command-os-error' if command_stage else 'filesystem-error'
             elif not isinstance(error, AssertionError): classification = 'unexpected-error'
             value = {'native_off_tools_admitted': False, 'error': 'native-off-tools-refused',
-                'stage': stage, 'classification': classification}
+                'stage': stage, 'classification': classification, 'nextest_query': nextest_query}
             saved = False; persistence = None
             try:
                 (Path(os.environ['MANUAL_EVIDENCE']) / 'tool-manifest.json').write_text(json.dumps(value) + '\n')
