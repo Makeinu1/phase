@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as pause } from 'node:timers/promises';
+import { wasmMemoryRegions } from './undo-history-memory-cdp.mjs';
 
 const [candidateArg, payloadArg, evidenceArg] = process.argv.slice(2);
 const candidate = path.resolve(candidateArg), payload = path.resolve(payloadArg), evidence = path.resolve(evidenceArg);
@@ -14,8 +15,10 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const originalGlue = await readFile(path.join(payload, 'engine_wasm.js'));
 assert.equal(digest(originalGlue), 'cc3e67a1e4cf930a9107826aa676ee9b36a16494c92887897ec881251cc0ea6a');
 assert.equal(digest(await readFile(path.join(payload, 'engine_wasm_bg.wasm'))), '1861c7d90af448a1c98d17bcd42e9dc6ad41f317a05afe2ec1cc13e4de2e450f');
-assert.match(originalGlue.toString(), /let wasm;/);
-const observedGlue = originalGlue.toString() + '\n// QA numeric byte length only; no state/memory reads.\nglobalThis.__qaWasmBytes = () => wasm?.memory?.buffer.byteLength ?? 0;\n';
+const bindingModule = await import(pathToFileURL(path.join(payload, 'engine_wasm.js')));
+const publicMethods = ['default', 'ping', 'initialize_game', 'load_card_database', 'submit_action', 'submit_interaction_js', 'export_game_state_json', 'restore_game_state', 'get_game_state', 'get_legal_actions_js'];
+assert.ok(publicMethods.every(name => typeof bindingModule[name] === 'function'), 'verified binding public exports required by normal Worker');
+await writeFile(path.join(evidence, 'input-public-exports.json'), JSON.stringify({ bindingSha256: digest(originalGlue), publicMethods, inspectedWithoutInstantiation: true, bindingUnmodified: true }, null, 2) + '\n');
 const runtime = await mkdtemp(path.join(process.env.RUNNER_TEMP, 'history-adapter-runtime-'));
 const client = path.join(runtime, 'client');
 await cp(path.join(candidate, 'client'), client, { recursive: true, filter: p => !['node_modules', '.git', 'coverage', 'dist'].includes(path.basename(p)) });
@@ -25,7 +28,7 @@ const scriptDir = path.dirname(new URL(import.meta.url).pathname);
 await cp(path.join(scriptDir, 'undo-history-browser.mjs'), path.join(client, 'qa-history-adapter.mjs'));
 await cp(path.join(scriptDir, 'undo-history-comparator.mjs'), path.join(client, 'qa-history-comparator.mjs'));
 await mkdir(path.join(client, 'src/wasm'), { recursive: true });
-await writeFile(path.join(client, 'src/wasm/engine_wasm.js'), observedGlue);
+await writeFile(path.join(client, 'src/wasm/engine_wasm.js'), originalGlue);
 await cp(path.join(payload, 'engine_wasm_bg.wasm'), path.join(client, 'src/wasm/engine_wasm_bg.wasm'));
 await mkdir(path.join(client, 'public'), { recursive: true });
 const fixture = await readFile(path.join(candidate, 'scripts/fixtures/undo-history/official-history-cards-b0.json'));
@@ -100,8 +103,8 @@ try {
         if (targetWorker) await call('HeapProfiler.collectGarbage', {}, targetWorker);
         const mainHeap = await call('Runtime.getHeapUsage', {}, pageSession);
         const workerHeap = targetWorker ? await call('Runtime.getHeapUsage', {}, targetWorker) : null;
-        const wasmMemoryBytes = targetWorker ? await evaluate('globalThis.__qaWasmBytes?.() ?? null', targetWorker) : null;
-        samples.push({ round, mainHeap, workerHeap, wasmMemoryBytes });
+        const wasmAllocatedRegions = targetWorker ? await wasmMemoryRegions(call, targetWorker) : null;
+        samples.push({ round, mainHeap, workerHeap, wasmAllocatedRegions });
       }
       heaps.push({ label: observed.heap, gc: 'CDP collectGarbage main+attached Worker; three rounds; no reclamation guarantee', samples });
       await writeFile(path.join(evidence, 'browser-heaps.json'), JSON.stringify({ heaps, peakChromeTreeRssBytes, nodeMemory: process.memoryUsage(), peakNodeRssBytes: process.resourceUsage().maxRSS * 1024 }, null, 2) + '\n');
@@ -113,7 +116,7 @@ try {
   assert(result, 'finite browser campaign deadline');
   await writeFile(path.join(evidence, 'browser-result.json'), JSON.stringify({ ...result, browser: version.product,
     sourceSha: 'e10955dc5977f1ba7c65cb1518cb8f4b1679fe92', candidateSha: process.env.GITHUB_SHA,
-    bindingOriginalSha256: digest(originalGlue), bindingNumericObserverSha256: digest(observedGlue),
+    bindingOriginalSha256: digest(originalGlue), bindingRuntimeSha256: digest(originalGlue), bindingUnmodified: true, publicMethods,
     fixtureSha256: digest(fixture), peakChromeTreeRssBytes, peakNodeRssBytes: process.resourceUsage().maxRSS * 1024,
     heapScope: 'single headless Chromium on Ubuntu; UTF8/main JS/Worker JS/WASM allocated region/process peak separated; not product limit or free guarantee',
     heaps,

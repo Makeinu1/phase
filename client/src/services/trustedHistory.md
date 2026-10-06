@@ -88,8 +88,9 @@ continuations. The first submitted actor is checked against the root actor.
 Memory observations compare six ordinary roots with identical seed/action trace,
 with and without retained checkpoints, after branch discard and after session
 teardown. Three forced CDP GC rounds separate main/Worker JS heap from the WASM
-allocated region and process RSS peak. A numeric byte-length-only QA observer is
-appended to verified generated bindings; both binding hashes are recorded. The
+allocated region and process RSS peak. CDP enumerates live WebAssembly.Memory objects and reads numeric buffer
+lengths only; generated bindings remain byte-identical and their public exports
+are inspected before the normal Worker starts. The
 store retains the same display histories in the paired runs. These conditional
 measurements do not establish a device budget or a reclamation guarantee. No
 product dispatch, P2P, two-seat agreement or durable format is connected.
