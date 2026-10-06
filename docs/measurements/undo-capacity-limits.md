@@ -47,13 +47,30 @@ The parent verified [run 37407473256](https://github.com/Makeinu1/phase/actions/
 | Sampled phase-engine working-set maximum | 10,158,006,272 bytes, below 13 GiB |
 | Sampled engine-wasm working-set maximum | 11,991,519,232 bytes, below 13 GiB |
 
-This receipt supports native behavior at that exact candidate head. The engine-wasm results are native boundary tests, not execution of compiled WASM: compiled-WASM and real-browser validation of this capacity candidate remain **NOT RUN**. The sampled CI working set is not live Undo heap, a guaranteed instantaneous peak, or a target-device safety budget. The earlier e10955dc measurement artifact does not validate this new code. The prior resource-stop record remains applicable to its different full-lib venue.
+This receipt supports native behavior at that exact candidate head. The engine-wasm results are native boundary tests, not execution of compiled WASM: compiled-WASM and real-browser validation of this capacity candidate were **NOT RUN at the time of this native receipt**; the later WASM receipt below records their result. The sampled CI working set is not live Undo heap, a guaranteed instantaneous peak, or a target-device safety budget. The earlier e10955dc measurement artifact does not validate this new code. The prior resource-stop record remains applicable to its different full-lib venue.
 
 
-### Next stage: fixed-source real WASM boundary validation
+### Recorded next-stage plan: fixed-source real WASM boundary validation
 
 The independent producer will build candidate source **`f48a0d6ee0b143e4ec15b482249a70c932f7bde5`** once with nightly-2026-04-19, locked dependencies, LLVM opt0, LTO off, codegen-units 16 and the existing 16 MiB stack setting. Standard free Ubuntu jobs retain the 13 GiB working-set, 4 GiB free-disk and finite command/job guards. This stage creates a new artifact; it does not reuse the earlier e10955dc artifact.
 
 Consumers will verify the new same-run manifest digest, source/tree, lock/input hashes, producer/control/run identities, fixed build settings and individual artifact file sizes/hashes. Artifact ID and GitHub artifact digest are recorded alongside the manifest SHA-256. Node and one standard Chrome module Worker will execute the same functional assertions: baseline cast **Armed → restore Consumed**, then a legally prepared **520-object PRE** whose cast continues exactly once while Undo becomes Invalidated without retaining a receipt. No state injection or browser security-flag bypass is used.
 
-Real-WASM results are currently **NOT RUN**. Initialization or legal PRE preparation failure is a preparation failure, not a successful capacity refusal. App UI, two-seat synchronization, mobile browsers and live-heap/reclamation measurements remain unperformed; this stage does not prove a safe heap budget.
+Real-WASM results were **NOT RUN when this plan was recorded**; the completed run is documented below. Initialization or legal PRE preparation failure is a preparation failure, not a successful capacity refusal. App UI, two-seat synchronization, mobile browsers and live-heap/reclamation measurements remain unperformed; this stage does not prove a safe heap budget.
+
+
+### Completed real WASM verification and retained artifact
+
+The parent confirmed [run 37409235450](https://github.com/Makeinu1/phase/actions/runs/37409235450) through authorized GitHub read access: **SUCCESS**, control/producer **`57a5af0b7d943f31c0c5f5675ae860dacc592084`**, fixed product source **`f48a0d6ee0b143e4ec15b482249a70c932f7bde5`**. Both Node and standard Chrome module Worker passed normal restore and the legally prepared 520-object overflow case: one cast, Invalidated Undo and no retained receipt. The guarded commands reported `source_unchanged=true`, exit 0 and no guard stop.
+
+| Artifact identity | Verified value |
+| --- | --- |
+| Artifact ID | `11388721891` |
+| ZIP SHA-256 | `3f102d3003003f7066ff7dea0c37e2503e3b1af3a58a738c2fc2e26bb17ddde8` |
+| Manifest SHA-256 | `8a07d47b593e05ff7d68a331159da2679aea4d4e68e83ce7bdc17aa1c84c10db` |
+
+The artifact uses seven-day retention: an October 6 creation corresponds to October 13, but the exact `expires_at` timestamp has not been provided and is unconfirmed. Reuse must retrieve the fixed run/artifact through authorized GitHub Actions read access and verify ZIP digest, manifest digest, source/control/run identities, build settings and every file hash. Expiry or any mismatch must fail closed; another artifact must not be silently substituted or mixed with this producer's inputs.
+
+The current verifier pins the consuming run and run attempt to the same producer run. It cannot be used unchanged for cross-run reuse; that would require a consumer with explicit producer identity pins. No workflow change is made by this receipt.
+
+These results validate the specified real-WASM boundaries for this candidate and build. App UI, two-seat synchronization, mobile browsers and live-heap/reclamation remain unverified. A safe heap budget is still **NOT PROVEN**.
