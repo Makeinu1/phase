@@ -2092,7 +2092,18 @@ mod enabled_baseline_tests {
                     assert_eq!(object.zone, Zone::Stack);
                     assert_eq!(object.owner, p0);
                     assert_eq!(object.controller, p0);
-                    assert_eq!(object.cast_from_zone, Some(Zone::Hand));
+                    assert_eq!(
+                        runner
+                            .state()
+                            .stack
+                            .back()
+                            .expect("cast is on stack")
+                            .ability()
+                            .expect("ordinary instant fixture has a resolved ability")
+                            .context
+                            .cast_from_zone,
+                        Some(Zone::Hand)
+                    );
                     assert_eq!(object.keywords.contains(&keyword), printed);
                     assert_eq!(object.base_keywords.contains(&keyword), printed);
                     let before = runner.state().clone();
