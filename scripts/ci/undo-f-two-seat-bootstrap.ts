@@ -316,6 +316,17 @@ const qa = {
     }
     return null;
   },
+  lockedCardPoint() {
+    // Read only the already chosen node. A disappearing or obscured target
+    // cannot silently select another card during pointer readiness.
+    if (!pointerTarget?.isConnected) return null;
+    const r = pointerTarget.getBoundingClientRect();
+    for (const dx of [.5, .2, .8]) for (const dy of [.1, .3, .6]) {
+      const x = r.x + r.width * dx, y = r.y + r.height * dy;
+      if (document.elementFromPoint(x, y)?.closest("[data-hand-card]") === pointerTarget) return { x, y };
+    }
+    return null;
+  },
   handPointerSnapshot(x: number, y: number) {
     const g = useGameStore.getState(), s = g.gameState;
     const hit = document.elementFromPoint(x, y)?.closest("[data-hand-card]");

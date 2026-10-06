@@ -26,6 +26,10 @@ const undoCandidates = "[...document.querySelectorAll('[data-player-hud=\"0\"] b
 const visibleEnabledUndo = `(${undoCandidates}).filter(b=>{const r=b.getBoundingClientRect();return !b.disabled&&b.getClientRects().length>0&&r.width>0&&r.height>0;})`;
 const undoControls = fullControlControls.replace(fullControlCandidates, undoCandidates);
 const hittableUndo = `(${undoCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y));})`;
+const handSnapshot = (x,y) => `(()=>{const shape=(${publicNodeShape});return {...window.__twoSeatQa.handPointerSnapshot(${x},${y}),
+pointer:{x:${x},y:${y}},hitElements:document.elementsFromPoint(${x},${y}).slice(0,3).map(shape)};})()`;
+const handReady = s => s.intendedNodeConnected && s.hitIntended && !s.hitOtherHandCard && s.intendedStillInHand
+  && s.intendedHasLegalCast && s.dispatchIdle && s.prioritySeat === 0 && !s.debugInteraction;
 // Product CSS and actual App elements only. These observations cannot enable a
 // control, rewrite styles, select a card, or call the restore operation.
 const railHitAreas = `(()=>{const rail=document.querySelector('[data-flex-zone="actionRail"]');if(!rail)return null;
@@ -242,11 +246,48 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
     const point = async (x, y, double = false, diagnosticKey) => {
       if (diagnosticKey) result[diagnosticKey] = [];
       for (const clickCount of double ? [1, 2] : [1]) {
-        if (diagnosticKey) result[diagnosticKey].push({ stage: "before-press", clickCount, ...(await evaluate(`window.__twoSeatQa.handPointerSnapshot(${x},${y})`)) });
+        if (diagnosticKey) {
+          const before = await evaluate(handSnapshot(x,y));
+          result[diagnosticKey].push({ stage: "before-press", clickCount, ...before });
+          assert(handReady(before), "app hand target not pointer-ready");
+        }
         await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount }, sessionId);
         await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount }, sessionId);
-        if (diagnosticKey) result[diagnosticKey].push({ stage: "after-release", clickCount, ...(await evaluate(`window.__twoSeatQa.handPointerSnapshot(${x},${y})`)) });
+        if (diagnosticKey) result[diagnosticKey].push({ stage: "after-release", clickCount, ...(await evaluate(handSnapshot(x,y))) });
       }
+    };
+    const readyHandPoint = async key => {
+      const started=Date.now(), deadline=started+30000;
+      const witness=result[key]={samples:[],sampleCount:0,ready:false};
+      const timeout = () => Object.assign(Error("app hand target not pointer-ready"), {qaDeadline:true});
+      const read = async expression => {
+        const remaining=deadline-Date.now(); if(remaining<=0)throw timeout();
+        let timer;
+        try {
+          // No read outlives the remaining budget or the existing15s CDP limit.
+          const value=await Promise.race([evaluate(expression),new Promise((_,reject)=>{timer=setTimeout(()=>reject(timeout()),Math.min(remaining,15000));})]);
+          if(Date.now()>=deadline)throw timeout(); return value;
+        } finally { clearTimeout(timer); }
+      };
+      try {
+        // One initial target selection; all later samples keep that node locked.
+        const initial=await read("window.__twoSeatQa.cardPoint()"); witness.initialPoint=initial;
+        assert(initial, "app hand target not pointer-ready");
+        let previous, stable=0;
+        while (Date.now()<deadline) {
+          await read("new Promise(resolve=>requestAnimationFrame(resolve))");
+          const sample=await read(`(()=>{const p=window.__twoSeatQa.lockedCardPoint();const x=p?.x??${initial.x},y=p?.y??${initial.y};
+const shape=(${publicNodeShape});return {pointAvailable:Boolean(p),...window.__twoSeatQa.handPointerSnapshot(x,y),
+pointer:{x,y},hitElements:document.elementsFromPoint(x,y).slice(0,3).map(shape)};})()`);
+          if(Date.now()>=deadline)throw timeout();
+          witness.sampleCount++; witness.samples.push(sample); if(witness.samples.length>10)witness.samples.shift();
+          const signature=JSON.stringify({pointer:sample.pointer,bounds:sample.intendedBounds});
+          stable=sample.pointAvailable&&handReady(sample)?signature===previous?stable+1:1:0;
+          previous=signature;
+          if(stable>=3){witness.ready=true;return sample.pointer;}
+        }
+        throw timeout();
+      } finally { witness.elapsedMs=Date.now()-started; }
     };
     const click = async (expression, diagnostic) => {
       if (diagnostic) result[diagnostic.key] = { beforeScroll: await evaluate(diagnostic.controls) };
@@ -269,7 +310,7 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
       const s = await cdp("Page.captureScreenshot", { format: "png", clip }, sessionId);
       await writeFile(path.join(evidence, name), Buffer.from(s.data, "base64"));
     };
-    pages[role] = { evaluate, wait, click, point, button, cropControl, sessionId };
+    pages[role] = { evaluate, wait, click, point, readyHandPoint, button, cropControl, sessionId };
     await cdp("Page.navigate", { url: "http://127.0.0.1:5188/multiplayer" }, sessionId);
   }
   const { host, guest } = pages;
@@ -428,8 +469,9 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   assert(reached, "ordinary host cast not reached"); result.setupSteps = steps;
   assert(await host.evaluate("window.__twoSeatQa.prepareCast()"), "pre-floating semantic mana setup failed");
   result.stagesPassed.push("ordinary-app-actions");
+  category = "setup"; stage = "host-hand-pointer-ready";
+  const castPoint = await host.readyHandPoint("hostCastReadinessUi");
   category = "product"; stage = "host-pointer-cast";
-  const castPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(castPoint, "Bears hand card pointer unavailable");
   await host.point(castPoint.x, castPoint.y, true, "hostCastPointerUi");
   await host.wait("window.__twoSeatQa.status().stackCount===1", 30);
   assert(await host.evaluate("window.__twoSeatQa.recordCast()"), "real app cast snapshot missing");
@@ -499,9 +541,10 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   result.restore = { host: h, guest: g, beforeRevision, publicBoardEqual: true, guestRedaction: true };
   result.stagesPassed.push("pointer-undo-exact-acks-restore-privacy");
   await host.cropControl(undo, "host-restored-undo-control.png");
-  stage = "next-legal-pointer-cast";
-  const nextPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(nextPoint, "restored hand card pointer unavailable");
-  await host.point(nextPoint.x, nextPoint.y, true);
+  category = "setup"; stage = "next-hand-pointer-ready";
+  const nextPoint = await host.readyHandPoint("nextCastReadinessUi");
+  category = "product"; stage = "next-legal-pointer-cast";
+  await host.point(nextPoint.x, nextPoint.y, true, "nextCastPointerUi");
   await host.wait("window.__twoSeatQa.status().stackCount===1"); await guest.wait("window.__twoSeatQa.status().stackCount===1");
   await host.evaluate("window.__twoSeatQa.drainObservations()");
   await guest.evaluate("window.__twoSeatQa.drainObservations()");
@@ -555,6 +598,8 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
     result.failureCategory = "setup"; result.failureCode = "DEV_DEPENDENCY_RELOAD";
   } else if (cause.message === "app control not pointer-hittable") {
     result.failureCategory = "setup"; result.failureCode = "APP_CONTROL_NOT_POINTER_HITTABLE";
+  } else if (cause.message === "app hand target not pointer-ready") {
+    result.failureCategory = "setup"; result.failureCode = "HAND_TARGET_NOT_POINTER_READY";
   } else {
     result.failureCode = category.toUpperCase() + (cause.qaDeadline ? "_STAGE_DEADLINE" : "_ASSERTION_OR_DRIVER_FAILURE");
   }
