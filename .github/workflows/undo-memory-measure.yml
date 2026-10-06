@@ -1,0 +1,79 @@
+name: Fork bounded Undo memory measurement
+on:
+  push:
+    branches: [experiment/undo-memory-e10955dc]
+permissions:
+  contents: read
+concurrency:
+  group: fork-undo-memory-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  measure:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      F_EVIDENCE: ${{ github.workspace }}/memory-evidence
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: driver
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 0d74cf0314bec06949cd03231cd7979091d03f95
+          path: verified-control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Verify original pinned WASM ZIP and every manifest file
+        id: wasm-input
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 ../verified-control/scripts/ci/undo-f-guard.py memory-input \
+            python3 ../verified-control/scripts/ci/undo-f-artifact.py wasm \
+            "$GITHUB_WORKSPACE/wasm-payload" "$GITHUB_WORKSPACE/reused-inputs/wasm.zip"
+          python3 ../verified-control/scripts/ci/undo-f-manifest.py verify \
+            "$GITHUB_WORKSPACE/wasm-payload" \
+            f2681c2c2ba8e13dde7a6f5e65f461b3fc9957ce7769d339c3bde6250c152659 \
+            387b7542a901d711cbef2868e686b29726c905f0
+      - name: Existing fixed legal restore control before measurement
+        working-directory: source
+        run: |
+          python3 ../verified-control/scripts/ci/undo-f-guard.py memory-control \
+            node ../verified-control/scripts/ci/undo-f-wasm-restore.mjs \
+            "$GITHUB_WORKSPACE/wasm-payload" crates/engine-wasm/src/fixtures/host-precast-card-data.json
+      - name: Node finite legal save restore measurement
+        working-directory: source
+        run: |
+          python3 ../verified-control/scripts/ci/undo-f-guard.py memory-node \
+            timeout 600 node ../driver/scripts/ci/undo-memory-node.mjs \
+            "$GITHUB_WORKSPACE/wasm-payload" crates/engine-wasm/src/fixtures/host-precast-card-data.json
+      - name: Standard Chrome single module Worker finite measurement
+        if: ${{ !cancelled() && steps.wasm-input.outcome == 'success' }}
+        working-directory: source
+        run: |
+          python3 ../verified-control/scripts/ci/undo-f-guard.py memory-browser \
+            timeout 660 node ../driver/scripts/ci/undo-memory-browser.mjs \
+            "$GITHUB_WORKSPACE/wasm-payload" "$F_EVIDENCE" \
+            crates/engine-wasm/src/fixtures/host-precast-card-data.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-memory-boundary-evidence
+          path: memory-evidence
+          if-no-files-found: warn
+          retention-days: 7
