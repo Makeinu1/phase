@@ -29,7 +29,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/manual-integration-native-target
       MANUAL_EVIDENCE: ${{ github.workspace }}/native-evidence
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -64,6 +63,8 @@ jobs:
         id: native-setup
         working-directory: source
         run: |
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/manual-integration-native-target"
+          printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
           rustc -Vv
           cargo -V
           cargo-nextest --version
