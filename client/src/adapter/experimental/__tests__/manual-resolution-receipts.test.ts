@@ -56,6 +56,17 @@ function deferred<T>() {
 }
 
 describe("client manual-resolution receipt coordinator (mock atomic boundary)", () => {
+  it("owns one opaque identity across its ports and isolates genuinely different receipt sessions", () => {
+    const receiptSession = session();
+    const original = receiptSession.bindBoundary(boundary())(scope);
+    const replacement = receiptSession.bindBoundary(boundary())({ stackEntryId: 90, sourceObjectId: 80, adapterGeneration: 8 });
+    expect(replacement).not.toBe(original);
+    expect(replacement.receiptSessionIdentity).toBe(original.receiptSessionIdentity);
+    expect(Object.isFrozen(original.receiptSessionIdentity)).toBe(true);
+    expect(session(1).bindBoundary(boundary())(scope).receiptSessionIdentity).not.toBe(original.receiptSessionIdentity);
+    expect(session(0).bindBoundary(boundary())(scope).receiptSessionIdentity).not.toBe(original.receiptSessionIdentity);
+  });
+
   it("exposes the immutable pending/unknown request across source ports for read-only remount recovery", async () => {
     const endpoint = boundary();
     const delivery = deferred<ManualResolutionResult>();

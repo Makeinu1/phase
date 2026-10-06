@@ -93,24 +93,35 @@ function uncertainMessage(reason?: string): string {
 }
 
 /**
- * Source refs fence the stateful session. A replacement context-bound port for
- * the same source inherits uncertainty until it can authoritatively reconcile
- * it. `episodeId` only resets local selection/amount input.
+ * The receipt session identity and source refs fence local state. Replacing a
+ * port within that same authenticated timeline preserves its uncertainty.
+ * `episodeId` only resets local selection/amount input.
  */
 export function ManualResolutionSandbox(props: ManualResolutionSandboxProps) {
-  const { confirmedRestoreEpoch, onSelectedTargetChange, source } = props;
-  const previousRestoreEpochRef = useRef(confirmedRestoreEpoch);
+  const { commandPort, confirmedRestoreEpoch, onSelectedTargetChange, source } = props;
+  const { receiptSessionIdentity } = commandPort;
+  const [sessionFence, setSessionFence] = useState(() => ({ receiptSessionIdentity, revision: 0 }));
+  // Reset during render so the old child never commits the new session's port.
+  // This revision only keys React state; the port's actual session identity is
+  // the authority for the comparison, not a UI-invented authentication key.
+  if (sessionFence.receiptSessionIdentity !== receiptSessionIdentity) {
+    setSessionFence({ receiptSessionIdentity, revision: sessionFence.revision + 1 });
+  }
+  const previousContextRef = useRef({ confirmedRestoreEpoch, receiptSessionIdentity });
   const lifecycleKey = JSON.stringify([
     source.stackEntryId,
     source.sourceObjectId,
     confirmedRestoreEpoch,
+    sessionFence.revision,
   ]);
 
   useLayoutEffect(() => {
-    if (previousRestoreEpochRef.current === confirmedRestoreEpoch) return;
-    previousRestoreEpochRef.current = confirmedRestoreEpoch;
+    const previous = previousContextRef.current;
+    if (previous.confirmedRestoreEpoch === confirmedRestoreEpoch &&
+      previous.receiptSessionIdentity === receiptSessionIdentity) return;
+    previousContextRef.current = { confirmedRestoreEpoch, receiptSessionIdentity };
     onSelectedTargetChange(null);
-  }, [confirmedRestoreEpoch, onSelectedTargetChange]);
+  }, [confirmedRestoreEpoch, onSelectedTargetChange, receiptSessionIdentity]);
 
   return <ManualResolutionSandboxSession key={lifecycleKey} {...props} />;
 }

@@ -106,6 +106,14 @@ export interface ManualResolutionPortScope extends ManualResolutionSourceReferen
  */
 export interface ManualResolutionCommandPort {
   /**
+   * Opaque identity owned by the authenticated receipt session, stable across
+   * its source/boundary/generation port replacements. A genuinely new
+   * authenticated or restored timeline has a different identity. The UI uses
+   * reference equality to fence local state; this is not a native action field
+   * or an authentication credential and must not be derived from viewer IDs.
+   */
+  readonly receiptSessionIdentity: object;
+  /**
    * Read-only recovery snapshot from this authenticated timeline. Return the
    * identical immutable original request while delivery is pending/unknown,
    * including for another source. UI remounts must not erase that evidence;

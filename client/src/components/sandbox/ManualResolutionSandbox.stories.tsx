@@ -34,7 +34,9 @@ function createLocalMockPortFactory(
   sessionActorId: PlayerId,
   setLastAction: (value: string) => void,
 ): ManualResolutionCommandPortFactory {
+  const receiptSessionIdentity = Object.freeze({});
   return (scope): ManualResolutionCommandPort => ({
+    receiptSessionIdentity,
     getUnresolvedManualResolutionRequest: () => null,
     async submitManualResolutionCommand(request: ManualResolutionRequest) {
       const { command } = request;
