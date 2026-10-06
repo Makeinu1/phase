@@ -18,10 +18,13 @@ const fullControlCandidates = "[...document.querySelectorAll('button[aria-label=
 const publicNodeShape = `n=>{const role=n.getAttribute('role'),label=n.getAttribute('aria-label');return {tag:n.tagName,
 role:['dialog','button','status','presentation','alert','tooltip','listbox','option','menu','group','none'].includes(role)?role:role?'other':null,
 ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan','Tap to continue'].includes(label)?label:label?'other':null,
-ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-50','z-30','z-[55]','pointer-events-none','pointer-events-auto','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c))};}`;
+ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-10','z-20','z-30','z-40','z-50','z-[55]','z-[60]','pointer-events-none','pointer-events-auto','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c)),markers:['data-hand-card','data-player-hand','data-mobile-action-left','data-mobile-action-right'].filter(a=>n.hasAttribute(a))};}`;
 const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
 const shape=(${publicNodeShape});const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return {...shape(n),ancestors};});
 return {disabled:b.disabled,clientRects:b.getClientRects().length,bounds:{x:r.x,y:r.y,width:r.width,height:r.height},hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y)),hits};})`;
+const undoCandidates = "[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='Sandbox pre-cast Undo')";
+const undoControls = fullControlControls.replace(fullControlCandidates, undoCandidates);
+const hittableUndo = `(${undoCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y));})`;
 const publicGameControls = `(()=>{const shape=(${publicNodeShape});return {dialogCount:document.querySelectorAll('[role=dialog],dialog[open]').length,
 mulliganShells:[...document.querySelectorAll('div.fixed.inset-0.z-50.overflow-x-hidden.overflow-y-auto')].map(shape),
 startingDiceShells:[...document.querySelectorAll('div[role=status].fixed.inset-0')].filter(n=>n.classList.contains('z-[55]')).map(shape),
@@ -203,8 +206,10 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
         await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount }, sessionId);
       }
     };
-    const click = async expression => {
+    const click = async (expression, diagnostic) => {
+      if (diagnostic) result[diagnostic.key] = { beforeScroll: await evaluate(diagnostic.controls) };
       const r = await evaluate(`(()=>{const n=${expression};if(!n||n.disabled)return null;n.scrollIntoView({block:'center'});const r=n.getBoundingClientRect();const x=r.x+r.width/2,y=r.y+r.height/2;return n.contains(document.elementFromPoint(x,y))?{x,y}:null;})()`);
+      if (diagnostic) result[diagnostic.key].afterScroll = await evaluate(diagnostic.controls);
       assert(r, "app control not pointer-hittable"); await point(r.x, r.y);
     };
     const button = text => `[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)})`;
@@ -376,9 +381,13 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   result.stagesPassed.push("host-pointer-cast");
   const undo = host.button("Sandbox pre-cast Undo");
   await host.wait(`(()=>{const b=${undo};return b&&!b.disabled;})()`);
-  await host.cropControl(undo, "host-armed-undo-control.png");
+  category = "setup"; stage = "host-undo-pointer-ready";
+  result.undoCandidatesBefore = await host.evaluate(undoControls);
+  await host.wait(hittableUndo);
+  await host.cropControl(hittableUndo, "host-armed-undo-control.png");
   stage = "host-pointer-undo";
-  await host.click(undo);
+  await host.click(hittableUndo, { key: "undoClickUi", controls: undoControls });
+  category = "product"; stage = "host-undo-restore";
   await host.wait("window.__twoSeatQa.restoreWitness()", 30);
   await guest.wait("window.__twoSeatQa.status().stackCount===0 && !window.__twoSeatQa.status().blocked", 30);
   await host.evaluate("window.__twoSeatQa.drainObservations()");
@@ -447,6 +456,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   for (const [role, page] of Object.entries(pages)) {
     try { result.publicGameControls[role] = await page.evaluate(publicGameControls); } catch {}
   }
+  try { result.undoCandidatesAfterFailure = await pages.host?.evaluate(undoControls); } catch {}
   const safeErrors = Object.values(result.lastObservation).flatMap(x => x?.safeErrors ?? []);
   if (safeErrors.some(x => ["wire-observer-failed", "lifecycle-observer-failed", "lifecycle-observer-overflow"].includes(x))) {
     result.failureCategory = "observation"; result.failureCode = "WIRE_OBSERVATION_INCOMPLETE";
