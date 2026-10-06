@@ -13,6 +13,13 @@ const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const hostForm = "document.querySelector('button[aria-label=Format]')?.closest('form')";
 const hostSubmit = `(${hostForm})?.querySelector('button[type=submit]')`;
+const fullControlCandidates = "[...document.querySelectorAll('button[aria-label=\"Full Control Off\"]')]";
+const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const role=n.getAttribute('role'),label=n.getAttribute('aria-label');return {tag:n.tagName,
+role:['dialog','button','status','presentation','alert','tooltip','listbox','option','menu','group','none'].includes(role)?role:role?'other':null,
+ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan'].includes(label)?label:label?'other':null,ariaHidden:n.getAttribute('aria-hidden')==='true'};});
+return {disabled:b.disabled,clientRects:b.getClientRects().length,bounds:{x:r.x,y:r.y,width:r.width,height:r.height},hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y)),hits};})`;
+const hittableFullControl = `(${fullControlCandidates}).find(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return !b.disabled&&r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y));})`;
 // Only fixed public control names and validity flags leave the page. Never
 // serialize arbitrary text, input values, deck identity, or a DOM node.
 const setupControls = `(()=>{const f=${hostForm};if(!f)return {formPresent:false};
@@ -279,13 +286,16 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   }
   stage = "host-game-ready"; await host.wait("window.__twoSeatQa.status().ready", 90);
   stage = "guest-game-ready"; await guest.wait("window.__twoSeatQa.status().ready", 90);
+  result.stagesPassed.push("both-real-game-states-ready");
+  result.fullControlUi = {};
   for (const [role, page] of Object.entries(pages)) {
     stage = role + "-native-channel-ready";
     await page.wait("window.__twoSeatQa.status().route==='game' && window.__twoSeatQa.status().nativeChannels");
     stage = role + "-full-control";
-    const control = "[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')==='Full Control Off')";
-    await page.wait(`Boolean(${control})`);
-    await page.click(control);
+    result.fullControlUi[role] = { candidatesBefore: await page.evaluate(fullControlControls) };
+    await page.wait(hittableFullControl);
+    result.fullControlUi[role].candidatesAtClick = await page.evaluate(fullControlControls);
+    await page.click(hittableFullControl);
     await page.wait("window.__twoSeatQa.status().fullControl && window.__twoSeatQa.status().fullControlApplied");
     assert(!(await page.evaluate("window.__twoSeatQa.status().agreed")), "consent was not consumed");
   }
