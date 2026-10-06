@@ -161,6 +161,15 @@ jobs:
             --pool=forks --isolate --coverage.enabled=false --reporter=verbose \
             src/game/__tests__/wasmLegalActions.integration.test.ts \
             src/data/__tests__/formatRegistry.integration.test.ts
+      - name: Actual WASM ordinary cast and host Undo restore boundaries (not UI or two-seat sync)
+        if: ${{ !cancelled() && steps.wasm-input.outcome == 'success' }}
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/wasm-undo-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py actual-wasm-restore \
+            node ../control/scripts/ci/undo-f-wasm-restore.mjs "$GITHUB_WORKSPACE/wasm-payload" \
+            crates/engine-wasm/src/fixtures/host-precast-card-data.json
       - name: Chromium actual-engine module-worker capability (not app UI or RTC acceptance)
         # Run after integration, even if its bindings/dependencies/tests failed.
         # A browser failure cannot suppress the independent WASM test evidence.
@@ -177,6 +186,7 @@ jobs:
           name: undo-f-reused-wasm-and-browser-evidence
           path: |
             wasm-test-evidence
+            wasm-undo-evidence
             browser-evidence
           if-no-files-found: warn
           retention-days: 7
