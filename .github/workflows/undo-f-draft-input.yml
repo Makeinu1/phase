@@ -1,0 +1,122 @@
+name: Fork Undo F exact draft input producer
+
+on:
+  push:
+    branches: [experiment/undo-f-draft-input-e10955dc]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-undo-f-draft-input-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  F_SOURCE_SHA: e10955dc5977f1ba7c65cb1518cb8f4b1679fe92
+  CARGO_BUILD_JOBS: '1'
+  CARGO_TERM_COLOR: never
+
+jobs:
+  draft-build:
+    # No dependency on or mutation of any existing validation lane.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+        with:
+          toolchain: nightly-2026-04-19
+          target: wasm32-unknown-unknown
+          components: rustfmt,clippy,rustc-codegen-cranelift-preview
+          rust-src-dir: source
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Check exact source, locked bindgen version and existing safe profile inputs
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$F_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          rustc -Vv
+          cargo -V
+          test "$(wasm-bindgen --version)" = 'wasm-bindgen 0.2.121'
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          toolchain = tomllib.loads(Path('rust-toolchain.toml').read_text())
+          assert toolchain['toolchain']['channel'] == 'nightly-2026-04-19'
+          lock = tomllib.loads(Path('Cargo.lock').read_text())
+          assert [p['version'] for p in lock['package'] if p['name'] == 'wasm-bindgen'] == ['0.2.121']
+          config = tomllib.loads(Path('.cargo/config.toml').read_text())
+          assert config['target']['wasm32-unknown-unknown']['rustflags'] == ['-C', 'link-arg=-z', '-C', 'link-arg=stack-size=16777216']
+          print('Exact toolchain/lock/16MiB shadow-stack input checks PASS')
+          PY
+      - name: Compile draft-wasm once, generate real bindings and check the paired module
+        working-directory: source
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/undo-f-draft-target
+          F_EVIDENCE: ${{ github.workspace }}/draft-build-evidence
+        run: |
+          mkdir "$GITHUB_WORKSPACE/draft-payload"
+          python3 ../control/scripts/ci/undo-f-guard.py wasm-draft-build \
+            cargo build --locked --jobs 1 --verbose --package draft-wasm \
+            --target wasm32-unknown-unknown --profile tool \
+            --config profile.tool.opt-level=0 --config profile.tool.debug=0 \
+            --config profile.tool.incremental=false --config 'profile.tool.lto="off"' \
+            --config profile.tool.codegen-units=16
+          python3 ../control/scripts/ci/undo-f-guard.py draft-bindgen \
+            wasm-bindgen --target web --out-name draft_wasm \
+            --out-dir "$GITHUB_WORKSPACE/draft-payload" \
+            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/tool/draft_wasm.wasm"
+          grep -F 'link-arg=stack-size=16777216' "$F_EVIDENCE/wasm-draft-build.log"
+          printf '%s\n' '{"type":"module"}' > "$GITHUB_WORKSPACE/draft-payload/package.json"
+          python3 ../control/scripts/ci/undo-f-guard.py draft-generated-bindings \
+            node ../control/scripts/ci/undo-f-draft-bindings.mjs "$GITHUB_WORKSPACE/draft-payload"
+      - name: Pin draft artifact contents and compiled input provenance
+        working-directory: source
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          record = {'source_sha': os.environ['F_SOURCE_SHA'], 'source_tree': subprocess.check_output(['git','rev-parse','HEAD^{tree}'], text=True).strip(),
+                    'target': 'wasm32-unknown-unknown', 'package': 'draft-wasm', 'compile_commands': 1,
+                    'profile': {'name':'tool','opt-level':0,'debug':0,'incremental':False,'lto':'off','codegen-units':16},
+                    'jobs': 1, 'wasm_bindgen': subprocess.check_output(['wasm-bindgen','--version'],text=True).strip(),
+                    'engine_wasm_rebuilt': False, 'scope':'Real draft module input for full App startup; draft gameplay NOT RUN'}
+          (Path(os.environ['GITHUB_WORKSPACE'])/'draft-payload/provenance.json').write_text(json.dumps(record,indent=2)+'\n')
+          PY
+          python3 ../control/scripts/ci/undo-f-manifest.py create "$GITHUB_WORKSPACE/draft-payload" > "$RUNNER_TEMP/draft-manifest-sha.txt"
+          cat "$RUNNER_TEMP/draft-manifest-sha.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: payload
+        with:
+          name: undo-f-exact-draft-wasm
+          path: draft-payload
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Record normal artifact identity
+        run: echo 'draft artifact=${{ steps.payload.outputs.artifact-id }} digest=${{ steps.payload.outputs.artifact-digest }}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-draft-build-evidence
+          path: draft-build-evidence
+          if-no-files-found: warn
+          retention-days: 7
