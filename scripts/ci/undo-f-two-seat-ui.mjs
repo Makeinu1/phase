@@ -11,6 +11,22 @@ const [client, wasm, draft, fixture, serverPackages, evidence] = process.argv.sl
 const frontendSha = "03b13eccaa6823ed41a0832044c33fb1821187e9";
 const engineSha = "e10955dc5977f1ba7c65cb1518cb8f4b1679fe92";
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+const hostForm = "document.querySelector('button[aria-label=Format]')?.closest('form')";
+const hostSubmit = `(${hostForm})?.querySelector('button[type=submit]')`;
+// Only fixed public control names and validity flags leave the page. Never
+// serialize arbitrary text, input values, deck identity, or a DOM node.
+const setupControls = `(()=>{const f=${hostForm};if(!f)return {formPresent:false};
+const names=['Host Game','Host P2P Game','Opening...','You host (P2P)','Server hosts','Back','2','Limited'];
+const controls=[...f.querySelectorAll('button,input,select')].map(n=>({
+tag:n.tagName,type:n.getAttribute('type'),name:names.includes(n.textContent.trim())?n.textContent.trim():null,
+disabled:Boolean(n.disabled),ariaDisabled:n.getAttribute('aria-disabled')==='true',required:Boolean(n.required),
+valid:n.validity?.valid??null,valueMissing:n.validity?.valueMissing??null,badInput:n.validity?.badInput??null,
+rangeUnderflow:n.validity?.rangeUnderflow??null,rangeOverflow:n.validity?.rangeOverflow??null}));
+const b=f.querySelector('button[type=submit]'),title=b?.getAttribute('title')??'';
+return {formPresent:true,formatLimited:f.querySelector('button[aria-label=Format]')?.textContent.trim()==='Limited',
+submitPresent:Boolean(b),submitDisabled:Boolean(b?.disabled),submitAriaDisabled:b?.getAttribute('aria-disabled')==='true',
+submitLabel:b?.textContent.trim()==='Host P2P Game'?'Host P2P Game':b?.textContent.trim()==='Host Game'?'Host Game':'other',
+submitTitlePresent:Boolean(title),submitReason:/checking/i.test(title)?'checking':/not legal/i.test(title)?'illegal':title?'other':null,controls};})()`;
 const git = (...args) => execFileSync("git", ["-C", client, ...args], { encoding: "utf8" }).trim();
 await mkdir(evidence, { recursive: true });
 const result = { frontendSha, engineSha, workflowSha: process.env.GITHUB_SHA,
@@ -192,8 +208,10 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   stage = "host-p2p-selection";
   await host.click(host.button("You host (P2P)"));
   stage = "host-submit-room";
-  await host.wait(`(()=>{const b=${host.button("Host Game")};return b&&!b.disabled;})()`, 90);
-  await host.click(host.button("Host Game"));
+  result.hostSetupBeforeSubmit = await host.evaluate(setupControls);
+  await host.wait(`(()=>{const b=${hostSubmit};return b&&b.textContent.trim()==='Host P2P Game'&&!b.disabled;})()`, 90);
+  result.hostSetupAtSubmit = await host.evaluate(setupControls);
+  await host.click(hostSubmit);
   stage = "host-continue-without-lobby";
   await host.wait(`Boolean(${host.button("Continue without lobby")})`);
   await host.click(host.button("Continue without lobby"));
@@ -290,6 +308,10 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   result.publicUiChecks = {};
   for (const [role, page] of Object.entries(pages)) {
     try { result.publicUiChecks[role] = await page.evaluate(`(()=>{const c=[...document.querySelectorAll('input[type=checkbox]')].find(n=>n.closest('label')?.textContent.includes('I agree that the host'));return {rootMounted:Boolean(document.getElementById('root')?.childElementCount),consentRendered:Boolean(c),consentChecked:Boolean(c?.checked),directCodePrompt:[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Use direct code'),hostSetupRendered:Boolean(document.querySelector('button[aria-label=Format]')),joinInputRendered:Boolean(document.querySelector('input[placeholder="Enter code or CODE@IP:PORT"]'))};})()`); } catch {}
+  }
+  result.publicFormChecks = {};
+  for (const [role, page] of Object.entries(pages)) {
+    try { result.publicFormChecks[role] = await page.evaluate(setupControls); } catch {}
   }
   const safeErrors = Object.values(result.lastObservation).flatMap(x => x?.safeErrors ?? []);
   if (safeErrors.includes("wire-observer-failed")) {
