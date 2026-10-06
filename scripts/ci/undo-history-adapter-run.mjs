@@ -13,7 +13,8 @@ assert([undefined, '--selfcheck-only', '--browser-selfcheck-only', '--module-sel
 const inputOnly = mode === '--selfcheck-only', browserOnly = mode === '--browser-selfcheck-only';
 const moduleOnly = mode === '--module-selfcheck-only';
 const routeRecoveryUi = process.env.F_LOCAL_RECOVERY_UI === '1';
-const localUi = process.env.F_LOCAL_UI === '1' || routeRecoveryUi;
+const localProgressUi = process.env.F_LOCAL_PROGRESS_UI === '1';
+const localUi = process.env.F_LOCAL_UI === '1' || routeRecoveryUi || localProgressUi;
 const candidate = path.resolve(candidateArg), payload = path.resolve(payloadArg), evidence = path.resolve(evidenceArg);
 await mkdir(evidence, { recursive: true });
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -52,7 +53,7 @@ await cp(path.join(candidate, 'client'), client, { recursive: true, filter: p =>
 await symlink(path.join(candidate, 'client/node_modules'), path.join(client, 'node_modules'), 'dir');
 await cp(path.join(candidate, 'data-files.json'), path.join(runtime, 'data-files.json'));
 const scriptDir = path.dirname(new URL(import.meta.url).pathname);
-await cp(path.join(scriptDir, routeRecoveryUi ? 'undo-history-route-recovery-ui.mjs' : localUi ? 'undo-history-local-ui.mjs' : 'undo-history-browser.mjs'), path.join(client, 'qa-history-adapter.mjs'));
+await cp(path.join(scriptDir, localProgressUi ? 'undo-history-local-progress-ui.mjs' : routeRecoveryUi ? 'undo-history-route-recovery-ui.mjs' : localUi ? 'undo-history-local-ui.mjs' : 'undo-history-browser.mjs'), path.join(client, 'qa-history-adapter.mjs'));
 await cp(path.join(scriptDir, 'undo-history-comparator.mjs'), path.join(client, 'qa-history-comparator.mjs'));
 await mkdir(path.join(client, 'src/wasm'), { recursive: true });
 await writeFile(path.join(client, 'src/wasm/engine_wasm.js'), originalGlue);
@@ -174,8 +175,13 @@ try {
     const observed = await evaluate('({result:globalThis.__qaResult,heap:globalThis.__qaHeapStage,progress:globalThis.__qaProgress,ui:globalThis.__qaUiRequest})');
     if (observed.progress && JSON.stringify(observed.progress) !== lastProgress) { lastProgress = JSON.stringify(observed.progress); await writeFile(path.join(evidence, 'browser-progress.json'), lastProgress + '\n'); }
     if (observed.ui) {
-      const { selector, double, screenshot, key } = observed.ui;
-      if (key) {
+      const { selector, double, screenshot, key, captureOnly } = observed.ui;
+      if (captureOnly) {
+        assert(/^[a-z-]+$/.test(screenshot), 'fixed observation screenshot basename');
+        const capture = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, pageSession);
+        await writeFile(path.join(evidence, `${screenshot}.png`), Buffer.from(capture.data, 'base64'));
+        await evaluate('globalThis.__qaUiRequest=null;globalThis.__qaUiClicked();true');
+      } else if (key) {
         assert(key === 'z', 'only the existing Undo keyboard shortcut');
         await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'z', code: 'KeyZ', windowsVirtualKeyCode: 90 }, pageSession);
         await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'z', code: 'KeyZ', windowsVirtualKeyCode: 90 }, pageSession);
@@ -230,7 +236,7 @@ try {
     bindingOriginalSha256: digest(originalGlue), bindingRuntimeSha256: digest(originalGlue), bindingUnmodified: true, publicMethods,
     draftBindingSha256: digest(draftGlue), draftBindingUnmodified: true,
     fixtureSha256: digest(fixture), peakChromeTreeRssBytes, peakNodeRssBytes: process.resourceUsage().maxRSS * 1024,
-    localUi, routeRecoveryUi,
+    localUi, routeRecoveryUi, localProgressUi,
     heapScope: localUi ? 'No retained-heap campaign; process RSS sampled only' : 'single headless Chromium on Ubuntu; UTF8/main JS/Worker JS/WASM allocated region/process peak separated; not product limit or free guarantee',
     heaps,
   }, null, 2) + '\n');
