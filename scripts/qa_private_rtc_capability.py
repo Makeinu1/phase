@@ -249,7 +249,7 @@ def check_a2(snapshot):
 
 
 def run_browser(args, manifest, contents, result):
-    owner = {"process": None, "cleaning": False, "termination": None}
+    owner = {"process": None, "acquiring": False, "cleaning": False, "termination": None}
     result["cleanup"] = {"result": "running", "steps": []}
 
     def terminate_owned(_number, _frame):
@@ -257,6 +257,8 @@ def run_browser(args, manifest, contents, result):
         # immediately so a browser in its private session cannot outlive the driver.
         owner["termination"] = RuntimeError("Driver termination requested")
         result["cleanup"]["terminationRequested"] = True
+        if owner["process"] is None and owner["acquiring"]:
+            return  # Finish acquiring the handle before signaling its private group.
         if owner["process"] is not None:
             try:
                 signal_browser_group(owner["process"].pid, signal.SIGKILL)
@@ -325,14 +327,18 @@ def _run_browser(args, manifest, contents, result, owner):
         result["browserArguments"] = command
         require(not any(arg == flag or arg.startswith(flag + "=") for arg in command for flag in FORBIDDEN_ARGS), "forbidden browser security argument")
         with (args.output_dir / "browser-launch.stdout.txt").open("xb") as stdout, (args.output_dir / "browser-launch.stderr.txt").open("xb") as stderr:
-            # Block cancellation only while acquiring the process handle. The
-            # handler must know the owned session before a pending SIGTERM runs.
-            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            # Defer cancellation in Python while acquiring the handle. Blocking
+            # SIGTERM in the OS would also block it in the exec'd browser.
+            owner["acquiring"] = True
             try:
                 process = subprocess.Popen(command, stdout=stdout, stderr=stderr, start_new_session=True)
                 owner["process"] = process
             finally:
-                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                owner["acquiring"] = False
+            if owner["termination"] is not None:
+                terminate = owner["termination"]
+                signal_browser_group(process.pid, signal.SIGKILL)
+                raise terminate
         result["cleanup"]["launchFilesClosed"] = stdout.closed and stderr.closed
         port_file = Path(profile) / "DevToolsActivePort"
         deadline = time.monotonic() + 20

@@ -317,6 +317,46 @@ class CleanupTests(unittest.TestCase):
         self.assertFalse(self.profile.exists())
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
 
+    def test_real_launch_does_not_inherit_blocked_sigterm(self):
+        profile = self.args.output_dir / "launch-mask-profile"
+        profile.mkdir()
+        executable = """
+import json, signal, sys, time
+from pathlib import Path
+Path(sys.argv[1], 'mask-ready').write_text(json.dumps(signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, set())))
+time.sleep(30)
+"""
+        popen = subprocess.Popen
+        self.process = None  # The launch factory supplies the actual Popen; no group calls are mocked.
+        blocked = []
+
+        def launch(_command, **kwargs):
+            self.process = popen([sys.executable, "-B", "-c", executable, str(profile)], **kwargs)
+            return self.process
+
+        def observe_mask(*_args, **_kwargs):
+            ready = profile / "mask-ready"
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "positive guard: real launched child executed")
+            blocked.append(json.loads(ready.read_bytes()))
+
+        self.page.goto.side_effect = observe_mask
+        try:
+            error = self.run_fault(profile, launch)
+            self.assertIsNone(error)
+            self.assertEqual(blocked, [False])
+            state = self.result["cleanup"]["browserProcess"]
+            self.assertTrue(state["terminateSent"])
+            self.assertFalse(state["killSent"])
+            self.assertEqual(state["exitCode"], -signal.SIGTERM)
+        finally:
+            if self.process is not None:
+                if self.process.poll() is None:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                self.process.wait(timeout=5)
+
     def test_exited_parent_cannot_leave_owned_child_writing_profile_during_removal(self):
         """Real Python processes reach run_browser teardown; no browser is run."""
         profile = self.args.output_dir / "writer-profile"
