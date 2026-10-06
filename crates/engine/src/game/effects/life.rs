@@ -321,6 +321,7 @@ pub fn apply_life_loss(
 /// CR 119.3 through the same replacement/edit authority as
 /// [`apply_life_loss`], with a caller-owned maximum checked after replacement
 /// application but before any signed life edit or event conversion.
+#[cfg(all(feature = "manual_resolution_prototype", not(target_arch = "wasm32")))]
 pub(crate) fn apply_life_loss_bounded(
     state: &mut GameState,
     player_id: PlayerId,
