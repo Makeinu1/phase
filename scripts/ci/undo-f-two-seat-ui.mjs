@@ -61,6 +61,11 @@ const rects=[...rail.querySelectorAll('[data-mobile-action-left],[data-mobile-ac
 const empty=(x,y)=>x>r.left&&x<r.right&&y>r.top&&y<r.bottom&&x>=0&&y>=0&&x<innerWidth&&y<innerHeight&&!rects.some(b=>x>=b.left&&x<=b.right&&y>=b.top&&y<=b.bottom);
 const undo=(${visibleEnabledUndo})[0];if(undo){const b=undo.getBoundingClientRect(),x=b.x+b.width/2,y=b.y+b.height/2;if(empty(x,y))return{x,y,originalUndoCenter:true};}
 for(let y=Math.max(0,r.top)+2;y<Math.min(innerHeight,r.bottom);y+=8)for(let x=Math.max(0,r.left)+2;x<Math.min(innerWidth,r.right);x+=8)if(empty(x,y))return{x,y,originalUndoCenter:false};return null;})()`;
+const railGapProbe = gap => `(()=>{const area=(${railHitAreas}),rail=document.querySelector('[data-flex-zone="actionRail"]'),x=${gap.x},y=${gap.y};if(!rail||!area)return null;
+const bounds=n=>{const r=n.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height};},pointer=v=>['auto','none',''].includes(v)?v:'other';
+const publicShape=(${publicNodeShape});const shape=n=>{const splitter=n.closest('[data-flex-splitter]')?.getAttribute('data-flex-splitter'),role=n.getAttribute('role');return{...publicShape(n),role:['separator','slider'].includes(role)?role:publicShape(n).role,bounds:bounds(n),pointerEvents:pointer(getComputedStyle(n).pointerEvents),railRoot:n===rail,withinRail:rail.contains(n),withinResizeHandle:Boolean(n.closest('[role="slider"][aria-label="Resize"]')),splitter:splitter==null?null:['top','bottom'].includes(splitter)?splitter:'other',editClasses:['z-[70]','z-[71]','z-[72]','cursor-grab','cursor-row-resize'].filter(c=>n.classList.contains(c))};};
+const top=document.elementFromPoint(x,y),hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return{...shape(n),ancestors};});
+return{point:{x,y},exactRootHit:top===rail,railContainsHit:rail.contains(top),inlinePointerEvents:pointer(rail.style.pointerEvents),computedPointerEvents:pointer(getComputedStyle(rail).pointerEvents),hits,geometry:{viewport:area.viewport,boardBounds:area.boardBounds,boardScroll:area.boardScroll,windowScroll:area.windowScroll,railBounds:area.railBounds,railCssPosition:area.railCssPosition,stackPanels:area.stackPanels}};})()`;
 const observeRail = async (page,width,height) => {
   const started=Date.now(),deadline=started+30000;
   const witness={viewport:{width,height},samples:[],sampleCount:0,stable:false};
@@ -636,11 +641,13 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
     assert(area.stackPanels.every(s=>s.entries.length>0 && s.entries.some(e=>e.exposedPoint)), "stack entry has no exposed pointer target");
   }
   const gap = await host.evaluate(railGap); assert(gap, "action rail empty-space witness missing");
+  result.railGapWitness = {point:gap,play:await host.evaluate(railGapProbe(gap))};
   assert(await host.evaluate(`!document.querySelector('[data-flex-zone="actionRail"]').contains(document.elementFromPoint(${gap.x},${gap.y}))`), "empty action rail area does not pass through");
   // Existing product shortcut toggles edit mode; no store writes or CSS injection.
   await cdp("Input.dispatchKeyEvent", {type:"keyDown",key:"L",code:"KeyL",modifiers:10,windowsVirtualKeyCode:76}, host.sessionId);
   await cdp("Input.dispatchKeyEvent", {type:"keyUp",key:"L",code:"KeyL",modifiers:10,windowsVirtualKeyCode:76}, host.sessionId);
   await host.wait("document.querySelector('[data-flex-zone=actionRail]')?.style.pointerEvents==='auto'");
+  result.railGapWitness.edit = await host.evaluate(railGapProbe(gap));
   assert(await host.evaluate(`document.elementFromPoint(${gap.x},${gap.y})===document.querySelector('[data-flex-zone="actionRail"]')`), "layout edit mode cannot grab rail empty space");
   const stackEditArea = await host.evaluate(railHitAreas);
   result.stackEditArea = stackEditArea;
