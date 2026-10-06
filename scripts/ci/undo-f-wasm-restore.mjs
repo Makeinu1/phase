@@ -5,7 +5,10 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 let stage = "initialize";
-function check(value, code) { if (!value) throw Error(code); }
+let failedCheck;
+let progress;
+let lastActionType;
+function check(value, code) { if (!value) { failedCheck = code; throw Error(code); } }
 try {
   const directory = path.resolve(process.argv[2]);
   const fixture = path.resolve(process.argv[3]);
@@ -22,6 +25,7 @@ try {
   const state = () => { const value = engine.get_game_state()?.state; check(value?.players?.length === 2, "engine-state-envelope"); return value; };
   const legal = actor => engine.get_legal_actions_for_viewer_js(actor).actions;
   const submit = (actor, action) => {
+    lastActionType = action.type;
     const outcome = engine.submit_action(actor, action);
     check(outcome.status === "applied" && outcome.result && !outcome.result.disposition, "action-applied");
     return outcome.result;
@@ -32,6 +36,7 @@ try {
   for (let step = 0; step < 500 && !cast; step++) {
     const current = state();
     const waiting = current.waiting_for;
+    progress = { step, turn: current.turn_number, phase: current.phase, waiting: waiting.type };
     if (waiting.type === "MulliganDecision") {
       submit(waiting.data.pending[0].player, { type: "MulliganDecision", data: { choice: { type: "Keep" } } });
     } else if (waiting.type === "DeclareAttackers") {
@@ -105,6 +110,6 @@ try {
     ui: "NOT RUN", twoSeatSync: "NOT RUN", memoryReclamation: "NOT RUN" }));
 } catch {
   // Never serialize assertion values, hidden hands/libraries, bindings or receipts.
-  console.error(JSON.stringify({ pass: false, stage }));
+  console.error(JSON.stringify({ pass: false, stage, failedCheck: failedCheck ?? "wasm-api-or-runtime-error", progress, lastActionType }));
   process.exitCode = 1;
 }

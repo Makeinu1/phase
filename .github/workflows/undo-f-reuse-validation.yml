@@ -63,6 +63,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
       - name: Run this native partition without Cargo metadata or compilation
         working-directory: source
         env:
@@ -188,5 +189,96 @@ jobs:
             wasm-test-evidence
             wasm-undo-evidence
             browser-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+  rtc-capability:
+    # QA source is independent from the fixed engine and from every other job.
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.F_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e6baec9579504368885c61aacecfdbf28b044e58
+          path: rtc-qa
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /client/qa/private-rtc-capability.html
+            /client/src/qa/harness/
+            /client/vite.privateRtcCapability.config.ts
+            /client/vitest.privateRtcCapability.config.ts
+            /client/package.json
+            /client/pnpm-lock.yaml
+            /scripts/qa_private_rtc_capability.py
+            /scripts/qa_private_rtc_capability_tests.py
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 9.15.9
+      - name: Build only the pinned A1/A2 harness and install its Python driver dependency
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/rtc-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-client-dependencies \
+            pnpm --dir "$GITHUB_WORKSPACE/rtc-qa/client" install --frozen-lockfile
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-python-environment \
+            python3 -m venv "$RUNNER_TEMP/rtc-python"
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-driver-dependency \
+            "$RUNNER_TEMP/rtc-python/bin/pip" install --disable-pip-version-check playwright==1.62.0
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-harness-build \
+            pnpm --dir "$GITHUB_WORKSPACE/rtc-qa/client" exec vite build --config vite.privateRtcCapability.config.ts
+      - name: Pin A1 source identity independently from the engine source
+        working-directory: rtc-qa
+        run: |
+          test "$(git rev-parse HEAD)" = e6baec9579504368885c61aacecfdbf28b044e58
+          git diff --exit-code -- client/package.json client/pnpm-lock.yaml
+          python3 - <<'PY'
+          import hashlib, importlib.util, os
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('rtc_driver', 'scripts/qa_private_rtc_capability.py')
+          driver = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(driver)
+          digest = hashlib.sha256()
+          for name in driver.SOURCE_INPUTS:
+              digest.update(name.encode() + b'\0' + (Path('client') / name).read_bytes() + b'\0')
+          assert digest.hexdigest() == '5b0f3af5f48b7274f51b6696046134d4b569f3f42bdefa5a63e64c7096d33d43', 'pinned QA inputs differ'
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('RTC_A1_SOURCE_SHA256=' + digest.hexdigest() + '\n')
+          print('QA source e6baec9579504368885c61aacecfdbf28b044e58; A1 input SHA256=' + digest.hexdigest())
+          PY
+      - name: Actual native RTC A1/A2 capability (not Phase two-seat game sync)
+        working-directory: source
+        env:
+          F_EVIDENCE: ${{ github.workspace }}/rtc-evidence
+        run: |
+          python3 ../control/scripts/ci/undo-f-guard.py rtc-native-capability \
+            "$RUNNER_TEMP/rtc-python/bin/python" "$GITHUB_WORKSPACE/rtc-qa/scripts/qa_private_rtc_capability.py" \
+            --client-root "$GITHUB_WORKSPACE/rtc-qa/client" \
+            --build-dir "$GITHUB_WORKSPACE/rtc-qa/client/dist-private-rtc-capability" \
+            --output-dir "$F_EVIDENCE/runtime" \
+            --expected-source-sha256 "$RTC_A1_SOURCE_SHA256" \
+            --expected-source-head e6baec9579504368885c61aacecfdbf28b044e58 \
+            --browser-path /usr/bin/google-chrome
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: undo-f-independent-rtc-capability-evidence
+          path: rtc-evidence
           if-no-files-found: warn
           retention-days: 7
