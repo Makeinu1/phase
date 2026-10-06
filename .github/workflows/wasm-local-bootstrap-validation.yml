@@ -1,6 +1,8 @@
 name: Fork Local Worker bootstrap validation
 
 on:
+  push:
+    branches: [experiment/manual-wasm-native-off-diagnostic]
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [experiment/manual-integration-actions]
@@ -10,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -2145,3 +2147,302 @@ jobs:
           bootstrap-evidence/baseline-source-after.json
         if-no-files-found: warn
         retention-days: 7
+
+  native-off-diagnostic:
+    if: >-
+      github.repository == 'Makeinu1/phase' && github.repository_id == '1377698441' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/experiment/manual-wasm-native-off-diagnostic'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      MANUAL_EXPECTED_SOURCE_SHA: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+      MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-native-off-evidence
+      CARGO_TARGET_DIR: ${{ runner.temp }}/bootstrap-native-target
+      RUST_MIN_STACK: '16777216'
+      BOOTSTRAP_NATIVE_ARTIFACT: 'off'
+      BOOTSTRAP_NATIVE_TEST_COUNT: '10'
+    steps:
+    - name: Checkout exact diagnostic product source
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: 4fa56ded3a65431ce3f5f943dafaff979a40255f
+        path: candidate-source
+        persist-credentials: false
+    - name: Checkout workflow event source separately
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        ref: ${{ github.sha }}
+        path: diagnostic-workflow-source
+        persist-credentials: false
+    - name: Admit immutable sources and extract exact original collector
+      id: source-admission
+      working-directory: candidate-source
+      run: |
+        python3 - 2>/dev/null <<'OFF_SOURCE'
+        import ast, hashlib, json, os, re, subprocess
+        from pathlib import Path
+        try:
+            def git(source, *args):
+                return subprocess.check_output(['git', '-C', str(source), *args], stderr=subprocess.DEVNULL, text=True).strip()
+            source = Path('.'); workflow_source = Path('../diagnostic-workflow-source')
+            workflow_path = '.github/workflows/wasm-local-bootstrap-validation.yml'
+            event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+            assert os.environ['GITHUB_REPOSITORY'] == event['repository']['full_name'] == 'Makeinu1/phase'
+            assert os.environ['GITHUB_REPOSITORY_ID'] == str(event['repository']['id']) == '1377698441'
+            assert os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['GITHUB_RUN_ATTEMPT'] == '1'
+            assert os.environ['GITHUB_REF'] == event['ref'] == 'refs/heads/experiment/manual-wasm-native-off-diagnostic'
+            assert event['deleted'] is False and event['after'] == os.environ['GITHUB_SHA']
+            assert re.fullmatch('[a-f0-9]{40}', os.environ['GITHUB_SHA'])
+            assert os.environ['GITHUB_WORKFLOW_SHA'] == os.environ['GITHUB_SHA']
+            assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == '4fa56ded3a65431ce3f5f943dafaff979a40255f'
+            assert git(source, 'rev-parse', 'HEAD^{tree}') == 'f41d9e32a31aaa7ed653d24991226c3c92c51316'
+            assert git(workflow_source, 'rev-parse', 'HEAD') == os.environ['GITHUB_SHA']
+            assert git(source, 'status', '--porcelain') == git(workflow_source, 'status', '--porcelain') == ''
+            pins = {
+                'Cargo.lock': '5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0',
+                'client/pnpm-lock.yaml': 'bc13ba1f6de5efd5bc724d9945aa541136df1d6938a41c53768f76c7b36c4ea4',
+                'rust-toolchain.toml': '52562c175563386d0f9f19afafd2855662ef2590765204b35bd624de13fe67af',
+                'Cargo.toml': '1821bf54554639dfa513d03a2a71e1503b445df42e62cde93e31b7e5289ea64a',
+                '.cargo/config.toml': 'da039ac38eb9d43e236e9eb89c65ef30a149d0539ed7ebfb3ee8f1d78b383c66',
+                '.config/nextest.toml': 'ad466230f2659e95584196fbd2e554cfa3c2345313a103a82847d91e9f9a34db',
+                'crates/engine-wasm/Cargo.toml': 'e70ecac5eb259cd3dd9fa6e0d38e6a346ced035fec727af3fdfed8a650f1f469',
+                'scripts/ci/manual-integration-guard.py': os.environ['BOOTSTRAP_GUARD_SHA256'],
+            }
+            assert pins['scripts/ci/manual-integration-guard.py'] == '71becc084429d70cb200717e8bb2a299b33dc8c4aedfec8a4bf3e21d3536a814'
+            assert all(hashlib.sha256((source / name).read_bytes()).hexdigest() == digest for name, digest in pins.items())
+            original = (source / workflow_path).read_text()
+            assert hashlib.sha256(original.encode()).hexdigest() == '22a55f54c40772ad369de5edc5ec5ba4dd63d37dbf614761bc8da0023aaf98cd'
+            current = (workflow_source / workflow_path).read_text()
+            def collector(workflow):
+                opening = "<<'NATIVE'\n"; closing = '        NATIVE\n'
+                assert workflow.count(opening) == workflow.count(closing) == 1
+                body = workflow.split(opening, 1)[1].split(closing, 1)[0].splitlines(keepends=True)
+                assert len(body) == 35 and all(line.startswith('        ') for line in body)
+                return ''.join(line[8:] for line in body)
+            native = collector(original)
+            assert native == collector(current)
+            digest = hashlib.sha256(native.encode()).hexdigest()
+            assert digest == 'cbbd22b60f2f4b6630748bb277fe75c89d4df68ef1edc96e76fe008db0a223e4'
+            ast.parse(native)
+            assert {key: value for key, value in os.environ.items() if key.startswith('CARGO_PROFILE_')} == {}
+            assert 'RUSTFLAGS' not in os.environ and 'CARGO_ENCODED_RUSTFLAGS' not in os.environ
+            root = Path(os.environ['MANUAL_EVIDENCE']); root.mkdir(parents=True, exist_ok=True)
+            (Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-off-collector.py').write_text(native)
+            value = {'source_sha': os.environ['MANUAL_EXPECTED_SOURCE_SHA'], 'source_tree': git(source, 'rev-parse', 'HEAD^{tree}'),
+                'workflow_sha': os.environ['GITHUB_WORKFLOW_SHA'], 'event_sha': os.environ['GITHUB_SHA'],
+                'workflow_tree': git(workflow_source, 'rev-parse', 'HEAD^{tree}'),
+                'source_workflow_sha256': hashlib.sha256(original.encode()).hexdigest(),
+                'workflow_sha256': hashlib.sha256(current.encode()).hexdigest(),
+                'source_collector_sha256': digest, 'workflow_collector_sha256': digest,
+                'input_sha256': pins, 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': 1}
+            (root / 'source-manifest.json').write_text(json.dumps(value) + '\n')
+            print('{"native_off_source_admitted":true,"collector_extraction_equal":true}')
+        except Exception:
+            print('{"error":"native-off-source-refused"}')
+            raise SystemExit(1)
+        OFF_SOURCE
+    - name: Capture resource preflight before native tooling
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-off-source-before true 2>/dev/null
+    - name: Install pinned native Rust and cranelift only
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+      with:
+        toolchain: nightly-2026-04-19
+        components: rustc-codegen-cranelift-preview
+        rust-src-dir: candidate-source
+        cache: false
+        rustflags: ''
+    - name: Install pinned nextest only
+      uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172
+      with:
+        tool: cargo-nextest@0.9.146
+    - name: Verify native tool and profile admission
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-off-rust-tools python3 - 2>/dev/null <<'OFF_TOOLS'
+        import datetime, hashlib, json, os, re, subprocess, tomllib
+        from pathlib import Path
+        try:
+            assert {key: value for key, value in os.environ.items() if key.startswith('CARGO_PROFILE_')} == {'CARGO_PROFILE_DEV_DEBUG': '0'}
+            assert os.environ['CARGO_BUILD_JOBS'] == '1' and os.environ['CARGO_INCREMENTAL'] == '0'
+            assert os.environ['RUST_MIN_STACK'] == '16777216'
+            assert os.environ['CARGO_TARGET_DIR'] == str(Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-target')
+            forbidden = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',
+                'RUSTC', 'RUSTDOC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTDOC',
+                'CARGO_BUILD_RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_RUSTFLAGS', 'CARGO_BUILD_RUSTDOCFLAGS',
+                'CARGO_BUILD_TARGET', 'CARGO_BUILD_INCREMENTAL', 'CARGO_BUILD_TARGET_DIR', 'ENGINE_WASM_URL'}
+            assert not forbidden & set(os.environ) and not any(key.startswith('CARGO_TARGET_') and key != 'CARGO_TARGET_DIR' for key in os.environ)
+            source = Path('.').resolve(); fixed_config = (source / '.cargo/config.toml').resolve()
+            assert not (source / '.cargo/config').exists() and not (source / '.cargo/config').is_symlink()
+            cargo_home = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+            if not cargo_home.is_absolute(): cargo_home = source / cargo_home
+            loaded = set()
+            for directory in [source / '.cargo', *(parent / '.cargo' for parent in source.parents), cargo_home]:
+                legacy, modern = directory / 'config', directory / 'config.toml'
+                selected = legacy if legacy.exists() or legacy.is_symlink() else modern
+                if selected.exists() or selected.is_symlink():
+                    assert selected.is_file(); loaded.add(selected.resolve())
+            assert fixed_config in loaded
+            for selected in loaded - {fixed_config}:
+                config = tomllib.loads(selected.read_text())
+                assert not {'profile', 'include', 'target', 'paths', 'source', 'unstable'} & set(config)
+                build, environment = config.get('build', {}), config.get('env', {})
+                assert isinstance(build, dict) and isinstance(environment, dict)
+                assert not {'rustc', 'rustdoc', 'rustc-wrapper', 'rustc-workspace-wrapper', 'rustflags', 'rustdocflags', 'target', 'jobs', 'incremental', 'target-dir'} & set(build)
+                assert not any(key.startswith('CARGO_PROFILE_') or key.startswith('CARGO_TARGET_') or key in forbidden | {
+                    'RUST_MIN_STACK', 'CARGO_BUILD_JOBS', 'CARGO_INCREMENTAL'} for key in environment)
+            def read(argv):
+                return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True).strip()
+            assert read(['rustup', 'show', 'active-toolchain']).split()[0] == 'nightly-2026-04-19-x86_64-unknown-linux-gnu'
+            verbose = read(['rustc', '-Vv'])
+            assert verbose == read(['rustup', 'run', 'nightly-2026-04-19', 'rustc', '-Vv'])
+            rustc = dict(line.split(': ', 1) for line in verbose.splitlines()[1:])
+            assert set(rustc) == {'binary', 'commit-hash', 'commit-date', 'host', 'release', 'LLVM version'}
+            assert rustc['binary'] == 'rustc' and rustc['host'] == 'x86_64-unknown-linux-gnu'
+            assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+-nightly', rustc['release'])
+            assert re.fullmatch('[a-f0-9]{40}', rustc['commit-hash'])
+            assert datetime.date.fromisoformat(rustc['commit-date']) <= datetime.date(2026, 4, 19)
+            assert re.fullmatch('[0-9]+[.][0-9]+[.][0-9]+', rustc['LLVM version'])
+            cargo = read(['cargo', '-V'])
+            assert cargo == read(['rustup', 'run', 'nightly-2026-04-19', 'cargo', '-V'])
+            assert re.fullmatch(r'cargo [0-9]+[.][0-9]+[.][0-9]+-nightly \([a-f0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)', cargo)
+            assert 'rustc-codegen-cranelift-preview-x86_64-unknown-linux-gnu' in read(['rustup', 'component', 'list', '--installed']).splitlines()
+            assert re.fullmatch(r'cargo-nextest 0\.9\.146(?: \([^\n]+\))?', read(['cargo-nextest', '--version']))
+            value = {'toolchain': 'nightly-2026-04-19', 'rustc': rustc, 'cargo': cargo, 'nextest': '0.9.146',
+                'codegen_backend': 'cranelift', 'cargo_profile': 'test', 'nextest_profile': 'ci', 'debug': 0,
+                'incremental': False, 'opt_level': 0, 'split_debuginfo': 'unpacked', 'codegen_units': 256,
+                'features': [], 'jobs': 1, 'stack_bytes': 16777216, 'profile_environment': {'CARGO_PROFILE_DEV_DEBUG': '0'}}
+            (Path(os.environ['MANUAL_EVIDENCE']) / 'tool-manifest.json').write_text(json.dumps(value) + '\n')
+            print('{"native_off_tools_admitted":true}')
+        except Exception:
+            print('{"error":"native-off-tools-refused"}')
+            raise SystemExit(1)
+        OFF_TOOLS
+    - name: Build exactly one OFF native archive
+      working-directory: candidate-source
+      run: |
+        mkdir -p "$RUNNER_TEMP/bootstrap-native-archives"
+        python3 scripts/ci/manual-integration-guard.py native-off-archive bash -euo pipefail 2>/dev/null <<'OFF_ARCHIVE'
+        cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config 'profile.test.codegen-backend="cranelift"' -p engine-wasm --lib --no-default-features --archive-file "$RUNNER_TEMP/bootstrap-native-archives/off.tar.zst" >/dev/null 2>&1
+        OFF_ARCHIVE
+    - name: Run exact source OFF collector without a build
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-off-tests python3 - 2>/dev/null < "$RUNNER_TEMP/bootstrap-native-off-collector.py"
+    - name: Check exact source after diagnostic even on failure
+      if: always() && steps.source-admission.outcome == 'success'
+      working-directory: candidate-source
+      run: |
+        python3 scripts/ci/manual-integration-guard.py native-off-source-after true 2>/dev/null
+    - name: Preserve finite diagnostic manifest and archive hash
+      id: diagnostic-manifest
+      if: always()
+      run: |
+        python3 - 2>/dev/null <<'OFF_MANIFEST'
+        import hashlib, json, os, shutil
+        from pathlib import Path
+        root = Path(os.environ['MANUAL_EVIDENCE']); root.mkdir(parents=True, exist_ok=True)
+        def read(name):
+            path = root / name
+            return json.loads(path.read_text()) if path.is_file() and not path.is_symlink() else None
+        try:
+            source = read('source-manifest.json'); tools = read('tool-manifest.json'); adjudication = read('red-adjudication.json') or {}
+            labels = ['native-off-source-before', 'native-off-rust-tools', 'native-off-archive', 'native-off-tests', 'native-off-source-after']
+            receipts = {label: read(label + '.json') for label in labels}
+            workspace_free = shutil.disk_usage(os.environ['GITHUB_WORKSPACE']).free
+            temp_free = shutil.disk_usage(os.environ['RUNNER_TEMP']).free
+            archive = Path(os.environ['RUNNER_TEMP']) / 'bootstrap-native-archives/off.tar.zst'
+            present = archive.is_file() and not archive.is_symlink() and archive.stat().st_size > 0
+            size = archive.stat().st_size if present else None
+            digest = None
+            if present and min(workspace_free, temp_free) >= 4 * 1024**3:
+                with archive.open('rb') as stream: digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            ready = bool(present and digest and source and tools and receipts['native-off-archive'] and
+                receipts['native-off-archive']['exit_code'] == receipts['native-off-archive']['effective_exit'] == 0 and
+                receipts['native-off-archive']['stop_reason'] is None)
+            value = {'diagnostic_only': True, 'product_green': False, 'source': source, 'tools': tools,
+                'native_tests': adjudication.get('native_tests', {}).get('off'),
+                'native_filter_count': adjudication.get('native_filter_counts', {}).get('off'),
+                'native_diagnostic': adjudication.get('native_diagnostics', {}).get('off'),
+                'runner_result_recorded': 'off' in adjudication.get('native_diagnostics', {}), 'commands': receipts,
+                'archive': {'basename': 'off.tar.zst', 'present': present, 'size': size, 'sha256': digest,
+                    'ready_for_upload': ready, 'hash_status': 'hashed' if digest else ('resource-floor-refused' if present else 'absent')},
+                'remaining_resources': {'workspace_free_bytes': workspace_free, 'temp_free_bytes': temp_free}}
+            (root / 'archive-manifest.json').write_text(json.dumps(value) + '\n')
+            with Path(os.environ['GITHUB_OUTPUT']).open('a') as output: output.write('archive_ready=' + str(ready).lower() + '\n')
+            print(json.dumps({'native_off_manifest_saved': True, 'archive_present': present, 'archive_ready': ready,
+                'runner_result_recorded': value['runner_result_recorded'], 'product_green': False}))
+        except Exception:
+            (root / 'archive-manifest.json').write_text('{"diagnostic_only":true,"product_green":false,"error":"native-off-manifest-failed","archive":{"ready_for_upload":false}}\n')
+            print('{"error":"native-off-manifest-failed","product_green":false}')
+            raise SystemExit(1)
+        OFF_MANIFEST
+    - name: Retain exact standard OFF compile test archive
+      id: archive-upload
+      if: always() && steps.diagnostic-manifest.outputs.archive_ready == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-native-off-diagnostic-archive
+        path: ${{ runner.temp }}/bootstrap-native-archives/off.tar.zst
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+    - name: Record actual archive upload outcome
+      if: always()
+      env:
+        OFF_ARCHIVE_UPLOAD_OUTCOME: ${{ steps.archive-upload.outcome }}
+        OFF_ARCHIVE_ARTIFACT_ID: ${{ steps.archive-upload.outputs.artifact-id }}
+        OFF_ARCHIVE_ARTIFACT_DIGEST: ${{ steps.archive-upload.outputs.artifact-digest }}
+      run: |
+        python3 - 2>/dev/null <<'OFF_UPLOAD'
+        import json, os, re
+        from pathlib import Path
+        root = Path(os.environ['MANUAL_EVIDENCE']); root.mkdir(parents=True, exist_ok=True)
+        outcome = os.environ['OFF_ARCHIVE_UPLOAD_OUTCOME']
+        artifact_id = os.environ['OFF_ARCHIVE_ARTIFACT_ID']; digest = os.environ['OFF_ARCHIVE_ARTIFACT_DIGEST']
+        uploaded = outcome == 'success' and re.fullmatch('[1-9][0-9]*', artifact_id) is not None and re.fullmatch('[a-f0-9]{64}', digest) is not None
+        value = {'archive_upload_outcome': outcome if outcome in ['success', 'failure', 'skipped', 'cancelled'] else 'unknown',
+            'archive_uploaded': bool(uploaded), 'artifact_id': artifact_id if uploaded else None, 'artifact_digest': digest if uploaded else None,
+            'artifact_name': 'local-worker-bootstrap-native-off-diagnostic-archive', 'retention_days': 7, 'product_green': False}
+        (root / 'archive-upload.json').write_text(json.dumps(value) + '\n')
+        print(json.dumps(value))
+        OFF_UPLOAD
+    - name: Retain exact finite OFF diagnostic evidence
+      id: evidence-upload
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: local-worker-bootstrap-native-off-diagnostic-evidence
+        path: |
+          bootstrap-native-off-evidence/source-manifest.json
+          bootstrap-native-off-evidence/tool-manifest.json
+          bootstrap-native-off-evidence/red-adjudication.json
+          bootstrap-native-off-evidence/archive-manifest.json
+          bootstrap-native-off-evidence/archive-upload.json
+          bootstrap-native-off-evidence/native-off-source-before.json
+          bootstrap-native-off-evidence/native-off-rust-tools.json
+          bootstrap-native-off-evidence/native-off-archive.json
+          bootstrap-native-off-evidence/native-off-tests.json
+          bootstrap-native-off-evidence/native-off-source-after.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: false
+    - name: Report actual retention outcomes without product acceptance
+      if: always()
+      env:
+        OFF_ARCHIVE_UPLOAD_OUTCOME: ${{ steps.archive-upload.outcome }}
+        OFF_EVIDENCE_UPLOAD_OUTCOME: ${{ steps.evidence-upload.outcome }}
+      run: |
+        python3 - 2>/dev/null <<'OFF_RETENTION'
+        import json, os
+        from pathlib import Path
+        path = Path(os.environ['MANUAL_EVIDENCE']) / 'archive-upload.json'
+        archive = json.loads(path.read_text()) if path.is_file() else {}
+        evidence = os.environ['OFF_EVIDENCE_UPLOAD_OUTCOME']
+        print(json.dumps({'archive_uploaded': archive.get('archive_uploaded') is True,
+            'archive_upload_outcome': archive.get('archive_upload_outcome', 'unknown'),
+            'evidence_upload_outcome': evidence if evidence in ['success', 'failure', 'skipped', 'cancelled'] else 'unknown',
+            'product_green': False}))
+        raise SystemExit(0 if archive.get('archive_uploaded') is True and evidence == 'success' else 1)
+        OFF_RETENTION
