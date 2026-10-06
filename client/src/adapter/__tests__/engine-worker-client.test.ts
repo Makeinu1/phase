@@ -281,7 +281,7 @@ describe("EngineWorkerClient structured action rejections", () => {
 });
 
 describe("restricted host checkpoint RPC", () => {
-  it("termination rejects an unanswered release and removes its pending watchdog", async () => {
+  it("termination rejects an unanswered release and ignores its late reply", async () => {
     vi.useFakeTimers();
     const client = new EngineWorkerClient();
     const release = client.releaseHostSession("local-owner-key");
