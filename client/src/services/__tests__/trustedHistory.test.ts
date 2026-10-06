@@ -227,6 +227,32 @@ describe("unconnected trusted history transaction", () => {
     expect(Object.isFrozen(s.history.inspect().binding)).toBe(true);
   });
 
+  it("unlocks an operation metadata getter failure before capture/submit", async () => {
+    const s = setup(); const before = timeline(s.history);
+    const operation = { get rootId(): string { throw new Error("metadata copy failed"); }, actor: 0 };
+    await expect(s.history.perform(operation)).rejects.toThrow("metadata copy");
+    expect(timeline(s.history)).toEqual(before);
+    expect(s.history.inspect()).toMatchObject({ phase: "idle", retainedBytes: 0 });
+    expect(s.adapter.exportPersistenceState).not.toHaveBeenCalled();
+    expect(s.ports.submit).not.toHaveBeenCalled();
+    await expect(s.perform("next")).resolves.toBe("accepted");
+  });
+
+  it("same-session branch/generation invalidation during fence never writes the old PRE", async () => {
+    const s = setup(); await s.perform("a"); const before = timeline(s.history);
+    const fence = deferred<void>(); vi.mocked(s.ports.fenceMutations).mockReturnValueOnce(fence.promise);
+    const undo = s.history.undo(); await vi.waitFor(() => expect(s.ports.fenceMutations).toHaveBeenCalled());
+    s.stale(); fence.resolve();
+    await expect(undo).rejects.toThrow("Stale restore binding");
+    expect(s.adapter.restoreTrustedState).not.toHaveBeenCalled();
+    expect(s.adapter.getSnapshot).not.toHaveBeenCalled();
+    expect(s.ports.commitRestore).not.toHaveBeenCalled();
+    expect(timeline(s.history)).toEqual(before);
+    expect(s.history.inspect().phase).toBe("recovery");
+    await expect(s.history.recover()).rejects.toThrow("Stale restore binding");
+    expect(s.adapter.restoreTrustedState).not.toHaveBeenCalled();
+  });
+
   it.each(["gameId", "gameSessionGeneration", "branchId", "generation", "commitSeq"] as const)("rejects a receipt with stale %s", async (field) => {
     const s = setup(); const before = timeline(s.history);
     vi.mocked(s.ports.submit).mockImplementationOnce(async (operation, parent) => ({

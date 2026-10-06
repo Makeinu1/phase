@@ -115,11 +115,11 @@ export class TrustedHistory {
 
   async perform(operation: HistoryOperation): Promise<"accepted" | "rejected" | "canceled"> {
     this.lock("capture");
-    const root = Object.freeze({ ...operation });
     const parent = this.binding;
     let checkpoint: TrustedCheckpointString | null = null;
     let submitted = false;
     try {
+      const root = Object.freeze({ ...operation });
       if (!root.rootId || this.entries.some((entry) => entry.operation.rootId === root.rootId
         && entry.parent.branchId === parent.branchId)) throw new Error("Duplicate operation root");
       checkpoint = await captureTrustedCheckpointString(this.ports.adapter);
@@ -196,6 +196,7 @@ export class TrustedHistory {
     try {
       await this.ports.fenceMutations();
       if (!this.ports.isSessionCurrent(previous)) throw new Error("Stale restore session");
+      if (!recovery.commitAttempted && !this.ports.isCurrent(previous)) throw new Error("Stale restore binding");
       await restoreTrustedCheckpointString(this.ports.adapter, recovery.checkpoint);
       const snapshot = await this.ports.adapter.getSnapshot();
       if (!this.ports.isSessionCurrent(previous)
