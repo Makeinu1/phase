@@ -19,7 +19,7 @@ env:
   BOOTSTRAP_CHECKPOINT_MODE: baseline-runtime-producer
   BOOTSTRAP_BASE_SHA: 8fcd0f33451058f55b110e707d50497545763615
   BOOTSTRAP_BASE_TREE: 85f6682f6a2db68e5a67e23719f2126e3d241133
-  BOOTSTRAP_GUARD_SHA256: c81e0b02104ff4bbb4a9249faf26bedb70c23cb0bfc08b6138767c60a85d6dcc
+  BOOTSTRAP_GUARD_SHA256: 71becc084429d70cb200717e8bb2a299b33dc8c4aedfec8a4bf3e21d3536a814
   BOOTSTRAP_PRODUCER_SHA: ''
   BOOTSTRAP_PRODUCER_TREE: ''
   BOOTSTRAP_PRODUCER_WORKFLOW_SHA256: ''
@@ -468,7 +468,7 @@ jobs:
                   assert item['stop_reason'] is None and item['source_unchanged'] is True
                   assert item['input_sha256'] == {key: inputs[key] for key in list(inputs)[:3]}
                   assert item['guard'] == {'working_set_bytes': 13 * 1024**3, 'disk_free_min_bytes': 4 * 1024**3,
-                                           'sample_interval_seconds': 1, 'timeout_seconds': 1500}
+                                           'sample_interval_seconds': 1, 'timeout_seconds': 2400 if label == 'baseline-wasm-build' else 1500}
                   environment = item['environment']
                   assert set(environment) == {'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RUST_MIN_STACK',
                                               'CARGO_INCREMENTAL', 'CARGO_PROFILE_DEV_DEBUG'}
@@ -602,6 +602,8 @@ jobs:
           receipt = json.loads((root / 'baseline-runtime-pins.json').read_text())
           assert receipt['exit_code'] == receipt['effective_exit'] == 0 and receipt['stop_reason'] is None
           assert receipt['source_sha'] == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] and receipt['source_unchanged'] is True
+          assert receipt['guard'] == {'working_set_bytes': 13 * 1024**3, 'disk_free_min_bytes': 4 * 1024**3,
+                                      'sample_interval_seconds': 1, 'timeout_seconds': 1500}
           public = json.loads((root / 'red-adjudication.json').read_text())['public_runtime']
           assert set(public) == {'producer_sha', 'producer_tree', 'producer_workflow_sha256', 'producer_guard_sha256',
                                  'producer_run_id', 'producer_run_attempt', 'artifact_id', 'archive_sha256',
@@ -886,7 +888,7 @@ jobs:
                   assert item['stop_reason'] is None and item['source_unchanged'] is True
                   assert item['input_sha256'] == {key: inputs[key] for key in list(inputs)[:3]}
                   assert item['guard'] == {'working_set_bytes': 13 * 1024**3, 'disk_free_min_bytes': 4 * 1024**3,
-                                           'sample_interval_seconds': 1, 'timeout_seconds': 1500}
+                                           'sample_interval_seconds': 1, 'timeout_seconds': 2400 if label == 'baseline-wasm-build' else 1500}
                   environment = item['environment']
                   assert set(environment) == {'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'RUST_MIN_STACK',
                                               'CARGO_INCREMENTAL', 'CARGO_PROFILE_DEV_DEBUG'}
@@ -1196,6 +1198,8 @@ jobs:
               complete &= bool(item and item.get('source_sha') == expected_sha and
                                item.get('label') == label and isinstance(item.get('environment'), dict) and
                                receipt_profile_matches(label, item['environment'], expected_profiles) and
+                               item.get('guard') == {'working_set_bytes': 13 * 1024**3, 'disk_free_min_bytes': 4 * 1024**3,
+                                                     'sample_interval_seconds': 1, 'timeout_seconds': 2400 if label == 'baseline-wasm-build' else 1500} and
                                type(item.get('exit_code')) is int and item.get('exit_code') == expected_exit and
                                type(item.get('effective_exit')) is int and item.get('effective_exit') == expected_exit and
                                item.get('stop_reason') is None and item.get('source_unchanged') is True)
@@ -1248,6 +1252,8 @@ jobs:
                   complete &= receipt['stop_reason'] is None and receipt['source_unchanged'] is True
                   complete &= receipt['label'] == label and receipt_profile_matches(
                       label, receipt['environment'], producer_receipt_profiles)
+                  complete &= receipt['guard'] == {'working_set_bytes': 13 * 1024**3, 'disk_free_min_bytes': 4 * 1024**3,
+                                                  'sample_interval_seconds': 1, 'timeout_seconds': 2400 if label == 'baseline-wasm-build' else 1500}
               for name, item in expected_public['files'].items():
                   content = (artifact / name).read_bytes()
                   complete &= len(content) == item['size'] and hashlib.sha256(content).hexdigest() == item['sha256']

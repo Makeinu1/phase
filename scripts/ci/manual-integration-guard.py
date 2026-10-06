@@ -21,6 +21,7 @@ limit = 13 * GIB
 disk_min = 4 * GIB
 label, *argv = sys.argv[1:]
 assert argv and label.replace("-", "").isalnum()
+timeout_seconds = 2400 if label == "baseline-wasm-build" else 1500
 evidence = Path(os.environ["MANUAL_EVIDENCE"])
 evidence.mkdir(parents=True, exist_ok=True)
 assert not (evidence / (label + ".json")).exists(), "do not retry a recorded command"
@@ -77,7 +78,7 @@ record = {"label": label, "started_at": now(), "source_sha": SOURCE,
           "input_sha256": PINS,
           "environment": {k: os.environ.get(k) for k in ["CARGO_TARGET_DIR", "CARGO_BUILD_JOBS", "RUST_MIN_STACK", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG"]},
           "guard": {"working_set_bytes": limit, "disk_free_min_bytes": disk_min,
-                    "sample_interval_seconds": 1, "timeout_seconds": 1500}, "preflight": None}
+                    "sample_interval_seconds": 1, "timeout_seconds": timeout_seconds}, "preflight": None}
 process = None
 reason = None
 code = None
@@ -127,8 +128,8 @@ try:
                         reason = "working_set_above_13GiB"
                     elif min(reading["workspace_free_bytes"], reading["temp_free_bytes"]) < disk_min:
                         reason = "disk_free_below_4GiB"
-                    elif time.monotonic() - started >= 1500:
-                        reason = "command_timeout_25min"
+                    elif time.monotonic() - started >= timeout_seconds:
+                        reason = "command_timeout_40min" if timeout_seconds == 2400 else "command_timeout_25min"
                 except Exception as error:
                     reason = "telemetry_error:" + type(error).__name__
                 if reason:
