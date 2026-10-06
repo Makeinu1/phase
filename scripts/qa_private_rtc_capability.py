@@ -189,7 +189,39 @@ def check_a2(snapshot):
                 "A2 payload/ACK event order mismatch")
 
 
-def run_browser(args, manifest, contents, result):
+def observe_capability(page, origin, result, manifest):
+    result["stage"] = "a1-setup"
+    page.goto(origin + "/" + HTML + "#qa-environment-accepted=1", wait_until="load")
+    page.wait_for_function("""() => {
+        const status = document.getElementById('qa-harness-status');
+        return status && !status.textContent.startsWith('Reading');
+    }""")
+    setup = json.loads(page.locator("#qa-a1-output").inner_text())["setup"]
+    result["setup"] = setup
+    check_a1(setup, manifest, origin)
+    require(page.locator("#qa-a2-output").inner_text() == "Not run"
+            and page.locator("#qa-a2-run").is_enabled(), "A2 started early or setup gate disabled")
+    # This CI contract and pinned artifact supply the external run record.
+    # Use the existing button; do not call native control or modify any API.
+    result["stage"] = "a2-run"
+    page.locator("#qa-a2-run").click()
+    page.wait_for_function("""() => {
+        const text = document.getElementById('qa-a2-output').textContent;
+        const status = document.getElementById('qa-harness-status').textContent;
+        return (text !== 'Not run' && JSON.parse(text).result !== 'running')
+            || status.startsWith('Before-run observation failed')
+            || status.startsWith('Environment drift observed');
+    }""", timeout=40_000)
+    observed = json.loads(page.locator("#qa-a1-output").inner_text())
+    result["a1"] = observed
+    check_reobservation(setup, observed, manifest, origin)
+    result["a2"] = json.loads(page.locator("#qa-a2-output").inner_text())
+    check_a2(result["a2"])
+    require(page.locator("#qa-a2-run").is_disabled(), "one-run button remained enabled")
+    result["stage"] = "complete"
+
+
+def run_browser(args, manifest, contents, result, observe=None):
     from playwright.sync_api import sync_playwright
 
     # Only immutable harness runtime files are served. The Vite manifest remains evidence.
@@ -251,35 +283,10 @@ def run_browser(args, manifest, contents, result):
             context = browser.new_context(ignore_https_errors=False)
             page = context.new_page()
             page.set_default_timeout(10_000)
-            result["stage"] = "a1-setup"
-            page.goto(origin + "/" + HTML + "#qa-environment-accepted=1", wait_until="load")
-            page.wait_for_function("""() => {
-                const status = document.getElementById('qa-harness-status');
-                return status && !status.textContent.startsWith('Reading');
-            }""")
-            setup = json.loads(page.locator("#qa-a1-output").inner_text())["setup"]
-            result["setup"] = setup
-            check_a1(setup, manifest, origin)
-            require(page.locator("#qa-a2-output").inner_text() == "Not run"
-                    and page.locator("#qa-a2-run").is_enabled(), "A2 started early or setup gate disabled")
-            # This CI contract and pinned artifact supply the external run record.
-            # Use the existing button; do not call native control or modify any API.
-            result["stage"] = "a2-run"
-            page.locator("#qa-a2-run").click()
-            page.wait_for_function("""() => {
-                const text = document.getElementById('qa-a2-output').textContent;
-                const status = document.getElementById('qa-harness-status').textContent;
-                return (text !== 'Not run' && JSON.parse(text).result !== 'running')
-                    || status.startsWith('Before-run observation failed')
-                    || status.startsWith('Environment drift observed');
-            }""", timeout=40_000)
-            observed = json.loads(page.locator("#qa-a1-output").inner_text())
-            result["a1"] = observed
-            check_reobservation(setup, observed, manifest, origin)
-            result["a2"] = json.loads(page.locator("#qa-a2-output").inner_text())
-            check_a2(result["a2"])
-            require(page.locator("#qa-a2-run").is_disabled(), "one-run button remained enabled")
-            result["stage"] = "complete"
+            if observe is None:
+                observe_capability(page, origin, result, manifest)
+            else:
+                observe(page, origin, result)
         finally:
             try:
                 if browser is not None:

@@ -1,0 +1,63 @@
+name: QA RTC WPT comparison
+
+on:
+  push:
+    branches: [experiment/rtc-wpt-comparison]
+
+permissions:
+  contents: read
+
+jobs:
+  rtc-comparison:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: eea2145f7421535981b282d1e139ba632854dc9e
+          path: baseline
+          persist-credentials: false
+          sparse-checkout: |
+            client
+            scripts
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: '9.15.9'
+      - name: Prepare pinned dependencies and unchanged QA artifact
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/rtc-python"
+          "$RUNNER_TEMP/rtc-python/bin/pip" install --disable-pip-version-check playwright==1.62.0
+          pnpm --dir baseline/client install --frozen-lockfile
+          pnpm --dir baseline/client exec vite build --config vite.privateRtcCapability.config.ts
+          git -C baseline diff --exit-code -- client/package.json client/pnpm-lock.yaml
+          "$RUNNER_TEMP/rtc-python/bin/python" -m unittest discover -s control/scripts -p 'qa*tests.py'
+          "$RUNNER_TEMP/rtc-python/bin/python" control/scripts/qa_wpt_rtc_control.py \
+            --prepare-only --root "$RUNNER_TEMP/wpt-rtc-control" \
+            --output-dir "$GITHUB_WORKSPACE/rtc-preparation"
+      - name: Fixed nine fresh browsers (no adaptive retry)
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/rtc-python/bin/python" control/scripts/qa_rtc_comparison.py \
+            --qa-root "$GITHUB_WORKSPACE/baseline" \
+            --wpt-root "$RUNNER_TEMP/wpt-rtc-control" \
+            --browser-path /usr/bin/google-chrome \
+            --output-dir "$GITHUB_WORKSPACE/rtc-evidence"
+      - name: Preserve every trial including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qa-rtc-wpt-comparison-evidence
+          path: |
+            rtc-evidence
+            rtc-preparation
+          retention-days: 7
+          if-no-files-found: warn
