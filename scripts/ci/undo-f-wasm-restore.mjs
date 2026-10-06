@@ -8,6 +8,7 @@ let stage = "initialize";
 let failedCheck;
 let progress;
 let lastActionType;
+let lastOutcomeStatus;
 function check(value, code) { if (!value) { failedCheck = code; throw Error(code); } }
 try {
   const directory = path.resolve(process.argv[2]);
@@ -27,6 +28,7 @@ try {
   const submit = (actor, action) => {
     lastActionType = action.type;
     const outcome = engine.submit_action(actor, action);
+    lastOutcomeStatus = ["applied", "rejected"].includes(outcome?.status) ? outcome.status : "unknown";
     check(outcome.status === "applied" && outcome.result && !outcome.result.disposition, "action-applied");
     return outcome.result;
   };
@@ -43,6 +45,8 @@ try {
       submit(waiting.data.player, { type: "DeclareAttackers", data: { attacks: [] } });
     } else if (waiting.type === "DeclareBlockers") {
       submit(waiting.data.player, { type: "DeclareBlockers", data: { assignments: [] } });
+    } else if (waiting.type === "DiscardToHandSize") {
+      submit(waiting.data.player, { type: "SelectCards", data: { cards: waiting.data.cards.slice(0, waiting.data.count) } });
     } else {
       check(waiting.type === "Priority", "normal-priority-required");
       const actor = waiting.data.player;
@@ -63,6 +67,8 @@ try {
   submit(0, mana);
   const pre = state();
   check(pre.players[0].mana_pool.mana.length === 1 && pre.stack.length === 0, "prefloating-mana-reach");
+  check(pre.waiting_for.type === "Priority" && pre.waiting_for.data.player === 0, "setup-caster-priority");
+  console.log(JSON.stringify({ pass: true, stage: "normal-game-setup", setup: "real engine legal actions; prefloating mana; no debug/state injection" }));
   const binding = engine.host_precast_undo_status().binding;
   engine.enable_host_precast_undo(binding);
   stage = "cast-and-checkpoint";
@@ -110,6 +116,6 @@ try {
     ui: "NOT RUN", twoSeatSync: "NOT RUN", memoryReclamation: "NOT RUN" }));
 } catch {
   // Never serialize assertion values, hidden hands/libraries, bindings or receipts.
-  console.error(JSON.stringify({ pass: false, stage, failedCheck: failedCheck ?? "wasm-api-or-runtime-error", progress, lastActionType }));
+  console.error(JSON.stringify({ pass: false, stage, failedCheck: failedCheck ?? "wasm-api-or-runtime-error", progress, lastActionType, lastOutcomeStatus }));
   process.exitCode = 1;
 }
