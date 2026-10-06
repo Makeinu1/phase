@@ -6,6 +6,7 @@ let peers: FakePeer[];
 let hangOffer: boolean;
 let rejectOffer: boolean;
 let openChannels: boolean;
+let announceOpen: boolean;
 let offerGate: Promise<RTCSessionDescriptionInit> | null;
 let candidateGate: Promise<void> | null;
 
@@ -52,6 +53,7 @@ class FakePeer extends EventTarget {
     this.remoteDescription = description;
     if (description.type === "offer") {
       this.channel = new FakeChannel();
+      if (announceOpen) this.channel.readyState = "open";
       this.channel.partner = peers[0].channel;
       peers[0].channel!.partner = this.channel;
       this.dispatchEvent(Object.assign(new Event("datachannel"), { channel: this.channel }));
@@ -64,7 +66,7 @@ class FakePeer extends EventTarget {
 async function settleOperations() { for (let i = 0; i < 30; i += 1) await Promise.resolve(); }
 
 beforeEach(() => {
-  peers = []; hangOffer = false; rejectOffer = false; openChannels = true; offerGate = null; candidateGate = null;
+  peers = []; hangOffer = false; rejectOffer = false; openChannels = true; announceOpen = false; offerGate = null; candidateGate = null;
   vi.useFakeTimers();
   vi.stubGlobal("RTCPeerConnection", FakePeer);
   vi.stubGlobal("BroadcastChannel", vi.fn(() => { throw new Error("BroadcastChannel must not be used by A2"); }));
@@ -72,6 +74,90 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("A2 isolated native API control (unit doubles only)", () => {
+  it("does not send or count an open event from receiver announcement readyState", async () => {
+    announceOpen = true; openChannels = false;
+    const control = startCapabilityControl();
+    await settleOperations();
+    expect(control.snapshot().sides[1].counts.openEvents).toBe(0);
+    expect(peers[1].channel!.readyState).toBe("open");
+    for (const peer of peers) expect(peer.channel!.send).not.toHaveBeenCalled();
+    peers[0].channel!.open();
+    for (const peer of peers) expect(peer.channel!.send).not.toHaveBeenCalled();
+    peers[1].channel!.open();
+    expect((await control.completion).result).toBe("pass");
+  });
+
+  it.each([[0, 1], [1, 0]])("waits for both open events in order %s then %s", async (first, second) => {
+    openChannels = false;
+    const control = startCapabilityControl();
+    await settleOperations();
+    peers[first].channel!.open();
+    peers[first].channel!.dispatchEvent(new Event("open"));
+    expect(control.snapshot().sides[first].counts.openEvents).toBe(1);
+    for (const peer of peers) expect(peer.channel!.send).not.toHaveBeenCalled();
+    peers[second].channel!.open();
+    const result = await control.completion;
+    expect(result.result).toBe("pass");
+    for (const peer of peers) expect(peer.channel!.send).toHaveBeenCalledTimes(2);
+    for (const side of result.sides) expect(side.counts.openEvents).toBe(1);
+    peers[first].channel!.dispatchEvent(new Event("open"));
+    for (const peer of peers) expect(peer.channel!.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a missing second open event as a 30-second failure without sending or retrying", async () => {
+    openChannels = false;
+    const control = startCapabilityControl();
+    await settleOperations(); peers[0].channel!.open();
+    await vi.advanceTimersByTimeAsync(30000);
+    expect((await control.completion).result).toBe("timeout");
+    for (const peer of peers) expect(peer.channel!.send).not.toHaveBeenCalled();
+    peers[1].channel!.dispatchEvent(new Event("open"));
+    for (const peer of peers) expect(peer.channel!.send).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels while waiting at the barrier and ignores a late second open", async () => {
+    openChannels = false;
+    const control = startCapabilityControl();
+    await settleOperations(); peers[0].channel!.open(); control.cancel();
+    expect((await control.completion).result).toBe("cancelled");
+    peers[1].channel!.dispatchEvent(new Event("open"));
+    for (const peer of peers) expect(peer.channel!.send).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves a send exception as failure and does not send the other payload or retry", async () => {
+    openChannels = false;
+    const control = startCapabilityControl(); await settleOperations();
+    peers[0].channel!.send.mockImplementationOnce(() => { throw new Error(SECRET); });
+    peers[0].channel!.open(); peers[1].channel!.open();
+    const result = await control.completion;
+    expect(result.result).toBe("operation-failed");
+    expect(result.exchangeEvents.at(-1)).toEqual({ side: 0, event: "send-payload" });
+    expect(peers[0].channel!.send).toHaveBeenCalledOnce();
+    expect(peers[1].channel!.send).not.toHaveBeenCalled();
+    for (const side of result.sides) expect(side.counts.messagesSent).toBe(0);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("keeps an accepted but undelivered payload as a timeout with no retransmission", async () => {
+    openChannels = false;
+    const control = startCapabilityControl(); await settleOperations();
+    peers[1].channel!.send.mockImplementationOnce(() => {}); // Unit-only delivery loss.
+    peers[0].channel!.open(); peers[1].channel!.open(); await settleOperations();
+    expect(control.snapshot().result).toBe("running");
+    await vi.advanceTimersByTimeAsync(30000);
+    const result = await control.completion;
+    expect(result.result).toBe("timeout");
+    expect(result.sides[0]).toMatchObject({ payloadReceived: false, acknowledgementReceived: true,
+      counts: { messagesSent: 1, messagesReceived: 1 } });
+    expect(result.sides[1]).toMatchObject({ payloadReceived: true, acknowledgementReceived: false,
+      counts: { messagesSent: 2, messagesReceived: 1 } });
+    expect(peers[0].channel!.send).toHaveBeenCalledOnce();
+    expect(peers[1].channel!.send).toHaveBeenCalledTimes(2);
+    expect(result.exchangeEvents).toHaveLength(9);
+  });
+
   it("uses two fixed empty ICE configurations and verifies four 32-byte messages", async () => {
     const removed = vi.spyOn(EventTarget.prototype, "removeEventListener");
     const control = startCapabilityControl();
@@ -80,6 +166,11 @@ describe("A2 isolated native API control (unit doubles only)", () => {
     expect(peers.map((peer) => peer.config)).toEqual([{ iceServers: [] }, { iceServers: [] }]);
     expect(peers[0].createDataChannel).toHaveBeenCalledWith("qa-a2-capability", { ordered: true });
     expect(result).toMatchObject({ result: "pass", payloadBytes: 32, iceServerCount: 0, limitMs: 30000 });
+    expect(result.exchangeEvents).toHaveLength(12);
+    expect(result.exchangeEvents.slice(0, 4)).toEqual([
+      { side: 0, event: "handlers-attached" }, { side: 1, event: "handlers-attached" },
+      { side: 0, event: "open" }, { side: 1, event: "open" },
+    ]);
     for (const side of result.sides) expect(side).toMatchObject({ payloadReceived: true, acknowledgementReceived: true,
       counts: { messagesSent: 2, messagesReceived: 2, bytesSent: 64, bytesReceived: 64, openEvents: 1 } });
     for (const peer of peers) { expect(peer.close).toHaveBeenCalledOnce(); expect(peer.channel!.close).toHaveBeenCalledOnce(); }

@@ -173,6 +173,20 @@ def check_a2(snapshot):
         states = side["states"]
         require(states["connection"] == "connected" and states["ice"] in ["connected", "completed"]
                 and states["channel"] == "open" and states["signaling"] == "stable", "A2 terminal native states mismatch")
+    events = snapshot["exchangeEvents"]
+    names = ["handlers-attached", "open", "send-payload", "send-ack", "receive-payload", "receive-ack"]
+    require(len(events) == 12 and all(set(event) == {"side", "event"}
+            and type(event["side"]) is int and event["side"] in [0, 1] and event["event"] in names
+            for event in events), "A2 invalid bounded exchange events")
+    positions = {(event["side"], event["event"]): index for index, event in enumerate(events)}
+    require(len(positions) == 12, "A2 repeated/missing exchange event")
+    first_send = min(positions[(side, "send-payload")] for side in [0, 1])
+    for side in [0, 1]:
+        require(positions[(side, "handlers-attached")] < positions[(side, "open")] < first_send,
+                "A2 payload started before both actual open events/handlers")
+        require(positions[(1 - side, "send-payload")] < positions[(side, "receive-payload")]
+                < positions[(side, "send-ack")] < positions[(1 - side, "receive-ack")],
+                "A2 payload/ACK event order mismatch")
 
 
 def run_browser(args, manifest, contents, result):

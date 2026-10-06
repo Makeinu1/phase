@@ -4,6 +4,7 @@ const LIMIT_MS = 30_000;
 const CANDIDATE_LIMIT = 256;
 type Result = "running" | "pass" | "timeout" | "cancelled" | "api-unavailable" | "operation-failed" | "unexpected-data" | "resource-limit" | "connection-failed";
 type Stage = "create-connections" | "create-channel" | "create-offer" | "set-local-offer" | "set-remote-offer" | "create-answer" | "set-local-answer" | "set-remote-answer" | "waiting-for-channels" | "exchange-bytes";
+type ExchangeEvent = "handlers-attached" | "open" | "send-payload" | "send-ack" | "receive-payload" | "receive-ack";
 
 function fixedBytes(side: number, acknowledgement: boolean): Uint8Array<ArrayBuffer> {
   return Uint8Array.from({ length: PAYLOAD_BYTES }, (_, index) => (index + side * 64 + (acknowledgement ? 128 : 0)) & 255);
@@ -26,6 +27,9 @@ export function startCapabilityControl() {
   let stoppedAt: number | null = null;
   let stage: Stage = "create-connections";
   let result: Result = "running";
+  let exchangeStarted = false;
+  // Fixed names/side numbers only. Send records API calls, not delivery proof.
+  const exchangeEvents: { side: number; event: ExchangeEvent }[] = [];
   const cleanups: (() => void)[] = [];
   const sides = [0, 1].map(() => ({
     pc: null as RTCPeerConnection | null, channel: null as RTCDataChannel | null,
@@ -37,6 +41,7 @@ export function startCapabilityControl() {
   const capture = () => ({
     stage, result, elapsedMs: Math.max(0, (stoppedAt ?? Date.now()) - startedAt),
     limitMs: LIMIT_MS, payloadBytes: PAYLOAD_BYTES, iceServerCount: 0,
+    exchangeEvents: exchangeEvents.map((event) => ({ ...event })),
     sides: sides.map((side) => ({
       states: {
         connection: nativeState(() => side.pc?.connectionState, ["new", "connecting", "connected", "disconnected", "failed", "closed"]),
@@ -70,6 +75,11 @@ export function startCapabilityControl() {
     resolveCompletion(structuredClone(terminal));
   };
   const deadline = setTimeout(() => finish("timeout"), LIMIT_MS);
+  const record = (side: number, event: ExchangeEvent) => {
+    if (exchangeEvents.length >= 16) { finish("resource-limit"); return false; }
+    exchangeEvents.push({ side, event });
+    return true;
+  };
   const listen = (target: EventTarget, name: string, handler: EventListener) => {
     const guarded: EventListener = (event) => {
       if (result !== "running") return;
@@ -97,23 +107,32 @@ export function startCapabilityControl() {
       });
     }
   };
+  const send = (index: number, acknowledgement: boolean) => {
+    if (result !== "running") return;
+    const side = sides[index];
+    if (!record(index, acknowledgement ? "send-ack" : "send-payload")) return;
+    try {
+      // ACK echoes the sender's payload identity, not this side's identity.
+      side.channel!.send(fixedBytes(acknowledgement ? 1 - index : index, acknowledgement));
+      side.counts.messagesSent += 1;
+      side.counts.bytesSent += PAYLOAD_BYTES;
+    } catch { finish("operation-failed"); }
+  };
   const attach = (index: number, channel: RTCDataChannel) => {
     const side = sides[index];
     if (result !== "running" || side.channel) { try { channel.close(); } catch { /* No leak. */ } return; }
     side.channel = channel;
     channel.binaryType = "arraybuffer";
-    const send = (bytes: Uint8Array<ArrayBuffer>) => {
-      try {
-        channel.send(bytes);
-        side.counts.messagesSent += 1;
-        side.counts.bytesSent += PAYLOAD_BYTES;
-      } catch { finish("operation-failed"); }
-    };
     const opened = () => {
       if (result !== "running" || side.counts.openEvents) return;
       side.counts.openEvents += 1;
+      if (!record(index, "open")) return;
+      // Receiver readyState can be open inside datachannel before its open event.
+      // Both actual events also prove both sets of message handlers are installed.
+      if (exchangeStarted || !sides.every((item) => item.counts.openEvents === 1 && item.channel?.readyState === "open")) return;
+      exchangeStarted = true;
       stage = "exchange-bytes";
-      send(fixedBytes(index, false));
+      for (let other = 0; other < sides.length; other += 1) send(other, false);
     };
     listen(channel, "open", opened);
     listen(channel, "error", () => finish("operation-failed"));
@@ -122,17 +141,20 @@ export function startCapabilityControl() {
       if (result !== "running") return;
       const data: unknown = (event as MessageEvent).data;
       side.counts.messagesReceived += 1;
+      if (!exchangeStarted) { finish("unexpected-data"); return; }
       if (matches(data, fixedBytes(1 - index, false)) && !side.payloadReceived) {
         side.counts.bytesReceived += PAYLOAD_BYTES;
         side.payloadReceived = true;
-        send(fixedBytes(1 - index, true));
+        if (!record(index, "receive-payload")) return;
+        send(index, true);
       } else if (matches(data, fixedBytes(index, true)) && !side.acknowledgementReceived) {
         side.counts.bytesReceived += PAYLOAD_BYTES;
         side.acknowledgementReceived = true;
+        if (!record(index, "receive-ack")) return;
       } else { finish("unexpected-data"); return; }
       if (sides.every((item) => item.payloadReceived && item.acknowledgementReceived)) finish("pass");
     });
-    if (channel.readyState === "open") opened();
+    record(index, "handlers-attached");
   };
   const negotiate = async () => {
     try {
@@ -184,7 +206,7 @@ export function startCapabilityControl() {
       if (result !== "running") return;
       sides[0].remoteReady = true;
       drain(0);
-      if (sides.every((side) => side.counts.openEvents === 0)) stage = "waiting-for-channels";
+      if (!exchangeStarted) stage = "waiting-for-channels";
     } catch { finish("operation-failed"); }
   };
   void negotiate();

@@ -35,7 +35,11 @@ class ContractTests(unittest.TestCase):
                            "iceEvents": 2, "localCandidates": 1, "queuedCandidates": 0, "applyingCandidates": 0, "appliedCandidates": 1},
                 "states": {"connection": "connected", "ice": "connected", "channel": "open", "signaling": "stable"}}
         self.a2 = {"result": "pass", "payloadBytes": 32, "iceServerCount": 0, "limitMs": 30_000, "elapsedMs": 10,
-                   "sides": [copy.deepcopy(side), copy.deepcopy(side)]}
+                   "sides": [copy.deepcopy(side), copy.deepcopy(side)],
+                   "exchangeEvents": [{"side": side, "event": event} for side, event in [
+                       (0, "handlers-attached"), (1, "handlers-attached"), (0, "open"), (1, "open"),
+                       (0, "send-payload"), (1, "send-payload"), (1, "receive-payload"), (1, "send-ack"),
+                       (0, "receive-payload"), (0, "send-ack"), (0, "receive-ack"), (1, "receive-ack")]]}
 
     def test_matching_contract(self):
         check_a1(self.a1, self.manifest, "http://127.0.0.1:1234")
@@ -116,6 +120,28 @@ class ContractTests(unittest.TestCase):
                 current["setup"]["serviceWorkers"]["capturedAtMs"] = 2
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 check_reobservation(self.a1, current, self.manifest, "http://127.0.0.1:1234")
+
+    def test_exchange_requires_both_actual_open_events_and_verified_message_order(self):
+        check_a2(self.a2)
+        for mutation in ["early-send", "early-ack", "duplicate", "missing", "extra", "unknown", "bad-side"]:
+            snapshot = copy.deepcopy(self.a2)
+            events = snapshot["exchangeEvents"]
+            if mutation == "early-send":
+                events[3], events[4] = events[4], events[3]
+            elif mutation == "early-ack":
+                events[6], events[7] = events[7], events[6]
+            elif mutation == "duplicate":
+                events[3] = copy.deepcopy(events[2])
+            elif mutation == "missing":
+                events.pop()
+            elif mutation == "extra":
+                events.append(copy.deepcopy(events[0]))
+            elif mutation == "unknown":
+                events[0]["event"] = "unknown"
+            else:
+                events[0]["side"] = True
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                check_a2(snapshot)
 
 
 class ArtifactTests(unittest.TestCase):
