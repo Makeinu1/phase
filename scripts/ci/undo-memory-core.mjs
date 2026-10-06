@@ -86,7 +86,7 @@ const decks={player:{main_deck:[...Array(cards-8).fill("Forest"),...Array(8).fil
 if(engine.initialize_multiplayer_host_game(decks,0xF32002,format,null,2,0).error) throw Error();
 for(const {actor,action} of prepared.trace) if(engine.submit_action(actor,action).status!=="applied") throw Error();
 const binding=engine.host_precast_undo_status().binding;
-engine.enable_host_precast_undo(binding);
+if(config.undo) engine.enable_host_precast_undo(binding);
 let highWater=memory.buffer.byteLength;
 const samples=[];
 function sample(iteration,boundary) {
@@ -97,15 +97,20 @@ sample(0,"prepared"); stage="measurement";
 for(let i=1;i<=repeats;i++) {
  const result=engine.submit_action(0,prepared.cast);
  const armed=engine.host_precast_undo_status();
- if(result.status!=="applied" || armed.phase!=="Armed") throw Error();
+ if(result.status!=="applied" || (config.undo && armed.phase!=="Armed")) throw Error();
  sample(i,"saved");
- if(engine.restore_host_precast_undo(binding,armed.receipt).phase!=="Consumed") throw Error();
- sample(i,"restored");
+ if(config.undo) {
+  if(engine.restore_host_precast_undo(binding,armed.receipt).phase!=="Consumed") throw Error();
+  sample(i,"restored");
+ }
 }
 engine.disable_host_precast_undo();engine.clear_game_state();sample(repeats,"cleared");
-return {pass:true,caseId,cards,minTurn,repeats,samples,liveHeap:"UNMEASURED",synchronousAllocationPeak:"UNMEASURED",stateEquality:"not observed in hot interval; existing fixed restore control must pass separately",retainedSnapshot:"one host Option; no byte cap",plateauClaim:"non-shrink or plateau alone does not establish a leak or zero allocations"};
+return {pass:true,caseId,cards,minTurn,repeats,undo:config.undo,samples,liveHeap:"UNMEASURED",synchronousAllocationPeak:"UNMEASURED",stateEquality:"not observed in hot interval; existing fixed restore control must pass separately",retainedSnapshot:"one host Option; no byte cap",plateauClaim:"non-shrink or plateau alone does not establish a leak or zero allocations"};
 } catch {return {pass:false,caseId,stage,failureClass:stage==="measurement"?"measurement-error-not-automatically-memory":"preparation-failure"};}
 }
 // Expand one factor at a time only after CI validates this measurement contract.
 // Planned: repeat40/128, size80/128, size160/128, history40/minTurn12/128.
-export const cases = [{caseId:"smoke40",cards:40,minTurn:1,repeats:1}];
+export const cases = [
+ {caseId:"smoke40-off",cards:40,minTurn:1,repeats:1,undo:false},
+ {caseId:"smoke40-on",cards:40,minTurn:1,repeats:1,undo:true}
+];
