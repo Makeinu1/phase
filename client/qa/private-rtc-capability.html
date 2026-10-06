@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Private RTC A1/A2 capability harness</title>
+  </head>
+  <body>
+    <main>
+      <h1>Private RTC A1/A2 capability harness</h1>
+      <p id="qa-harness-status" role="status">Reading A1 preflight…</p>
+      <section aria-labelledby="qa-a1-title">
+        <h2 id="qa-a1-title">A1: read-only environment preflight</h2>
+        <p>SETUP creates no connections. Required observations and artifact correspondence must be known. Before a manual run, worker/controller/registration metadata, cache names, artifact, URL and flags are reread and compared with SETUP. Metadata/name hashes describe identity, not content. Controller/navigation drift is monitored; the bundle is never refetched as execution proof.</p>
+        <pre id="qa-a1-output"></pre>
+      </section>
+      <section aria-labelledby="qa-a2-title">
+        <h2 id="qa-a2-title">A2: independent native API capability control</h2>
+        <p>One deliberate run per page: two native WebRTC peers, in-memory SDP/ICE, zero ICE servers, 32-byte payload/ack in each direction, 30-second limit. Byte counts cover verified fixed messages. Final native states are captured before cleanup. Passing A2 alone proves no Phase transport or cross-tab reachability result.</p>
+        <p>The URL flag records intent only. Independently review the external run record and confirm this current page before clicking. Reload starts a new run and requires new observation/review.</p>
+        <button id="qa-a2-run" type="button" disabled>Confirm current page/run and start A2</button>
+        <pre id="qa-a2-output">Not run</pre>
+      </section>
+    </main>
+    <script type="module" src="/src/qa/harness/entry.ts"></script>
+  </body>
+</html>
