@@ -29,6 +29,7 @@ type WireObservation = { type: string; direction: string; phase?: string; revisi
 const wire: WireObservation[] = [];
 let channelsOpened = 0, nativeChannels = false, signalingOpened = false;
 const safeErrors: string[] = [];
+const observationQueues: Array<() => Promise<void>> = [];
 let privateProjectionChecks = 0, privateProjectionOk = true;
 let undoIdentity: string | undefined;
 let undoRevision: number | undefined;
@@ -48,6 +49,7 @@ function privacy(state: GameState) {
 }
 function observe(conn: TransportConnection) {
   let sent = Promise.resolve(), received = Promise.resolve();
+  observationQueues.push(async () => { await Promise.all([sent, received]); });
   const capture = (direction: string, data: unknown) => {
     const atSend = blocked();
     const run = async () => {
@@ -110,6 +112,7 @@ const publicState = (s: GameState) => JSON.stringify({
   battlefield: s.battlefield.map(id => s.objects[id]), stack: s.stack,
 });
 const qa = {
+  async drainObservations() { await Promise.all(observationQueues.map(drain => drain())); },
   status() {
     const g = useGameStore.getState(), s = g.gameState;
     return { ready: Boolean(s && g.adapter), role, seat: getPlayerId(), route: location.pathname.startsWith("/game/") ? "game" : "setup",

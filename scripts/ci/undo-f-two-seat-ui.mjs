@@ -212,16 +212,36 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   await host.wait(`(()=>{const b=${hostSubmit};return b&&b.textContent.trim()==='Host P2P Game'&&!b.disabled;})()`, 90);
   result.hostSetupAtSubmit = await host.evaluate(setupControls);
   await host.click(hostSubmit);
+  result.stagesPassed.push("real-host-p2p-submit");
   stage = "host-continue-without-lobby";
   await host.wait(`Boolean(${host.button("Continue without lobby")})`);
   await host.click(host.button("Continue without lobby"));
+  result.stagesPassed.push("real-host-without-lobby-choice");
   category = "communication"; stage = "loopback-signaling";
   await host.wait("window.__twoSeatQa.status().signalingOpened && window.__twoSeatQa.roomCode()", 45);
   const code = await host.evaluate("window.__twoSeatQa.roomCode()"); assert(/^[A-Z2-9]{5}$/.test(code), "actual direct room code unavailable");
-  stage = "guest-app-join";
+  assert(!(await host.evaluate("window.__twoSeatQa.status().agreed")), "host consent was not consumed by original construction");
+  result.hostConsentConsumedByConstruction = true;
+  result.stagesPassed.push("real-host-loopback-signaling");
+  category = "setup"; stage = "guest-direct-code-submit";
   await guest.click("document.querySelector('input[placeholder=" + JSON.stringify("Enter code or CODE@IP:PORT") + "]')");
   await cdp("Input.insertText", { text: code }, guest.sessionId);
+  result.guestCodeInput = await guest.evaluate(`(()=>{const n=document.querySelector('input[placeholder="Enter code or CODE@IP:PORT"]');return {length:n?.value.length??0,matchesActualHostCode:n?.value===${JSON.stringify(code)}};})()`);
+  assert(result.guestCodeInput.length === 5 && result.guestCodeInput.matchesActualHostCode, "guest real code input differs");
+  await guest.wait(`(()=>{const b=${guest.button("Join")};return b&&!b.disabled;})()`);
   await guest.click(guest.button("Join"));
+  // The original direct-code flow always opens MyDecks, even with an active
+  // saved deck. Select the authorized own fixture through its real tile.
+  stage = "guest-deck-selection";
+  const guestDeck = "[...document.querySelectorAll('[role=button] p')].find(n=>n.textContent.trim()==='QA Guest')";
+  await guest.wait(guestDeck);
+  result.stagesPassed.push("real-guest-direct-code-submit");
+  assert(await guest.evaluate("[...document.querySelectorAll('[role=button] p')].filter(n=>n.textContent.trim()==='QA Guest').length===1"), "guest fixture tile not unique");
+  const beforeJoin = await guest.evaluate("window.__twoSeatQa.status()");
+  assert(beforeJoin.agreed && !beforeJoin.signalingOpened, "guest consent not held before original join construction");
+  await guest.click(guestDeck);
+  result.stagesPassed.push("real-guest-deck-tile-choice");
+  category = "communication"; stage = "real-two-seat-pairing";
   // Auto-start is an existing host option. If off, use the actual host control.
   if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) {
     const start = host.button("Start Game");
@@ -266,6 +286,8 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   await host.click(undo);
   await host.wait("window.__twoSeatQa.restoreWitness()", 30);
   await guest.wait("window.__twoSeatQa.status().stackCount===0 && !window.__twoSeatQa.status().blocked", 30);
+  await host.evaluate("window.__twoSeatQa.drainObservations()");
+  await guest.evaluate("window.__twoSeatQa.drainObservations()");
   const h = await host.evaluate("window.__twoSeatQa.status()"), g = await guest.evaluate("window.__twoSeatQa.status()");
   assert(h.safeErrors.length === 0 && g.safeErrors.length === 0, "seat observation or transport errors present");
   assert(h.wire.filter(x => x.direction === "send" && x.type === "state_update").map(x => x.phase).join() === "adopted,released", "host phase ordering failed");
@@ -290,6 +312,8 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   const nextPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(nextPoint, "restored hand card pointer unavailable");
   await host.point(nextPoint.x, nextPoint.y, true);
   await host.wait("window.__twoSeatQa.status().stackCount===1"); await guest.wait("window.__twoSeatQa.status().stackCount===1");
+  await host.evaluate("window.__twoSeatQa.drainObservations()");
+  await guest.evaluate("window.__twoSeatQa.drainObservations()");
   const finalHost = await host.evaluate("window.__twoSeatQa.status()"), finalGuest = await guest.evaluate("window.__twoSeatQa.status()");
   assert(finalHost.safeErrors.length === 0 && finalGuest.safeErrors.length === 0, "seat observation or transport errors present before success");
   assert(!viteLog.includes("optimized dependencies changed. reloading"), "DEV dependency reload invalidated the UI lifecycle");
@@ -307,7 +331,7 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
   }
   result.publicUiChecks = {};
   for (const [role, page] of Object.entries(pages)) {
-    try { result.publicUiChecks[role] = await page.evaluate(`(()=>{const c=[...document.querySelectorAll('input[type=checkbox]')].find(n=>n.closest('label')?.textContent.includes('I agree that the host'));return {rootMounted:Boolean(document.getElementById('root')?.childElementCount),consentRendered:Boolean(c),consentChecked:Boolean(c?.checked),directCodePrompt:[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Use direct code'),hostSetupRendered:Boolean(document.querySelector('button[aria-label=Format]')),joinInputRendered:Boolean(document.querySelector('input[placeholder="Enter code or CODE@IP:PORT"]'))};})()`); } catch {}
+    try { result.publicUiChecks[role] = await page.evaluate(`(()=>{const c=[...document.querySelectorAll('input[type=checkbox]')].find(n=>n.closest('label')?.textContent.includes('I agree that the host'));return {rootMounted:Boolean(document.getElementById('root')?.childElementCount),consentRendered:Boolean(c),consentChecked:Boolean(c?.checked),directCodePrompt:[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Use direct code'),hostSetupRendered:Boolean(${hostForm}),joinInputRendered:Boolean(document.querySelector('input[placeholder="Enter code or CODE@IP:PORT"]')),guestFixtureTileRendered:[...document.querySelectorAll('[role=button] p')].some(n=>n.textContent.trim()==='QA Guest'),startGameRendered:[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Start Game')};})()`); } catch {}
   }
   result.publicFormChecks = {};
   for (const [role, page] of Object.entries(pages)) {
