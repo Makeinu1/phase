@@ -25,27 +25,33 @@ const worker = `import init, * as engine from '/engine_wasm.js';
 import {prepare,measure,cases} from '/core.mjs';
 try { const wasm=await init(); const fixture=await (await fetch('/fixture.json')).text();
 const results=[];
-for (const config of cases) {
+for (const config of cases.filter(c=>c.caseId===new URL(import.meta.url).searchParams.get("case"))) {
 const census=await import('/engine_wasm.js?census='+config.caseId);
 await census.default();const prepared=await prepare(census,fixture,config);census.clear_game_state();
 const measured=await import('/engine_wasm.js?measure='+config.caseId);const fresh=await measured.default();
 const result=await measure(measured,fresh.memory,fixture,config,()=>({workerObservableMemory: typeof performance.memory === 'object' ? {usedJSHeapSize:performance.memory.usedJSHeapSize,totalJSHeapSize:performance.memory.totalJSHeapSize,scope:'nonstandard; not live heap'} : 'UNAVAILABLE', measureUserAgentSpecificMemory:typeof performance.measureUserAgentSpecificMemory, liveHeap:'UNMEASURED'}),prepared);
 results.push(result); if (!result.pass) break;
 }
-postMessage({pass:results.length===cases.length && results.every(r=>r.pass),results});
+postMessage({pass:results.length===1 && results.every(r=>r.pass),results});
 } catch {postMessage({pass:false,stage:'worker-initialize',failureClass:'preparation-failure'});}`;
-const html = `<!doctype html><meta charset="utf-8"><pre id="result"></pre><script>
-const result = document.querySelector('#result');
-const capabilities = {secureContext:isSecureContext, webAssembly:typeof WebAssembly==='object',
- moduleWorker:typeof Worker==='function', rtcApi:typeof RTCPeerConnection==='function'};
-try { const worker = new Worker('/probe-worker.js',{type:'module'});
- worker.onmessage = event => { result.textContent=JSON.stringify({...capabilities,...event.data}); worker.terminate(); };
- worker.onerror = event => { result.textContent=JSON.stringify({pass:false,error:event.message}); };
-} catch(error) { result.textContent=JSON.stringify({pass:false,error:String(error)}); }
+const html = `<!doctype html><meta charset="utf-8"><pre id="result"></pre><script type="module">
+import {cases} from '/core.mjs';
+const result=document.querySelector('#result');
+const capabilities={secureContext:isSecureContext,webAssembly:typeof WebAssembly==='object',moduleWorker:typeof Worker==='function'};
+const results=[];
+for(const config of cases) {
+ const observed=await new Promise(resolve=>{
+  const worker=new Worker('/probe-worker.js?case='+config.caseId,{type:'module'});
+  worker.onmessage=event=>{worker.terminate();resolve(event.data);};
+  worker.onerror=()=>{worker.terminate();resolve({pass:false,stage:'worker-error',failureClass:'preparation-failure'});};
+ });
+ results.push(observed);if(!observed.pass) break;
+}
+result.textContent=JSON.stringify({...capabilities,pass:results.length===cases.length && results.every(r=>r.pass),results});
 </script>`;
 const server = http.createServer((request, response) => {
   if (request.url === "/") { response.setHeader("Content-Type", "text/html"); response.end(html); return; }
-  if (request.url === "/probe-worker.js") { response.setHeader("Content-Type", "text/javascript"); response.end(worker); return; }
+  if (request.url?.split("?")[0] === "/probe-worker.js") { response.setHeader("Content-Type", "text/javascript"); response.end(worker); return; }
   if (request.url === "/core.mjs") { response.setHeader("Content-Type","text/javascript");response.end(core);return; }
   if (request.url === "/fixture.json") { response.setHeader("Content-Type","application/json");response.end(fixture);return; }
   const name = new URL(request.url,"http://localhost").pathname.slice(1);

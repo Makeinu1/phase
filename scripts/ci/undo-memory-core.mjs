@@ -73,7 +73,28 @@ try {
   }
 
 const {cast, pre} = reachOrdinaryCast("legal-setup");
-return {cast,trace};
+const metadata = {reachedTurn:pre.turn_number,traceLength:trace.length,
+ preUtf8Bytes:new TextEncoder().encode(engine.export_game_state_json()).byteLength,
+ objectCount:Object.keys(pre.objects).length,battlefieldCount:pre.battlefield.length,
+ stackCount:pre.stack.length, censusCycles:config.undo ? config.repeats : 0};
+const replay=[];
+if(config.undo) {
+ const binding=engine.host_precast_undo_status().binding;
+ engine.enable_host_precast_undo(binding);
+ for(let i=1;i<=config.repeats;i++) {
+  const beforeReplay=engine.has_replay_recording();
+  check(engine.submit_action(0,cast).status==="applied","census-cast");
+  const receipt=engine.host_precast_undo_status().receipt;
+  check(engine.restore_host_precast_undo(binding,receipt).phase==="Consumed","census-restore");
+  const restored=state();
+  for(const field of ["players","objects","battlefield","stack","waiting_for","priority_player","phase","turn_number","rng_seed","rng_word_pos"]) {
+   check(JSON.stringify(restored[field])===JSON.stringify(pre[field]),"census-pre-equality");
+  }
+  if([1,2,4,8,16,32].includes(i)) replay.push({cycle:i,before:beforeReplay,after:engine.has_replay_recording()});
+ }
+ engine.disable_host_precast_undo();
+}
+return {cast,trace,metadata:{...metadata,samePreValidated:config.undo,replay}};
 } catch { throw Error("legal-preparation-failed"); }
 }
 export async function measure(engine,memory,fixture,config,observe,prepared) {
@@ -91,26 +112,26 @@ let highWater=memory.buffer.byteLength;
 const samples=[];
 function sample(iteration,boundary) {
  highWater=Math.max(highWater,memory.buffer.byteLength);
- samples.push({iteration,boundary,linearBytes:memory.buffer.byteLength,linearHighWaterBytes:highWater,...observe()});
+ samples.push({iteration,cycleClass:iteration===1?"first":iteration>1?"after-first-restore":"baseline",boundary,linearBytes:memory.buffer.byteLength,linearHighWaterBytes:highWater,...observe()});
 }
 sample(0,"prepared"); stage="measurement";
 for(let i=1;i<=repeats;i++) {
  const result=engine.submit_action(0,prepared.cast);
  const armed=engine.host_precast_undo_status();
  if(result.status!=="applied" || (config.undo && armed.phase!=="Armed")) throw Error();
- sample(i,"saved");
+ if([1,2,4,8,16,32].includes(i)) sample(i,"saved");
  if(config.undo) {
   if(engine.restore_host_precast_undo(binding,armed.receipt).phase!=="Consumed") throw Error();
-  sample(i,"restored");
+  if([1,2,4,8,16,32].includes(i)) sample(i,"restored");
  }
 }
 engine.disable_host_precast_undo();engine.clear_game_state();sample(repeats,"cleared");
-return {pass:true,caseId,cards,minTurn,repeats,undo:config.undo,samples,liveHeap:"UNMEASURED",synchronousAllocationPeak:"UNMEASURED",stateEquality:"not observed in hot interval; existing fixed restore control must pass separately",retainedSnapshot:"one host Option; no byte cap",plateauClaim:"non-shrink or plateau alone does not establish a leak or zero allocations"};
+return {pass:true,caseId,cards,minTurn,repeats,undo:config.undo,census:prepared.metadata,samples,liveHeap:"UNMEASURED",synchronousAllocationPeak:"UNMEASURED",stateEquality:"not observed in hot interval; existing fixed restore control must pass separately",retainedSnapshot:"one host Option; no byte cap",plateauClaim:"non-shrink or plateau alone does not establish a leak or zero allocations"};
 } catch {return {pass:false,caseId,stage,failureClass:stage==="measurement"?"measurement-error-not-automatically-memory":"preparation-failure"};}
 }
 // Expand one factor at a time only after CI validates this measurement contract.
 // Planned: repeat40/128, size80/128, size160/128, history40/minTurn12/128.
 export const cases = [
  {caseId:"smoke40-off",cards:40,minTurn:1,repeats:1,undo:false},
- {caseId:"smoke40-on",cards:40,minTurn:1,repeats:1,undo:true}
+ {caseId:"repeat40-on",cards:40,minTurn:1,repeats:32,undo:true}
 ];
