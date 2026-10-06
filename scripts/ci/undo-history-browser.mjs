@@ -231,16 +231,29 @@ async function campaign() {
   } mark('capture-reservation-submit-zero');
   await perform('cast-payment', cast); let stack = await state();
   check(stack.stack.length === 1 && acceptedEvents.some(e => e.type === 'SpellCast'), 'real-cast-payment-on-stack');
+  mark('real-cast-payment-on-stack');
   let beforeResolve = await raw(); await perform('resolve-search-shuffle', resolveSpell); let firstPost = await raw();
   const rngBefore = lossless(beforeResolve).state.rng_word_pos, rngAfter = lossless(firstPost).state.rng_word_pos;
   check(rngBefore !== rngAfter, 'real-search-shuffle-rng-progress');
+  mark('real-search-shuffle-rng-progress');
   const actor = (await state()).waiting_for.data.player, stale = await issued(actor);
   const restoreBefore = restoreCount; await locked(() => history.undo());
   check(restoreCount === restoreBefore + 1 && restoreObserved === beforeResolve, 'opaque-pre-forwarded-byte-for-byte');
   equalRekey(beforeResolve, await raw());
+  mark('opaque-PRE-byte-exact-full-envelope-RNG-restored');
   let staleBefore = await raw();
-  await adapter.submitInteraction(stale, actor).then(() => check(false, 'old-capability-refused'), e => check(e.code === AdapterErrorCode.ACTION_REJECTED && e.rejection?.code === 'stale_interaction', 'typed-old-capability-rejection'));
-  check(staleBefore === await raw(), 'old-capability-nonmutating'); await issued((await state()).waiting_for.data.player);
+  await adapter.submitInteraction(stale, actor).then(() => check(false, 'old-capability-refused'), e => {
+    globalThis.__qaStaleRejection = {
+      adapterCode: typeof e?.code === 'string' ? e.code.slice(0, 64) : null,
+      rejectionCode: typeof e?.rejection?.code === 'string' ? e.rejection.code.slice(0, 64) : null,
+      disposition: typeof e?.rejection?.disposition === 'string' ? e.rejection.disposition.slice(0, 32) : null,
+      recoverable: typeof e?.recoverable === 'boolean' ? e.recoverable : null,
+    };
+    check(e?.code === AdapterErrorCode.STALE_ACTION && e.rejection?.code === 'stale_interaction'
+      && e.rejection.disposition === 'stale' && e.recoverable === false, 'typed-old-capability-rejection');
+  });
+  check(staleBefore === await raw(), 'old-capability-nonmutating'); mark('typed-old-capability-refused-state-byte-exact');
+  await issued((await state()).waiting_for.data.player);
   await perform('resolve-replay', resolveSpell); equalRekey(firstPost, await raw());
   check(history.inspect().cursor === 2 && history.inspect().entries.length === 2, 'successful-branch-releases-future');
   mark('cast-payment-search-shuffle-undo-replay-full-envelope-RNG-byte-exact'); mark('old-capability-refused-fresh-normal-continuation');
@@ -314,9 +327,9 @@ async function campaign() {
   }
   for (const field of ['initialDigest', 'finalDigest', 'preDigests', 'traceDigest']) check(JSON.stringify(globalThis.__qaMemoryTrace[0][field]) === JSON.stringify(globalThis.__qaMemoryTrace[1][field]), 'memory-paired-complete-PRE-final-RNG-action-event-trace-identical');
   stage = 'complete';
-  return { pass: true, scope: 'isolated actual WasmAdapter normal module Worker; one Worker / two actors; no product dispatch/P2P', checks, watchdog: globalThis.__qaWatchdog, memoryStages, memoryTrace: globalThis.__qaMemoryTrace,
+  return { pass: true, scope: 'isolated actual WasmAdapter normal module Worker; one Worker / two actors; no product dispatch/P2P', checks, staleRejection: globalThis.__qaStaleRejection, watchdog: globalThis.__qaWatchdog, memoryStages, memoryTrace: globalThis.__qaMemoryTrace,
     claimsExcluded: ['product dispatch', 'two-seat synchronization/agreement/privacy', 'iPhone Safari', 'heap reclamation guarantee', 'product history budget'] };
 }
 globalThis.__qaRun = campaign;
 globalThis.__qaResult = null;
-globalThis.__qaStart = () => campaign().then(result => { globalThis.__qaResult = result; }, error => { globalThis.__qaResult = { pass: false, stage, checks, failure: String(error).slice(0, 180), actionCount, restoreCount }; });
+globalThis.__qaStart = () => campaign().then(result => { globalThis.__qaResult = result; }, error => { globalThis.__qaResult = { pass: false, stage, checks, failure: String(error).slice(0, 180), staleRejection: globalThis.__qaStaleRejection, actionCount, restoreCount }; });
