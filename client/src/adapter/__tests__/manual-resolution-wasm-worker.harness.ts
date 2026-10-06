@@ -21,6 +21,7 @@ type Invocation = { value?: unknown; error?: Error; response?: RecordValue };
 // Evidence contains fixed case IDs, assertion booleans and public identity hashes.
 type ControlEvidence = {
   initializationAccepted?: boolean; stateInstalled?: boolean; replayInstalled?: boolean;
+  viewerRngRedacted?: boolean; trustedSeedPreserved?: boolean;
   defaultsMatched?: boolean; refusalClassMatched?: boolean; typedDiscriminatorsMatched?: boolean;
   clientCodeMatched?: boolean; residentPreserved?: boolean; reachGuard?: string;
 };
@@ -33,7 +34,12 @@ type ArtifactEvidence = {
   };
 };
 type Evidence = Control[] | ArtifactEvidence | Record<string, boolean | number> | null;
-type Row = { name: string; status: "pending" | "pass" | "fail"; evidence: Evidence; error?: string };
+type AssertionStage = "row" | "initialize" | "observe" | "viewer-redaction" | "trusted-defaults"
+  | "default-fields" | "refusal" | "resident-preservation" | "ordinary-action";
+type Row = {
+  name: string; status: "pending" | "pass" | "fail"; evidence: Evidence;
+  error?: string; caseId?: string | null; stage?: AssertionStage;
+};
 type Endpoint = {
   name: "wasm-shell" | "production-worker";
   reset: () => Promise<void>;
@@ -53,6 +59,8 @@ declare global {
 
 const rows: Row[] = [];
 const controls: Control[] = [];
+let activeCaseId: string | null = null;
+let activeStage: AssertionStage = "row";
 const params = new URLSearchParams(location.search);
 const basicName = "Bootstrap Blank Basic";
 const basicDeck = (count = 40, bracketTier = "core") => ({
@@ -83,7 +91,7 @@ const validLimited: Inputs = {
 type AssertionCode =
   | "boundary-object" | "artifact-fetch" | "worker-error-type" | "observation-failure"
   | "ordinary-init-rejected" | "ordinary-init-envelope" | "ordinary-init-events" | "worker-result"
-  | "ordinary-install" | "default-seed" | "default-player-count" | "default-format"
+  | "ordinary-install" | "viewer-rng-redaction" | "default-seed" | "default-player-count" | "default-format"
   | "default-match-type" | "default-loop-detection" | "wasm-refusal-envelope" | "wasm-refusal-reasons"
   | "wasm-refusal-reason-type" | "wasm-refusal-class" | "wasm-bracket-discriminator"
   | "wasm-occupied-discriminator" | "wasm-refusal-classifier" | "worker-refusal" | "worker-refusal-class"
@@ -126,14 +134,20 @@ async function sha256(url: string): Promise<string> {
 }
 
 async function runRow(name: string, body: () => Promise<Evidence>): Promise<void> {
+  activeCaseId = null;
+  activeStage = "row";
   const row: Row = { name, status: "pending", evidence: null };
   rows.push(row);
   try {
     row.evidence = await body();
     row.status = "pass";
+    activeCaseId = null;
+    activeStage = "row";
   } catch (error) {
     row.status = "fail";
     row.error = failureCode(error);
+    row.caseId = activeCaseId;
+    row.stage = activeStage;
     if (name === "ordinary_initializer_preservation") row.evidence = controls;
     throw error;
   }
@@ -221,9 +235,12 @@ function assertSuccess(endpoint: Endpoint, outcome: Invocation): void {
 }
 
 async function positive(endpoint: Endpoint, shell: Shell, name: string, input: Inputs): Promise<Observation> {
+  activeCaseId = `${endpoint.name}.${shell}.${name}`;
+  activeStage = "initialize";
   await endpoint.reset();
   const outcome = await endpoint.invoke(shell, input);
   assertSuccess(endpoint, outcome);
+  activeStage = "observe";
   const observation = await endpoint.observe();
   check(observation.persistence !== null && observation.replay !== null, "ordinary-install");
   JSON.parse(observation.persistence);
@@ -231,15 +248,22 @@ async function positive(endpoint: Endpoint, shell: Shell, name: string, input: I
   addControl(endpoint, shell, name, {
     initializationAccepted: true, stateInstalled: true, replayInstalled: true,
   });
+  activeCaseId = null;
+  activeStage = "row";
   return observation;
 }
 
 function assertDefaults(observation: Observation, format: "Standard" | "FreeForAll", count: number): void {
+  activeStage = "viewer-redaction";
   const state = stateFrom(observation.state);
+  check(state.rng_seed === 0 && record(state).rng_word_pos === 0, "viewer-rng-redaction");
+  activeStage = "trusted-defaults";
+  const trustedState = stateFrom(JSON.parse(observation.persistence ?? "null"));
   const replay = record(JSON.parse(observation.replay ?? "null"));
   const header = record(replay.header);
+  check(trustedState.rng_seed === 42 && header.seed === 42, "default-seed");
+  activeStage = "default-fields";
   const match = record(header.match_config);
-  check(state.rng_seed === 42 && header.seed === 42, "default-seed");
   check(state.players.length === count && header.player_count === count, "default-player-count");
   check(state.format_config?.format === format && record(header.format_config).format === format, "default-format");
   check(state.match_config?.match_type === "Bo1" && match.match_type === "Bo1", "default-match-type");
@@ -252,8 +276,12 @@ async function refusal(
   kind: "deckValidation" | "bracketViolation" | "engineOccupied" | "workerMissingDb",
   reachGuard: string,
 ): Promise<void> {
+  activeCaseId = `${endpoint.name}.${shell}.${name}`;
+  activeStage = "observe";
   const before = await endpoint.observe();
+  activeStage = "initialize";
   const outcome = await endpoint.invoke(shell, input);
+  activeStage = "refusal";
   if (endpoint.name === "wasm-shell") {
     const envelope = record(outcome.value);
     check(envelope.error === true, "wasm-refusal-envelope");
@@ -275,13 +303,17 @@ async function refusal(
       check(outcome.error.code === expected, "client-error-code");
     }
   }
+  activeStage = "observe";
   const after = await endpoint.observe();
+  activeStage = "resident-preservation";
   check(json(before) === json(after), "refusal-resident-preservation");
   addControl(endpoint, shell, name, {
     reachGuard, refusalClassMatched: true, typedDiscriminatorsMatched: true,
     ...(endpoint.name === "production-worker" && (kind === "bracketViolation" || kind === "engineOccupied")
       ? { clientCodeMatched: true } : {}), residentPreserved: true,
   });
+  activeCaseId = null;
+  activeStage = "row";
 }
 
 async function ordinaryControls(endpoint: Endpoint): Promise<void> {
@@ -306,17 +338,27 @@ async function ordinaryControls(endpoint: Endpoint): Promise<void> {
     ] as const;
     for (const fixture of defaults) {
       const observation = await positive(endpoint, shell, fixture.name, fixture.input);
+      activeCaseId = `${endpoint.name}.${shell}.${fixture.name}`;
       // A malformed match still reaches real deck validation, install and replay.
       if (fixture.format === "Limited") {
+        activeStage = "viewer-redaction";
         const state = stateFrom(observation.state);
+        check(state.rng_seed === 0 && record(state).rng_word_pos === 0, "viewer-rng-redaction");
+        activeStage = "trusted-defaults";
+        const trustedState = stateFrom(JSON.parse(observation.persistence ?? "null"));
         const header = record(record(JSON.parse(observation.replay ?? "null")).header);
-        check(state.rng_seed === 42 && header.seed === 42, "malformed-match-seed");
+        check(trustedState.rng_seed === 42 && header.seed === 42, "malformed-match-seed");
+        activeStage = "default-fields";
         check(state.match_config?.match_type === "Bo1" && record(header.match_config).match_type === "Bo1", "malformed-match-type");
         check((state.loop_detection ?? "Off") === "Off" && (record(header.match_config).loop_detection ?? "Off") === "Off", "malformed-match-loop-detection");
       } else {
         assertDefaults(observation, fixture.format, fixture.count);
       }
       controls[controls.length - 1].evidence.defaultsMatched = true;
+      controls[controls.length - 1].evidence.viewerRngRedacted = true;
+      controls[controls.length - 1].evidence.trustedSeedPreserved = true;
+      activeCaseId = null;
+      activeStage = "row";
     }
 
     const failures = [
@@ -388,6 +430,8 @@ async function main(): Promise<void> {
     });
     await runRow("ordinary_worker_action", async () => {
       await positive(endpoint, "local", "issued_action_reach", validLimited);
+      activeCaseId = "production-worker.local.issued_action_reach";
+      activeStage = "ordinary-action";
       const before = await client!.getSnapshot();
       const state = stateFrom(before.state);
       check(state.waiting_for.type === "MulliganDecision", "ordinary-decision");
@@ -400,6 +444,8 @@ async function main(): Promise<void> {
       check(json(before.state) !== json(after.state), "action-snapshot-change");
       const replay = record(JSON.parse(await client!.exportReplayLog()));
       check(Array.isArray(replay.actions) && replay.actions.length === 1, "action-recorded-once");
+      activeCaseId = null;
+      activeStage = "row";
       return { ordinaryDecisionReached: true, humanDecisionIssued: true, engineIssuedAction: true,
         snapshotChanged: true, replayRecordedOnce: true, recordedActionCount: replay.actions.length };
     });
@@ -425,7 +471,7 @@ async function main(): Promise<void> {
   } catch (error) {
     window.manualWasmBootstrap.finish({
       status: "fail", reason: "incomplete-controls", artifact: "baseline",
-      error: failureCode(error), rows,
+      error: failureCode(error), caseId: activeCaseId, stage: activeStage, rows,
     });
   } finally {
     client?.dispose();

@@ -265,12 +265,35 @@ jobs:
             def fixed($values): . as $value | if ($values | index($value)) != null then $value else "invalid" end;
             def boolean: if type == "boolean" then . else null end;
             def hash($length): if type == "string" and test("^[a-f0-9]{" + ($length | tostring) + "}$") then . else null end;
+            def error_code: if . == null then null else . as $code | if ([
+              "boundary-object","artifact-fetch","worker-error-type","observation-failure",
+              "ordinary-init-rejected","ordinary-init-envelope","ordinary-init-events","worker-result",
+              "ordinary-install","viewer-rng-redaction","default-seed","default-player-count","default-format",
+              "default-match-type","default-loop-detection","wasm-refusal-envelope","wasm-refusal-reasons",
+              "wasm-refusal-reason-type","wasm-refusal-class","wasm-bracket-discriminator",
+              "wasm-occupied-discriminator","wasm-refusal-classifier","worker-refusal","worker-refusal-class",
+              "worker-bracket-discriminator","worker-occupied-discriminator","client-error-type","client-error-code",
+              "refusal-resident-preservation","card-db-load","malformed-match-seed","malformed-match-type",
+              "malformed-match-loop-detection","checkpoint-mode","limited-authority","served-wasm-identity",
+              "served-glue-identity","baseline-source-identity","source-identity","glue-identity",
+              "ordinary-decision","human-decision","issued-action","action-snapshot-change","action-recorded-once",
+              "boundary-failure","experimental-exports-absent","page-deadline","page-error","page-rejection"
+            ] | index($code)) != null then $code else "invalid-error" end end;
             def control_id: if type == "string" and test("^(wasm-shell|production-worker)\\.(local|host)\\.(resident_without_database|missing_database|omitted_defaults|null_defaults|undeclared_four_seats|malformed_match_fallback|valid_limited|all_cedh_bracket_reach|cedh_bracket_refusal|occupied_direction|resident_for_(local|host)_occupied|(valid_limited_for_)?(malformed_format|format_player_count|malformed_deck|player_deck_validation|opponent_deck_validation|empty_library_after_load))$") then . else "invalid-case" end;
+            def diagnostic_case($row): if . == null then null
+              elif $row == "ordinary_worker_action" and . == "production-worker.local.issued_action_reach" then .
+              else control_id end;
+            def stage: if . == null then null else fixed([
+              "row","initialize","observe","viewer-redaction","trusted-defaults","default-fields",
+              "refusal","resident-preservation","ordinary-action"
+            ]) end;
             .value | {status:(.status | fixed(["pass","fail"])),
               reason:(.reason | fixed(["expected-experimental-availability","unexpected-baseline-exports","incomplete-controls","timeout","uncaught-error","unhandled-rejection"])),
-              artifact:(.artifact | fixed(["baseline"])), error:(if .error then "page-failure" else null end),
+              artifact:(.artifact | fixed(["baseline"])), error:(.error | error_code),
+              caseId:(.rows[-1].name as $row | .caseId | diagnostic_case($row)), stage:(.stage | stage),
               rows:[(.rows // [])[] | {name:(.name | fixed(["artifact_identity","ordinary_initializer_preservation","ordinary_worker_action","experimental_availability"])),
-                status:(.status | fixed(["pass","fail","pending"])), error:(if .error then "row-failure" else null end),
+                status:(.status | fixed(["pass","fail","pending"])), error:(.error | error_code),
+                caseId:(.name as $row | .caseId | diagnostic_case($row)), stage:(.stage | stage),
                 evidence:(if .name == "artifact_identity" then .evidence | {
                   wasmHash:(.wasmHash | hash(64)), servedGlueHash:(.servedGlueHash | hash(64)),
                   supplied:{candidate_sha:(.supplied.candidate_sha | hash(40)), baseline_sha:(.supplied.baseline_sha | hash(40)),
@@ -281,6 +304,7 @@ jobs:
                     reachGuard:(if .evidence.reachGuard == null then null else .evidence.reachGuard | control_id end),
                     initializationAccepted:(.evidence.initializationAccepted | boolean), stateInstalled:(.evidence.stateInstalled | boolean),
                     replayInstalled:(.evidence.replayInstalled | boolean), defaultsMatched:(.evidence.defaultsMatched | boolean),
+                    viewerRngRedacted:(.evidence.viewerRngRedacted | boolean), trustedSeedPreserved:(.evidence.trustedSeedPreserved | boolean),
                     refusalClassMatched:(.evidence.refusalClassMatched | boolean), typedDiscriminatorsMatched:(.evidence.typedDiscriminatorsMatched | boolean),
                     clientCodeMatched:(.evidence.clientCodeMatched | boolean), residentPreserved:(.evidence.residentPreserved | boolean)}}]
                 elif .name == "ordinary_worker_action" then .evidence | {
@@ -290,7 +314,7 @@ jobs:
                 elif .name == "experimental_availability" then .evidence | {
                   initialize_experimental_local_game:(.initialize_experimental_local_game | boolean), experimental_local_actor:(.experimental_local_actor | boolean)}
                 else null end)}]}' > "$MANUAL_EVIDENCE/baseline-terminal.json"
-          jq '{status,reason,rows:[.rows[] | {name,status,error,controls:
+          jq '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
             (if (.evidence | type) == "array" then [.evidence[] | {name,status}] else null end)}]}' \
             "$MANUAL_EVIDENCE/baseline-terminal.json"
           jq -e '.status == "fail" and .reason == "expected-experimental-availability" and
@@ -346,7 +370,10 @@ jobs:
           complete &= [row.get('name') for row in rows] == [
               'artifact_identity', 'ordinary_initializer_preservation', 'ordinary_worker_action', 'experimental_availability']
           complete &= [row.get('status') for row in rows] == ['pass', 'pass', 'pass', 'fail']
+          complete &= all(terminal.get(key) is None for key in ['error', 'caseId', 'stage'])
           if len(rows) == 4:
+              complete &= all(row.get(key) is None for row in rows[:3] for key in ['error', 'caseId', 'stage'])
+              complete &= rows[3].get('error') == 'experimental-exports-absent'
               complete &= rows[3].get('evidence') == {
                   'initialize_experimental_local_game': False, 'experimental_local_actor': False}
               observed = rows[0].get('evidence', {})
@@ -371,7 +398,8 @@ jobs:
                           'refusalClassMatched', 'typedDiscriminatorsMatched', 'residentPreserved'])
                   name = control.get('name', '')
                   if name.rsplit('.', 1)[-1] in ['omitted_defaults', 'null_defaults', 'undeclared_four_seats', 'malformed_match_fallback']:
-                      complete &= assertions.get('defaultsMatched') is True
+                      complete &= all(assertions.get(key) is True for key in [
+                          'defaultsMatched', 'viewerRngRedacted', 'trustedSeedPreserved'])
                   if name.startswith('production-worker.') and name.rsplit('.', 1)[-1] in ['cedh_bracket_refusal', 'occupied_direction']:
                       complete &= assertions.get('clientCodeMatched') is True
               complete &= rows[2].get('evidence') == {
