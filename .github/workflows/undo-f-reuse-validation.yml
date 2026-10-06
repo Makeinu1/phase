@@ -324,7 +324,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 03b13eccaa6823ed41a0832044c33fb1821187e9
+          ref: 553c87136898d9b1b778c7c51bc19f805c8de407
           path: frontend
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -349,7 +349,7 @@ jobs:
         env:
           F_EVIDENCE: ${{ github.workspace }}/single-host-ui-evidence
         run: |
-          test "$(git -C ../frontend rev-parse HEAD)" = 03b13eccaa6823ed41a0832044c33fb1821187e9
+          test "$(git -C ../frontend rev-parse HEAD)" = 553c87136898d9b1b778c7c51bc19f805c8de407
           python3 ../control/scripts/ci/undo-f-guard.py ui-client-dependencies \
             pnpm --dir ../frontend/client install --frozen-lockfile
       - name: Single host consent, disabled Undo and real private Worker close
@@ -392,7 +392,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 03b13eccaa6823ed41a0832044c33fb1821187e9
+          ref: 553c87136898d9b1b778c7c51bc19f805c8de407
           path: frontend
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -428,7 +428,7 @@ jobs:
         env:
           F_EVIDENCE: ${{ github.workspace }}/two-seat-ui-evidence
         run: |
-          test "$(git -C ../frontend rev-parse HEAD)" = 03b13eccaa6823ed41a0832044c33fb1821187e9
+          test "$(git -C ../frontend rev-parse HEAD)" = 553c87136898d9b1b778c7c51bc19f805c8de407
           python3 ../control/scripts/ci/undo-f-guard.py pair-client-dependencies \
             pnpm --dir ../frontend/client install --frozen-lockfile
           mkdir "$RUNNER_TEMP/pair-peer-server"
