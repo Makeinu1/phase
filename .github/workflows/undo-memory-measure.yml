@@ -61,7 +61,7 @@ jobs:
         run: |
           python3 ../verified-control/scripts/ci/undo-f-guard.py memory-node \
             timeout 600 node ../driver/scripts/ci/undo-memory-node.mjs \
-            "$GITHUB_WORKSPACE/wasm-payload" crates/engine-wasm/src/fixtures/host-precast-card-data.json
+            "$GITHUB_WORKSPACE/wasm-payload" crates/engine-wasm/src/fixtures/host-precast-card-data.json --only=short160-off
       - name: Standard Chrome single module Worker finite measurement
         if: ${{ !cancelled() && steps.wasm-input.outcome == 'success' }}
         working-directory: source
