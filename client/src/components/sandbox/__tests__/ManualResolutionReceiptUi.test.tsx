@@ -189,6 +189,105 @@ describe("reusable UI with client receipt coordinator and disconnected mock boun
     expect(newPort.getUnresolvedManualResolutionRequest()).toBeNull();
   });
 
+  it.each([0, 1])("isolates a new authenticated receipt session on same-source rerender without unmount (actor %s)", async (actor) => {
+    const user = userEvent.setup();
+    const oldBoundary = endpoint();
+    oldBoundary.submitCaptured.mockRejectedValueOnce(new Error("Old Finish delivery is unknown."));
+    const oldSession = createManualResolutionReceiptSession({ authenticatedActor: 0, describeFailure: (code) => code });
+    const oldPort = oldSession.bindBoundary(oldBoundary)({ stackEntryId: 44, sourceObjectId: 40, adapterGeneration: 7 });
+    const oldFinished = vi.fn();
+    const view = render(<Harness port={oldPort} onFinished={oldFinished} />);
+    await user.click(screen.getByRole("button", { name: "Mock own player area" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Amount" }), "2");
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("delivery-unknown");
+    const originalRequest = oldBoundary.submitCaptured.mock.calls[0]![0];
+    const newBoundary = endpoint();
+    const newSession = createManualResolutionReceiptSession({ authenticatedActor: actor, describeFailure: (code) => code });
+    const newPort = newSession.bindBoundary(newBoundary)({ stackEntryId: 44, sourceObjectId: 40, adapterGeneration: 7 });
+    const newFinished = vi.fn();
+
+    // Keep source, binding, generation, and restore epoch identical. Only the
+    // real authenticated receipt session changes; the host does not unmount.
+    view.rerender(<Harness port={newPort} viewerPlayerId={actor} onFinished={newFinished} />);
+    expect(screen.queryByRole("button", { name: "Check status" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Finish" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Clear target" })).not.toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "Amount" })).toHaveDisplayValue("");
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+    expect(newPort.getUnresolvedManualResolutionRequest()).toBeNull();
+    expect(oldPort.getUnresolvedManualResolutionRequest()).toBe(originalRequest);
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    expect(newBoundary.submitCaptured).toHaveBeenCalledExactlyOnceWith({
+      binding: initialBinding, command: { type: "finish", stackEntryId: 44, sourceObjectId: 40 },
+    }, actor);
+    expect(newBoundary.lookupReceipt).not.toHaveBeenCalled();
+    expect(oldBoundary.lookupReceipt).not.toHaveBeenCalled();
+    expect(oldBoundary.submitCaptured).toHaveBeenCalledOnce();
+    expect(oldFinished).not.toHaveBeenCalled();
+    expect(newFinished).toHaveBeenCalledOnce();
+    expect(newPort.getUnresolvedManualResolutionRequest()).toBeNull();
+  });
+
+  it("keeps an unknown Finish in the same receipt session when its source port is replaced without unmount", async () => {
+    const user = userEvent.setup();
+    const oldBoundary = endpoint();
+    oldBoundary.submitCaptured.mockRejectedValueOnce(new Error("Old Finish delivery is unknown."));
+    const receiptSession = createManualResolutionReceiptSession({ authenticatedActor: 0, describeFailure: (code) => code });
+    const oldPort = receiptSession.bindBoundary(oldBoundary)({ stackEntryId: 44, sourceObjectId: 40, adapterGeneration: 7 });
+    const onFinished = vi.fn();
+    const view = render(<Harness port={oldPort} onFinished={onFinished} />);
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("delivery-unknown");
+    const originalRequest = oldBoundary.submitCaptured.mock.calls[0]![0];
+    const replacementBoundary = endpoint();
+    replacementBoundary.lookupReceipt.mockImplementation(async (request) => ({ binding: request.binding, status: "completed" }));
+    const replacementPort = receiptSession.bindBoundary(replacementBoundary)({ stackEntryId: 44, sourceObjectId: 40, adapterGeneration: 7 });
+    expect(replacementPort.receiptSessionIdentity).toBe(oldPort.receiptSessionIdentity);
+    view.rerender(<Harness port={replacementPort} onFinished={onFinished} />);
+    expect(screen.getByRole("button", { name: "Finish" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Check status" }));
+    expect(replacementBoundary.lookupReceipt).toHaveBeenCalledExactlyOnceWith(originalRequest, 0);
+    expect(replacementBoundary.lookupReceipt.mock.calls[0]![0]).toBe(originalRequest);
+    expect(oldBoundary.submitCaptured).toHaveBeenCalledOnce();
+    expect(replacementBoundary.submitCaptured).not.toHaveBeenCalled();
+    expect(replacementPort.getUnresolvedManualResolutionRequest()).toBeNull();
+    expect(onFinished).toHaveBeenCalledOnce();
+    expect(screen.getByRole("region", { name: "Mock board" })).toHaveFocus();
+  });
+
+  it("ignores an old session's late Finish after same-source authenticated-session rerender", async () => {
+    const user = userEvent.setup();
+    const oldBoundary = endpoint();
+    let completeOld!: (result: ManualResolutionResult) => void;
+    oldBoundary.submitCaptured.mockReturnValueOnce(new Promise((resolve) => { completeOld = resolve; }));
+    const oldSession = createManualResolutionReceiptSession({ authenticatedActor: 0, describeFailure: (code) => code });
+    const oldPort = oldSession.bindBoundary(oldBoundary)({ stackEntryId: 44, sourceObjectId: 40, adapterGeneration: 7 });
+    const oldFinished = vi.fn();
+    const view = render(<Harness port={oldPort} onFinished={oldFinished} />);
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    const originalRequest = oldBoundary.submitCaptured.mock.calls[0]![0];
+    const newBoundary = endpoint();
+    const newSession = createManualResolutionReceiptSession({ authenticatedActor: 1, describeFailure: (code) => code });
+    const newPort = newSession.bindBoundary(newBoundary)({ stackEntryId: 44, sourceObjectId: 40, adapterGeneration: 7 });
+    const newFinished = vi.fn();
+    view.rerender(<Harness port={newPort} viewerPlayerId={1} onFinished={newFinished} />);
+    await act(async () => completeOld({ binding: originalRequest.binding, status: "completed" }));
+    expect(oldFinished).not.toHaveBeenCalled();
+    expect(newFinished).not.toHaveBeenCalled();
+    expect(screen.getByRole("region", { name: "Mock board" })).not.toHaveFocus();
+    expect(screen.getByRole("button", { name: "Finish" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Check status" })).not.toBeInTheDocument();
+    expect(newBoundary.lookupReceipt).not.toHaveBeenCalled();
+    expect(newBoundary.submitCaptured).not.toHaveBeenCalled();
+    expect(newPort.getUnresolvedManualResolutionRequest()).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Finish" }));
+    expect(newFinished).toHaveBeenCalledOnce();
+    expect(newBoundary.submitCaptured).toHaveBeenCalledExactlyOnceWith({
+      binding: initialBinding, command: { type: "finish", stackEntryId: 44, sourceObjectId: 40 },
+    }, 1);
+  });
+
   it("keeps Finish locked during loss delivery and restores board focus after its own receipt", async () => {
     const user = userEvent.setup();
     const boundary = endpoint();

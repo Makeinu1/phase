@@ -91,8 +91,8 @@ function asReconciliation(result: ManualResolutionResult): ManualResolutionRecon
 /**
  * Client receipt coordination, separately testable from native serialization.
  * Create once per authenticated timeline, preserving it across port/generation
- * replacements. A new session is allowed only on an authoritative timeline
- * reset/restore; ordinary snapshots and adapter replacement must not discard
+ * replacements. A new session is allowed only for a new authenticated context
+ * or an authoritative timeline reset/restore; ordinary snapshots and adapter replacement must not discard
  * an unresolved attempt. Callers retain the original immutable request for
  * reconciliation; a fresh click after known rejection creates a new request
  * instance. Reusing the original instance only reads its original receipt.
@@ -108,6 +108,7 @@ export function createManualResolutionReceiptSession({
 }): {
   bindBoundary: (boundary: ManualResolutionAtomicBoundary) => ManualResolutionCommandPortFactory;
 } {
+  const receiptSessionIdentity = Object.freeze({});
   const attempts = new Map<number, Map<InteractionId, Attempt>>();
   const requestAttempts = new WeakMap<ManualResolutionRequest, Attempt>();
   const find = (request: ManualResolutionRequest) =>
@@ -145,6 +146,7 @@ export function createManualResolutionReceiptSession({
     bindBoundary: (boundary) => (scope: ManualResolutionPortScope) => {
       const capturedScope = Object.freeze({ ...scope });
       return {
+        receiptSessionIdentity,
         getUnresolvedManualResolutionRequest: () => unresolved()?.request ?? null,
         submitManualResolutionCommand: (input) => {
           const request = freezeRequest(input);
