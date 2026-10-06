@@ -49,9 +49,29 @@ submitLabel:b?.textContent.trim()==='Host P2P Game'?'Host P2P Game':b?.textConte
 submitTitlePresent:Boolean(title),submitReason:/checking/i.test(title)?'checking':/not legal/i.test(title)?'illegal':title?'other':null,controls};})()`;
 // DEV-only call-entry probes preserve every original statement. They expose
 // the caller before PeerSession's asynchronous channel-disposal queue loses it.
-const qaProbe = "(window as unknown as {__twoSeatQa?:{noteLifecycle:(kind:string,aborted?:boolean)=>void;noteSessionClose:(reason:unknown)=>void}}).__twoSeatQa";
+const qaProbe = "(window as unknown as {__twoSeatQa?:{noteLifecycle:(kind:string,aborted?:boolean)=>void;noteSessionClose:(reason:unknown,conn?:unknown)=>void;noteAdmission:(kind:string,conn?:unknown,adapter?:unknown,session?:unknown,seats?:unknown,started?:boolean)=>void}}).__twoSeatQa";
 const lifecycleProbes = [
-  { source: "/src/network/peer.ts", anchor: 'close(reason = "Left game") {', count: 1, note: `${qaProbe}?.noteSessionClose(reason);` },
+  { source: "/src/network/peer.ts", anchor: 'close(reason = "Left game") {', count: 1, note: `${qaProbe}?.noteSessionClose(reason,conn);` },
+  { source: "/src/network/peer.ts", anchor: 'tracePeerSession("create-session", { connOpen: conn.open });', count: 1,
+    note: `${qaProbe}?.noteAdmission("peer-session-create",conn);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: "private handleNewConnection(conn: TransportConnection): void {", count: 1,
+    note: `${qaProbe}?.noteAdmission("host-new-connection",conn,this,undefined,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: '} else if (msg.type === "guest_deck") {', count: 1,
+    note: `${qaProbe}?.noteAdmission("host-guest-deck-first",conn,this,session,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: "const pid = this.firstWaitingSeat();", count: 1,
+    note: `${qaProbe}?.noteAdmission("host-seat-check",undefined,this,session,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: 'this.pregameSeatState.seats[pid] = { type: "JoinedHuman" };', count: 1,
+    note: `${qaProbe}?.noteAdmission("host-seat-joined",undefined,this,session,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: "this.pregameSeatState = result.state;", count: 1,
+    note: `${qaProbe}?.noteAdmission("host-seat-mutation",undefined,this,undefined,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: "async startPregameGame(): Promise<SubmitResult> {", count: 1,
+    note: `${qaProbe}?.noteAdmission("host-start-request",undefined,this,undefined,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: "private async startPregameGameInner(): Promise<SubmitResult> {", count: 1,
+    note: `${qaProbe}?.noteAdmission("host-start-inner",undefined,this,undefined,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: "this.pregameSeatState.gameStarted = true;", count: 2,
+    note: `${qaProbe}?.noteAdmission("host-start-complete",undefined,this,undefined,this.pregameSeatState.seats,this.gameStarted);` },
+  { source: "/src/adapter/p2p-adapter.ts", anchor: 'traceAdapter("Guest", "initialize-start", { hasPlayerToken: Boolean(this.playerToken) });', count: 1,
+    note: `${qaProbe}?.noteAdmission("guest-initialize",this.initialConn,this);` },
   { source: "/src/adapter/p2p-adapter.ts", anchor: "dispose(): void {", count: 3, note: `${qaProbe}?.noteLifecycle("p2p-adapter-dispose-enter");` },
   { source: "/src/providers/GameProvider.tsx", anchor: "const setupP2P = async () => {", count: 1, note: `${qaProbe}?.noteLifecycle("p2p-provider-setup-start",signal.aborted);` },
   { source: "/src/providers/GameProvider.tsx", anchor: "return () => {\n        ac.abort();", count: 1,
@@ -201,10 +221,13 @@ PeerServer({host:'127.0.0.1',port:9000,path:'/peerjs',allow_discovery:false},()=
       for (let i = 0; i < seconds * 10; i++) { if (await evaluate(`Boolean(${expression})`)) return; await pause(100); }
       throw Object.assign(Error("app stage deadline"), { qaDeadline: true });
     };
-    const point = async (x, y, double = false) => {
+    const point = async (x, y, double = false, diagnosticKey) => {
+      if (diagnosticKey) result[diagnosticKey] = [];
       for (const clickCount of double ? [1, 2] : [1]) {
+        if (diagnosticKey) result[diagnosticKey].push({ stage: "before-press", clickCount, ...(await evaluate(`window.__twoSeatQa.handPointerSnapshot(${x},${y})`)) });
         await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount }, sessionId);
         await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount }, sessionId);
+        if (diagnosticKey) result[diagnosticKey].push({ stage: "after-release", clickCount, ...(await evaluate(`window.__twoSeatQa.handPointerSnapshot(${x},${y})`)) });
       }
     };
     const click = async (expression, diagnostic) => {
@@ -302,10 +325,17 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   await guest.wait("window.__twoSeatQa.status().signalingOpened", 45);
   stage = "host-start-or-auto-start";
   // Auto-start is an existing host option. If off, use the actual host control.
+  result.hostStartUi = { pointerAttempted: false, pointerActivationCompleted: false };
   if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) {
     const start = host.button("Start Game");
     await host.wait(`window.__twoSeatQa.status().ready || Boolean(${start})`);
-    if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) await host.click(start);
+    if (!(await host.evaluate("window.__twoSeatQa.status().ready"))) {
+      result.hostStartUi.pointerAttempted = true;
+      result.hostStartUi.beforePointerAtUnixMs = Date.now();
+      await host.click(start);
+      result.hostStartUi.pointerActivationCompleted = true;
+      result.hostStartUi.afterPointerAtUnixMs = Date.now();
+    }
   }
   stage = "host-game-ready"; await host.wait("window.__twoSeatQa.status().ready", 90);
   stage = "guest-game-ready"; await guest.wait("window.__twoSeatQa.status().ready", 90);
@@ -382,7 +412,7 @@ return {x,y,scrolled,inside,stable,hittable:r.width>0&&r.height>0&&n.contains(do
   result.stagesPassed.push("ordinary-app-actions");
   category = "product"; stage = "host-pointer-cast";
   const castPoint = await host.evaluate("window.__twoSeatQa.cardPoint()"); assert(castPoint, "Bears hand card pointer unavailable");
-  await host.point(castPoint.x, castPoint.y, true);
+  await host.point(castPoint.x, castPoint.y, true, "hostCastPointerUi");
   await host.wait("window.__twoSeatQa.status().stackCount===1", 30);
   assert(await host.evaluate("window.__twoSeatQa.recordCast()"), "real app cast snapshot missing");
   await guest.wait("window.__twoSeatQa.status().stackCount===1");

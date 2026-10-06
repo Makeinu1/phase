@@ -35,12 +35,24 @@ sessionStorage.setItem("qa-observation-generation", String(contextGeneration));
 let driverStage = "unmarked", driverTeardown = false, providerSetupGeneration = 0;
 const lifecycleEvents: Array<Record<string, unknown>> = [];
 const observedConnections = new WeakSet<object>();
+// These ordinals are observation counters, never PeerJS/session identities.
+const connectionOrdinals = new WeakMap<object, number>();
+const adapterOrdinals = new WeakMap<object, number>();
+const sessionOrdinals = new WeakMap<object, number>();
+const sessionConnections = new WeakMap<object, object>();
+const sessionCreations = new WeakMap<object, number>();
+let observationOrdinal = 0;
+function ordinalFor(map: WeakMap<object, number>, value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  if (!map.has(value)) map.set(value, ++observationOrdinal);
+  return map.get(value)!;
+}
 const repoSources = ["providers/GameProvider.tsx", "adapter/p2p-adapter.ts", "network/peer.ts", "network/connection.ts",
   "stores/gameStore.ts", "stores/multiplayerStore.ts", "game/sessionCleanup.ts", "pages/GamePage.tsx",
   "adapter/wasm-adapter.ts", "adapter/engine-worker-client.ts"];
 const repoFunctions = ["P2PGuestAdapter.dispose", "P2PHostAdapter.dispose", "releaseHostEngineSession",
   "releasePrivateEngine", "setupP2P", "closeTransport", "onAbort", "dispose", "destroy", "close"];
-function lifecycle(kind: string, conn?: TransportConnection, detail?: Record<string, string | boolean>) {
+function lifecycle(kind: string, conn?: TransportConnection, detail?: Record<string, string | boolean | number | null>) {
   try {
     if (lifecycleEvents.length >= 200) {
       if (!safeErrors.includes("lifecycle-observer-overflow")) safeErrors.push("lifecycle-observer-overflow");
@@ -60,7 +72,7 @@ function lifecycle(kind: string, conn?: TransportConnection, detail?: Record<str
       gameSessionGeneration: g.gameSessionGeneration, providerSetupGeneration, driverStage, driverTeardown,
       route: location.pathname.startsWith("/game/") ? "game" : "setup",
       adapterPresent: Boolean(g.adapter), snapshotPresent: Boolean(g.gameState), frames,
-      ...(conn ? { connectionOpen: conn.open, channelState: conn.dataChannel?.readyState ?? null,
+      ...(conn ? { connectionOrdinal: ordinalFor(connectionOrdinals, conn), connectionOpen: conn.open, channelState: conn.dataChannel?.readyState ?? null,
         peerConnectionState: conn.peerConnection?.connectionState ?? null } : {}),
       ...detail });
   } catch { safeErrors.push("lifecycle-observer-failed"); }
@@ -114,11 +126,15 @@ function observe(conn: TransportConnection) {
   observationQueues.push(async () => { await Promise.all([sent, received]); });
   const capture = (direction: string, data: unknown) => {
     const atSend = blocked();
+    const capturedAtUnixMs = Date.now();
     const run = async () => {
       try {
         const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
         const message = await decodeWireMessage(bytes as Uint8Array);
         const m = message as unknown as { type: string; revision?: number; undoSync?: { undoId: string; revision: number; phase: string }; state?: GameState };
+        if (m.type === "guest_deck" || m.type === "kick" || m.type === "game_setup") {
+          lifecycle("wire-admission-type", conn, { direction, messageType: m.type, capturedAtUnixMs });
+        }
         if (m.type === "state_update" || m.type === "game_setup") {
           lastStateRevision = Math.max(lastStateRevision, m.revision ?? 0);
           if (role === "guest" && direction === "receive" && m.state) {
@@ -143,6 +159,9 @@ function observe(conn: TransportConnection) {
     lifecycle("data-connection-open-event", conn);
   };
   if (conn.open) onOpen(); else conn.once("open", onOpen);
+  // The unique-channel count above stays unchanged. Observe every emitted
+  // open separately because hostRoom uses a persistent open listener.
+  conn.on("open", () => lifecycle("data-connection-open-emission", conn));
   conn.on("close", () => lifecycle("data-connection-close-event", conn));
   conn.on("error", error => {
     safeErrors.push("data-connection-error");
@@ -168,6 +187,9 @@ installPeerTransportSelector(() => ({
 
 let pre: GameState | undefined;
 let preSeq = 0, castSeq = 0;
+// Private target identity remains in this page; diagnostics emit only flags.
+let pointerTarget: HTMLElement | undefined;
+let pointerObjectId: number | undefined;
 const actions = () => {
   const g = useGameStore.getState();
   return [...g.legalActions, ...Object.values(g.legalActionsByObject).flat()] as GameAction[];
@@ -182,6 +204,35 @@ const publicState = (s: GameState) => JSON.stringify({
   battlefield: s.battlefield.map(id => s.objects[id]), stack: s.stack,
 });
 const qa = {
+  noteAdmission(kind: string, connection?: unknown, adapter?: unknown, session?: unknown, seats?: unknown, gameStarted?: boolean) {
+    try {
+      if (!["peer-session-create", "host-new-connection", "host-guest-deck-first", "host-seat-check", "host-seat-joined",
+        "host-seat-mutation", "host-start-request", "host-start-inner", "host-start-complete", "guest-initialize"].includes(kind)) {
+        throw Error("unrecognized-admission-observation");
+      }
+      const conn = connection && typeof connection === "object" ? connection : undefined;
+      const currentSession = session && typeof session === "object" ? session : undefined;
+      if (conn && currentSession) sessionConnections.set(currentSession, conn);
+      const linkedConn = conn ?? (currentSession ? sessionConnections.get(currentSession) : undefined);
+      if (kind === "peer-session-create" && conn) sessionCreations.set(conn, (sessionCreations.get(conn) ?? 0) + 1);
+      const counts: Record<string, number> = {};
+      if (seats !== undefined) {
+        if (!Array.isArray(seats)) throw Error("invalid-seat-observation");
+        for (const type of ["HostHuman", "WaitingHuman", "JoinedHuman", "Ai"]) counts[type] = 0;
+        for (const seat of seats) {
+          if (!seat || !Object.prototype.hasOwnProperty.call(counts, seat.type)) throw Error("invalid-seat-kind-observation");
+          counts[seat.type]++;
+        }
+      }
+      lifecycle(kind, linkedConn as TransportConnection | undefined, {
+        adapterOrdinal: ordinalFor(adapterOrdinals, adapter), sessionOrdinal: ordinalFor(sessionOrdinals, currentSession),
+        sessionsCreatedForConnection: linkedConn ? sessionCreations.get(linkedConn) ?? 0 : null,
+        ...(seats === undefined ? {} : { seatCount: (seats as unknown[]).length, waitingHumanSeats: counts.WaitingHuman,
+          joinedHumanSeats: counts.JoinedHuman, aiSeats: counts.Ai, hostHumanSeats: counts.HostHuman }),
+        ...(gameStarted === undefined ? {} : { gameStarted }),
+      });
+    } catch { safeErrors.push("lifecycle-observer-failed"); }
+  },
   noteLifecycle(kind: string, signalAborted?: boolean) {
     if (!["p2p-provider-setup-start", "p2p-provider-effect-cleanup-enter", "p2p-provider-compensating-cleanup", "p2p-adapter-dispose-enter"].includes(kind)) {
       safeErrors.push("lifecycle-observer-failed"); return;
@@ -189,7 +240,7 @@ const qa = {
     if (kind === "p2p-provider-setup-start") providerSetupGeneration++;
     lifecycle(kind, undefined, signalAborted === undefined ? undefined : { signalAborted });
   },
-  noteSessionClose(reason: unknown) {
+  noteSessionClose(reason: unknown, conn?: TransportConnection) {
     const reasons: Record<string, string> = { "Left game": "left-game", "Host session superseded": "host-superseded",
       "Removed by host": "removed", "Undecodable first message": "first-message-undecodable", "Protocol violation": "protocol-violation",
       "Wire protocol mismatch": "wire-protocol-mismatch", "Malformed P2P authority": "malformed-authority",
@@ -198,7 +249,7 @@ const qa = {
       "Wrong P2P session": "wrong-session", "Kicked": "kicked", "Unknown token": "unknown-token", "Not in grace": "not-in-grace",
       "Player departure is in progress": "departure-in-progress", "Reconnect already in progress": "reconnect-in-progress",
       "Player conceded": "player-conceded", "Undecodable frame during reconnect": "reconnect-frame-undecodable" };
-    lifecycle("peer-session-close-enter", undefined, { closeReasonCode: typeof reason === "string" && Object.prototype.hasOwnProperty.call(reasons, reason) ? reasons[reason] : "other" });
+    lifecycle("peer-session-close-enter", conn, { closeReasonCode: typeof reason === "string" && Object.prototype.hasOwnProperty.call(reasons, reason) ? reasons[reason] : "other" });
   },
   markDriverStage(next: string) { if (next !== driverStage) { driverStage = next; lifecycle("driver-stage"); } },
   markDriverTeardown() { driverTeardown = true; lifecycle("driver-teardown-marker"); },
@@ -258,10 +309,31 @@ const qa = {
       const r = node.getBoundingClientRect();
       for (const dx of [.5, .2, .8]) for (const dy of [.1, .3, .6]) {
         const x = r.x + r.width * dx, y = r.y + r.height * dy;
-        if (document.elementFromPoint(x, y)?.closest("[data-hand-card]") === node) return { x, y };
+        if (document.elementFromPoint(x, y)?.closest("[data-hand-card]") === node) {
+          pointerTarget = node; pointerObjectId = Number(node.dataset.objectId); return { x, y };
+        }
       }
     }
     return null;
+  },
+  handPointerSnapshot(x: number, y: number) {
+    const g = useGameStore.getState(), s = g.gameState;
+    const hit = document.elementFromPoint(x, y)?.closest("[data-hand-card]");
+    const r = pointerTarget?.getBoundingClientRect();
+    // The fixed HandCard also highlights playable cards. Hover/drag animate
+    // zIndex; neither value proves its component-local selection state.
+    const highlightNode = pointerTarget?.firstElementChild;
+    const inlineZIndex = pointerTarget?.style.zIndex ?? "";
+    return { intendedNodeConnected: Boolean(pointerTarget?.isConnected), hitIntended: Boolean(hit && hit === pointerTarget),
+      hitOtherHandCard: Boolean(hit && hit !== pointerTarget),
+      intendedHighlightClassesPresent: Boolean(highlightNode?.classList.contains("ring-2") && highlightNode.classList.contains("ring-cyan-400")),
+      intendedInlineZIndex: /^\d+$/.test(inlineZIndex) && Number.isFinite(Number(inlineZIndex)) ? Number(inlineZIndex) : null,
+      intendedStillInHand: Boolean(s && pointerObjectId !== undefined && s.players[0].hand.includes(pointerObjectId)),
+      intendedHasLegalCast: actions().some(a => a.type === "CastSpell" && a.data.object_id === pointerObjectId),
+      intendedBounds: r ? { x: r.x, y: r.y, width: r.width, height: r.height } : null,
+      engineWaiting: s?.waiting_for?.type ?? null, uiWaiting: g.waitingFor?.type ?? null, prioritySeat: s?.priority_player ?? null,
+      committedSeq: g.lastCommittedSeq, commitAdvancedSinceManaSetup: g.lastCommittedSeq > preSeq,
+      stackCount: s?.stack.length ?? 0, dispatchIdle: isDispatchIdle(), debugInteraction: useUiStore.getState().debugInteractionMode };
   },
   recordCast() {
     const g = useGameStore.getState(); castSeq = g.lastCommittedSeq;
