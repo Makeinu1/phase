@@ -18,7 +18,7 @@ const fullControlCandidates = "[...document.querySelectorAll('button[aria-label=
 const publicNodeShape = `n=>{const role=n.getAttribute('role'),label=n.getAttribute('aria-label');return {tag:n.tagName,
 role:['dialog','button','status','presentation','alert','tooltip','listbox','option','menu','group','none'].includes(role)?role:role?'other':null,
 ariaLabel:['Full Control Off','Full Control On','Keep Hand','Mulligan','Tap to continue'].includes(label)?label:label?'other':null,
-ariaHidden:n.getAttribute('aria-hidden')==='true',classes:['fixed','absolute','relative','inset-0','z-10','z-20','z-30','z-40','z-50','z-[55]','z-[60]','z-[100]','pointer-events-none','pointer-events-auto','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c)),markers:['data-hand-card','data-player-hand','data-mobile-action-left','data-mobile-action-right','data-card-preview','data-action-button-panel'].filter(a=>n.hasAttribute(a))};}`;
+ariaHidden:n.getAttribute('aria-hidden')==='true',withinStackPanel:Boolean(n.closest('[data-flex-zone="stackPanel"]')),withinCardPreview:Boolean(n.closest('[data-card-preview]')),classes:['fixed','absolute','relative','inset-0','z-10','z-20','z-30','z-[35]','z-40','z-50','z-[55]','z-[60]','z-[100]','pointer-events-none','pointer-events-auto','overflow-x-hidden','overflow-y-auto','min-h-full','items-center','justify-center'].filter(c=>n.classList.contains(c)),markers:['data-hand-card','data-player-hand','data-mobile-action-left','data-mobile-action-right','data-card-preview','data-action-button-panel'].filter(a=>n.hasAttribute(a))};}`;
 const fullControlControls = `(${fullControlCandidates}).map(b=>{const r=b.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
 const shape=(${publicNodeShape});const hits=document.elementsFromPoint(x,y).slice(0,6).map(n=>{const ancestors=[];let p=n.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement)ancestors.push(shape(p));return {...shape(n),ancestors};});
 return {disabled:b.disabled,clientRects:b.getClientRects().length,bounds:{x:r.x,y:r.y,width:r.width,height:r.height},hittable:r.width>0&&r.height>0&&b.contains(document.elementFromPoint(x,y)),hits};})`;
@@ -45,7 +45,10 @@ const controls=[...rail.querySelectorAll('button[aria-label="Full Control On"],b
 const status=[...rail.querySelectorAll('[role=status]')].filter(visible).map(hit).filter(x=>x.inViewport);
 const actions=[...rail.querySelectorAll('[data-action-button-panel]')].filter(visible).map(hit).filter(x=>x.inViewport);
 const actionControls=[...rail.querySelectorAll('[data-action-button-panel] button')].filter(n=>visible(n)&&!n.disabled).map(hit);
+const board=rail.closest('.contain-paint');
+const stackPanels=[...document.querySelectorAll('[data-flex-zone="stackPanel"]')].filter(visible).slice(0,2).map(n=>{const z=getComputedStyle(n).zIndex;return {bounds:bounds(n),zIndex:/^-?\\d+$/.test(z)?Number(z):null,pointerEvents:getComputedStyle(n).pointerEvents,headerControls:[...n.querySelectorAll('.h-9 button')].filter(b=>visible(b)&&!b.disabled).slice(0,4).map(hit)};});
 return {viewport:{width:innerWidth,height:innerHeight},railBounds:bounds(rail),railPointerEvents:getComputedStyle(rail).pointerEvents,
+boardBounds:board?bounds(board):null,stackPanels,
 columns:columns.map(n=>({bounds:bounds(n),visible:visible(n),pointerEvents:getComputedStyle(n).pointerEvents})),
 surfaceBounds:surfaces.map(bounds),surfacePointerEvents:surfaces.map(n=>getComputedStyle(n).pointerEvents),controls,status,actions,actionControls};})()`;
 const railGap = `(()=>{const rail=document.querySelector('[data-flex-zone="actionRail"]');if(!rail)return null;const r=rail.getBoundingClientRect();
