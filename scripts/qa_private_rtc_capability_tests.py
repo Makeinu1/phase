@@ -6,9 +6,13 @@ import base64
 import errno
 import hashlib
 import json
+import os
+import signal
 import tempfile
 import shutil
+import subprocess
 import sys
+import time
 import types
 import unittest
 from contextlib import ExitStack
@@ -199,8 +203,43 @@ class ArtifactTests(unittest.TestCase):
                         load_artifact(build, client, source_sha, "a" * 40)
 
 
+class ProcessGroupTests(unittest.TestCase):
+    def test_inventory_excludes_exited_zombies_and_handles_parentheses_in_command(self):
+        data = [b"10 (writer ) with spaces) S 1 424242 424242 0", b"11 (zombie) Z 1 424242 424242 0",
+                b"12 (other) S 1 12345 12345 0"]
+        with patch.object(driver.Path, "iterdir", return_value=[Path("/proc/10"), Path("/proc/11"), Path("/proc/12")]), \
+                patch.object(driver.Path, "read_bytes", side_effect=data):
+            self.assertEqual(driver.active_browser_group(424242), 1)
+
+    def test_foreign_session_or_driver_group_is_never_signaled(self):
+        with patch.object(driver.Path, "iterdir", return_value=[Path("/proc/10")]), \
+                patch.object(driver.Path, "read_bytes", return_value=b"10 (foreign) S 1 424242 12345 0"), \
+                patch.object(driver.os, "killpg") as send:
+            with self.assertRaises(ValueError):
+                driver.signal_browser_group(424242, signal.SIGTERM)
+            with self.assertRaises(ValueError):
+                driver.signal_browser_group(os.getpgrp(), signal.SIGTERM)
+        send.assert_not_called()
+
+    def test_unreadable_inventory_fails_closed_but_vanished_process_is_allowed(self):
+        with patch.object(driver.Path, "iterdir", return_value=[Path("/proc/10")]), \
+                patch.object(driver.Path, "read_bytes", side_effect=PermissionError(errno.EACCES, "private path")), \
+                patch.object(driver.os, "killpg") as send:
+            with self.assertRaises(PermissionError):
+                driver.signal_browser_group(424242, signal.SIGTERM)
+        send.assert_not_called()
+        with patch.object(driver.Path, "iterdir", return_value=[Path("/proc/10")]), \
+                patch.object(driver.Path, "read_bytes", side_effect=FileNotFoundError):
+            self.assertEqual(driver.active_browser_group(424242), 0)
+
+    def test_group_vanishing_between_inventory_and_signal_is_already_released(self):
+        with patch.object(driver, "active_browser_group", return_value=1), \
+                patch.object(driver.os, "killpg", side_effect=ProcessLookupError):
+            self.assertFalse(driver.signal_browser_group(424242, signal.SIGTERM))
+
+
 class CleanupTests(unittest.TestCase):
-    """Fake page snapshots isolate teardown; no native/browser process is run."""
+    """Fake page snapshots isolate teardown; process fixtures never run a browser."""
 
     def setUp(self):
         contract = ContractTests()
@@ -221,8 +260,11 @@ class CleanupTests(unittest.TestCase):
         self.playwright = Mock()
         self.playwright.chromium.connect_over_cdp.return_value = self.browser
         self.process = Mock()
-        self.process.poll.return_value = None
+        self.process.pid = 424242
+        self.process.poll.side_effect = [None, None, 0]
         self.process.wait.return_value = 0
+        self.group_inventory = Mock(side_effect=[1, 1, 0])
+        self.group_signal = Mock()
         self.server = Mock(server_port=1234)
         self.thread = Mock()
         self.thread.is_alive.return_value = False
@@ -234,22 +276,182 @@ class CleanupTests(unittest.TestCase):
         self.args = types.SimpleNamespace(browser_path="/not-run/browser", output_dir=Path(directory.name))
         self.result = {"result": "fail", "stage": "artifact-check"}
 
-    def run_fault(self):
+    def run_fault(self, profile=None, launch=None):
         error = None
         with ExitStack() as stack:
             stack.enter_context(patch.dict(sys.modules, self.modules))
             stack.enter_context(patch.object(driver, "ThreadingHTTPServer", return_value=self.server))
             stack.enter_context(patch.object(driver.threading, "Thread", return_value=self.thread))
-            stack.enter_context(patch.object(driver.subprocess, "Popen", return_value=self.process))
+            popen = stack.enter_context(patch.object(driver.subprocess, "Popen", return_value=self.process, side_effect=launch))
+            if isinstance(self.process, Mock):
+                stack.enter_context(patch.object(driver, "active_browser_group", self.group_inventory))
+                stack.enter_context(patch.object(driver.os, "killpg", self.group_signal))
             stack.enter_context(patch.object(driver.Path, "read_text", return_value="1234\n"))
+            if profile is not None:
+                stack.enter_context(patch.object(driver.tempfile, "mkdtemp", return_value=str(profile)))
             try:
                 driver.run_browser(self.args, self.manifest, {}, self.result)
             except Exception as failure:
                 error = failure
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
         command = self.result["browserArguments"]
         self.profile = Path(next(arg.split("=", 1)[1] for arg in command if arg.startswith("--user-data-dir=")))
-        self.addCleanup(shutil.rmtree, self.profile, ignore_errors=True)
+        self.addCleanup(lambda: shutil.rmtree(self.profile) if self.profile.exists() else None)
         return error
+
+    def test_pending_launch_sigterm_knows_owned_group_before_handler_runs(self):
+        previous = signal.getsignal(signal.SIGTERM)
+        self.process.poll.side_effect = None
+        self.process.poll.return_value = 0
+        self.group_inventory.side_effect = [1, 0, 0, 0]
+
+        def launch(*_args, **_kwargs):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return self.process
+
+        error = self.run_fault(launch=launch)
+        self.assertIsInstance(error, RuntimeError)
+        self.group_signal.assert_called_once_with(self.process.pid, signal.SIGKILL)
+        self.assertTrue(self.result["cleanup"]["terminationRequested"])
+        self.assertEqual(self.result["cleanup"]["result"], "fail")
+        self.assertFalse(self.profile.exists())
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+
+    def test_exited_parent_cannot_leave_owned_child_writing_profile_during_removal(self):
+        """Real Python processes reach run_browser teardown; no browser is run."""
+        profile = self.args.output_dir / "writer-profile"
+        profile.mkdir()
+        writer = """
+import os, sys, time
+from pathlib import Path
+profile = Path(sys.argv[1])
+(profile / 'ready').write_text(str(os.getpid()))
+while True:
+    (profile / 'late-write').write_bytes(b'owned child write')
+    time.sleep(0.005)
+"""
+        parent = """
+import subprocess, sys, time
+from pathlib import Path
+subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]],
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+deadline = time.monotonic() + 5
+while not (Path(sys.argv[1]) / 'late-write').exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError('test writer did not start')
+    time.sleep(0.005)
+"""
+        process = subprocess.Popen([sys.executable, "-c", parent, str(profile), writer],
+                                   start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self.assertEqual(process.wait(timeout=5), 0)
+            child = int((profile / "ready").read_text())
+
+            def child_writing():
+                try:
+                    return (Path("/proc") / str(child) / "stat").read_bytes().rsplit(b")", 1)[1].split()[0] not in [b"Z", b"X"]
+                except FileNotFoundError:
+                    return False
+
+            self.assertTrue(child_writing(), "positive guard: child survived its exited parent")
+            self.assertEqual(os.getpgid(child), process.pid)
+            remove = shutil.rmtree
+
+            def remove_quiescent(path):
+                self.assertEqual(Path(path), profile)
+                if child_writing():
+                    raise OSError(errno.ENOTEMPTY, "test child still writing", str(profile))
+                remove(path)
+
+            self.process = process
+            # The fake browser startup gate passes; teardown uses the real exited Popen.
+            with patch.object(process, "poll", side_effect=[None, None, *([0] * 100)]), \
+                    patch.object(driver.shutil, "rmtree", side_effect=remove_quiescent):
+                error = self.run_fault(profile)
+            self.assertIsNone(error)
+            self.assertFalse(child_writing())
+            self.assertFalse(profile.exists())
+            self.assertEqual(self.result["a2"]["result"], "pass")
+            self.assertEqual(self.result["cleanup"]["result"], "pass")
+            self.assertGreater(self.result["cleanup"]["browserProcess"]["activeGroupBefore"], 0)
+            self.assertEqual(self.result["cleanup"]["browserProcess"]["activeGroupAfter"], 0)
+            self.assertIsNone(unrelated.poll(), "an unrelated owned test group must be untouched")
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            unrelated.terminate()
+            unrelated.wait(timeout=5)
+
+    def test_watchdog_sigterm_stops_private_session_and_preserves_failure(self):
+        """A real outer group signal reaches the guarded driver and its owned child."""
+        runner = """
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+from qa_private_rtc_capability_tests import CleanupTests
+case = CleanupTests()
+case.setUp()
+profile = case.args.output_dir / 'watchdog-profile'
+profile.mkdir()
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+case.process = child
+def close():
+    Path(sys.argv[1], 'watchdog-ready').write_text(str(child.pid))
+    while child.poll() is None:
+        time.sleep(0.01)
+case.browser.close.side_effect = close
+previous = signal.getsignal(signal.SIGTERM)
+try:
+    error = case.run_fault(profile)
+    Path(sys.argv[1], 'watchdog-result').write_text(json.dumps({
+        'error': type(error).__name__, 'a2': case.result['a2']['result'],
+        'cleanup': case.result['cleanup'], 'childExit': child.poll(),
+        'profileExists': profile.exists(), 'handlerRestored': signal.getsignal(signal.SIGTERM) == previous}))
+finally:
+    if child.poll() is None:
+        os.killpg(child.pid, signal.SIGKILL)
+    child.wait(timeout=5)
+    case.doCleanups()
+"""
+        environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent)}
+        process = subprocess.Popen([sys.executable, "-B", "-c", runner, str(self.args.output_dir)],
+                                   start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+        child = None
+        try:
+            ready = self.args.output_dir / "watchdog-ready"
+            deadline = time.monotonic() + 5
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "positive guard: driver reached browser-close with owned child alive")
+            child = int(ready.read_text())
+            self.assertEqual(os.getpgid(child), child)
+            self.assertNotEqual(child, process.pid)
+            os.killpg(process.pid, signal.SIGTERM)
+            _stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, stderr.decode())
+            saved = json.loads((self.args.output_dir / "watchdog-result").read_text())
+            self.assertEqual(saved["error"], "RuntimeError")
+            self.assertEqual(saved["a2"], "pass")
+            self.assertEqual(saved["cleanup"]["result"], "fail")
+            self.assertTrue(saved["cleanup"]["terminationRequested"])
+            self.assertEqual(saved["childExit"], -signal.SIGKILL)
+            self.assertEqual(saved["cleanup"]["browserProcess"]["activeGroupAfter"], 0)
+            self.assertFalse(saved["profileExists"])
+            self.assertTrue(saved["handlerRestored"])
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
+            if child is not None:
+                try:
+                    os.killpg(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def test_two_cleanup_errors_preserve_first_and_release_remaining_resources(self):
         self.browser.close.side_effect = OSError(errno.EBADF, "private-error-text")
@@ -261,7 +463,7 @@ class CleanupTests(unittest.TestCase):
         errors = [x for x in self.result["cleanup"]["steps"] if x["result"] == "fail"]
         self.assertEqual([(x["stage"], x["error"]["errno"]) for x in errors], [("browser-close", errno.EBADF), ("playwright-stop", errno.EIO)])
         self.assertNotIn("private-error-text", json.dumps(self.result["cleanup"]))
-        self.process.wait.assert_called_once_with(timeout=5)
+        self.assertEqual(self.result["cleanup"]["browserProcess"]["exitCode"], 0)
         self.server.server_close.assert_called_once()
         self.thread.join.assert_called_once_with(timeout=2)
 
@@ -275,7 +477,7 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(self.result["cleanup"]["result"], "fail")
 
     def test_process_stop_error_retains_profile_and_fails(self):
-        self.process.terminate.side_effect = OSError(errno.EPERM, "private-process-detail")
+        self.group_signal.side_effect = OSError(errno.EPERM, "private-process-detail")
         error = self.run_fault()
         self.assertEqual(error.errno, errno.EPERM)
         self.assertTrue(self.profile.is_dir())
@@ -318,22 +520,50 @@ class CleanupTests(unittest.TestCase):
         self.assertFalse(self.profile.exists())
 
     def test_exited_process_is_reaped_without_sending_signals(self):
+        self.process.poll.side_effect = None
         self.process.poll.return_value = 0
         cleanup = {}
-        driver.stop_browser_process(self.process, cleanup)
+        with patch.object(driver, "active_browser_group", return_value=0), patch.object(driver.os, "killpg") as send:
+            driver.stop_browser_process(self.process, cleanup)
+        send.assert_not_called()
         self.process.terminate.assert_not_called()
         self.process.kill.assert_not_called()
-        self.process.wait.assert_called_once_with(timeout=5)
+        self.process.poll.assert_called_once()
         self.assertEqual(cleanup["browserProcess"]["exitCode"], 0)
 
     def test_termination_timeout_escalates_only_to_owned_process_and_reaps(self):
-        self.process.wait.side_effect = [driver.subprocess.TimeoutExpired("test-only", 5), -9]
+        self.process.poll.side_effect = [None, -9]
         cleanup = {}
-        driver.stop_browser_process(self.process, cleanup)
-        self.process.terminate.assert_called_once()
-        self.process.kill.assert_called_once()
-        self.assertEqual(self.process.wait.call_args_list, [unittest.mock.call(timeout=5), unittest.mock.call(timeout=5)])
-        self.assertEqual(cleanup["browserProcess"], {"terminateSent": True, "killSent": True, "exitCode": -9})
+        with patch.object(driver, "active_browser_group", side_effect=[1, 1, 1, 1, 0]), \
+                patch.object(driver.time, "monotonic", side_effect=[0, 5, 5]), \
+                patch.object(driver.os, "killpg") as send:
+            driver.stop_browser_process(self.process, cleanup)
+        self.assertEqual(send.call_args_list, [unittest.mock.call(self.process.pid, signal.SIGTERM),
+                                              unittest.mock.call(self.process.pid, signal.SIGKILL)])
+        self.assertEqual(cleanup["browserProcess"], {"terminateSent": True, "killSent": True, "exitCode": -9,
+                                                     "activeGroupBefore": 1, "activeGroupAfter": 0})
+
+    def test_surviving_group_fails_closed_after_bounded_term_and_kill(self):
+        self.process.poll.side_effect = None
+        self.process.poll.return_value = 0
+        cleanup = {}
+        with patch.object(driver, "active_browser_group", return_value=1), \
+                patch.object(driver.time, "monotonic", side_effect=[0, 5, 5, 10]), \
+                patch.object(driver.os, "killpg") as send:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                driver.stop_browser_process(self.process, cleanup)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(cleanup["browserProcess"]["activeGroupAfter"], 1)
+
+    def test_profile_enotempty_remains_fatal_and_preserves_passed_communication(self):
+        with patch.object(driver.shutil, "rmtree", side_effect=OSError(errno.ENOTEMPTY, "private profile path")) as remove:
+            error = self.run_fault()
+        self.assertEqual(error.errno, errno.ENOTEMPTY)
+        remove.assert_called_once_with(str(self.profile))
+        self.assertEqual(self.result["a2"]["result"], "pass")
+        self.assertEqual(self.result["cleanup"]["result"], "fail")
+        self.assertNotIn("private profile path", json.dumps(self.result))
+        self.server.server_close.assert_called_once()
 
     def main_failure(self, error):
         def fail_cleanup(args, manifest, contents, result):

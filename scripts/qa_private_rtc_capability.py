@@ -8,9 +8,11 @@ import errno
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -55,18 +57,51 @@ def error_details(error):
                        for frame in traceback.extract_tb(error.__traceback__)[-8:]]}
 
 
+def active_browser_group(group):
+    """Count live members of the session created for this one browser launch."""
+    require(type(group) is int and group > 1 and group != os.getpgrp(), "invalid owned browser group")
+    active = 0
+    for path in Path("/proc").iterdir():
+        if not path.name.isdecimal():
+            continue
+        try:
+            fields = (path / "stat").read_bytes().rsplit(b")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # A process may exit during this read-only inventory.
+        if int(fields[2]) == group:
+            require(int(fields[3]) == group, "browser group is outside its owned session")
+            # Zombies have exited and cannot write a profile; only their parent can reap them.
+            active += fields[0] not in [b"Z", b"X"]
+    return active
+
+
+def signal_browser_group(group, number):
+    if active_browser_group(group):
+        try:
+            os.killpg(group, number)
+        except ProcessLookupError:
+            return False  # All owned members exited between inventory and signal.
+        return True
+    return False
+
+
 def stop_browser_process(process, cleanup):
-    state = {"terminateSent": False, "killSent": False, "exitCode": None}
+    state = {"terminateSent": False, "killSent": False, "exitCode": None,
+             "activeGroupBefore": None, "activeGroupAfter": None}
     cleanup["browserProcess"] = state
-    if process.poll() is None:
-        process.terminate()
-        state["terminateSent"] = True
-    try:
-        state["exitCode"] = process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        state["killSent"] = True
-        state["exitCode"] = process.wait(timeout=5)
+    state["activeGroupBefore"] = active_browser_group(process.pid)
+    for number, key in [(signal.SIGTERM, "terminateSent"), (signal.SIGKILL, "killSent")]:
+        state[key] = signal_browser_group(process.pid, number)
+        deadline = time.monotonic() + 5
+        while True:
+            state["exitCode"] = process.poll()  # Reap the root even when it exited before its children.
+            state["activeGroupAfter"] = active_browser_group(process.pid)
+            if state["exitCode"] is not None and state["activeGroupAfter"] == 0:
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    raise subprocess.TimeoutExpired("owned browser group teardown", 10)
 
 
 class EntryMetadata(HTMLParser):
@@ -214,6 +249,30 @@ def check_a2(snapshot):
 
 
 def run_browser(args, manifest, contents, result):
+    owner = {"process": None, "cleaning": False, "termination": None}
+    result["cleanup"] = {"result": "running", "steps": []}
+
+    def terminate_owned(_number, _frame):
+        # The outer watchdog signals the driver group. Forward that cancellation
+        # immediately so a browser in its private session cannot outlive the driver.
+        owner["termination"] = RuntimeError("Driver termination requested")
+        result["cleanup"]["terminationRequested"] = True
+        if owner["process"] is not None:
+            try:
+                signal_browser_group(owner["process"].pid, signal.SIGKILL)
+            except Exception as error:
+                result["cleanup"]["terminationSignalError"] = error_details(error)
+        if not owner["cleaning"]:
+            raise owner["termination"]
+
+    previous = signal.signal(signal.SIGTERM, terminate_owned)
+    try:
+        return _run_browser(args, manifest, contents, result, owner)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _run_browser(args, manifest, contents, result, owner):
     from playwright.sync_api import sync_playwright
 
     # Only immutable harness runtime files are served. The Vite manifest remains evidence.
@@ -244,7 +303,6 @@ def run_browser(args, manifest, contents, result):
     process = None
     page = None
     primary_error = None
-    result["cleanup"] = {"result": "running", "steps": []}
     try:
         result["stage"] = "start-http-server"
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -267,7 +325,14 @@ def run_browser(args, manifest, contents, result):
         result["browserArguments"] = command
         require(not any(arg == flag or arg.startswith(flag + "=") for arg in command for flag in FORBIDDEN_ARGS), "forbidden browser security argument")
         with (args.output_dir / "browser-launch.stdout.txt").open("xb") as stdout, (args.output_dir / "browser-launch.stderr.txt").open("xb") as stderr:
-            process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
+            # Block cancellation only while acquiring the process handle. The
+            # handler must know the owned session before a pending SIGTERM runs.
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            try:
+                process = subprocess.Popen(command, stdout=stdout, stderr=stderr, start_new_session=True)
+                owner["process"] = process
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         result["cleanup"]["launchFilesClosed"] = stdout.closed and stderr.closed
         port_file = Path(profile) / "DevToolsActivePort"
         deadline = time.monotonic() + 20
@@ -331,6 +396,7 @@ def run_browser(args, manifest, contents, result):
         primary_error = error
         raise
     finally:
+        owner["cleaning"] = True
         # Keep an earlier observation failure authoritative while retaining every
         # teardown failure. A successful observation never hides failed cleanup.
         failures = []
@@ -368,6 +434,8 @@ def run_browser(args, manifest, contents, result):
                 require(not thread.is_alive(), "HTTP server thread did not stop")
             clean("http-thread-join", join_server)
         result["httpRequests"] = requests
+        if owner["termination"] is not None:
+            failures.append(owner["termination"])
         result["cleanup"]["result"] = "fail" if failures else "pass"
         if failures and primary_error is None:
             raise failures[0]
