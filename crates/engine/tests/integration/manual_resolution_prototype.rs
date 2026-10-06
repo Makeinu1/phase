@@ -1099,6 +1099,15 @@ mod enabled_baseline_tests {
             .expect("trusted wire declares its resolution version")
     }
 
+    fn trusted_manual_designation(state: &GameState) -> Option<ObjectId> {
+        let wire = serde_json::to_value(PersistedGameState::capture(state.clone()))
+            .expect("trusted game state serializes");
+        serde_json::from_value::<Option<ObjectId>>(
+            wire["state"]["manual_resolution_designation"].clone(),
+        )
+        .expect("trusted wire declares its manual resolution designation")
+    }
+
     fn stack_resolved_count(events: &[GameEvent], stack_entry_id: ObjectId) -> usize {
         events
         .iter()
@@ -1936,7 +1945,7 @@ mod enabled_baseline_tests {
                 } else {
                     result.expect("the same ordinary spell without a hook reaches designation");
                     assert_eq!(
-                        runner.state().manual_resolution_designation,
+                        trusted_manual_designation(runner.state()),
                         Some(stack_entry_id)
                     );
                 }
@@ -2009,7 +2018,7 @@ mod enabled_baseline_tests {
                 } else {
                     result.expect("unpaid Buyback or paid facts without Buyback remain eligible");
                     assert_eq!(
-                        runner.state().manual_resolution_designation,
+                        trusted_manual_designation(runner.state()),
                         Some(stack_entry_id)
                     );
                     assert!(matches!(
@@ -2098,7 +2107,7 @@ mod enabled_baseline_tests {
                     } else {
                         result.expect("hook-free sibling reaches manual designation");
                         assert_eq!(
-                            runner.state().manual_resolution_designation,
+                            trusted_manual_designation(runner.state()),
                             Some(stack_entry_id)
                         );
                         assert!(matches!(
@@ -2213,7 +2222,7 @@ mod enabled_baseline_tests {
                         "unpaid or removed Buyback and unrelated Unknown-kind keywords remain eligible",
                     );
                     assert_eq!(
-                        runner.state().manual_resolution_designation,
+                        trusted_manual_designation(runner.state()),
                         Some(stack_entry_id)
                     );
                     assert!(matches!(
@@ -2286,7 +2295,7 @@ mod enabled_baseline_tests {
             } else {
                 result.expect("two grants to the decoy do not veto the selected candidate");
                 assert_eq!(
-                    runner.state().manual_resolution_designation,
+                    trusted_manual_designation(runner.state()),
                     Some(stack_entry_id)
                 );
                 assert!(matches!(
@@ -2354,7 +2363,7 @@ mod enabled_baseline_tests {
             } else {
                 result.expect("the opponent's source-relative grant does not affect P0's spell");
                 assert_eq!(
-                    runner.state().manual_resolution_designation,
+                    trusted_manual_designation(runner.state()),
                     Some(stack_entry_id)
                 );
                 assert!(matches!(
@@ -2434,7 +2443,7 @@ mod enabled_baseline_tests {
             } else {
                 assert_eq!(stack_resolved_count(&result.events, stack_entry_id), 1);
                 assert_eq!(control.state().objects[&spell].zone, Zone::Graveyard);
-                assert_eq!(control.state().manual_resolution_designation, None);
+                assert_eq!(trusted_manual_designation(control.state()), None);
             }
             let before = runner.state().clone();
             assert!(matches!(
@@ -2449,7 +2458,7 @@ mod enabled_baseline_tests {
             .expect("unchanged manual save passes checked restore")
             .finalize_immediately()
             .expect("valid restore finalizes");
-        assert_eq!(restored.manual_resolution_designation, Some(stack_entry_id));
+        assert_eq!(trusted_manual_designation(&restored), Some(stack_entry_id));
         assert_eq!(restored.waiting_for, baseline.waiting_for);
         let mut granted_wire = valid_wire;
         granted_wire["state"]["transient_continuous_effects"] =
