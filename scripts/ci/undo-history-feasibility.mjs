@@ -602,6 +602,17 @@ function ordinaryExecute(choice) {
   }
   return events;
 }
+function ordinaryProbePositions(eligible) {
+  const lands = [], casts = [];
+  eligible.forEach((root, position) => {
+    if (root.sample.kind === 'land') lands.push(position);
+    if (root.sample.kind === 'main-cast') casts.push(position);
+  });
+  // This unchanged three-turn-pair fixture already produced three casts. Bound
+  // this diagnostic selection; this is not a product history retention limit.
+  check(lands.length >= 2 && casts.length === 3, 'ordinary-bounded-existing-land-and-cast-probes');
+  return [...new Set([lands[0], lands.at(-1), ...casts])].sort((a, b) => a - b);
+}
 function ordinary() {
   const setupTiming = {}; profileCurrent = setupTiming;
   const setupStart = performance.now();
@@ -673,7 +684,11 @@ function ordinary() {
       if (choice.action.type === 'DeclareAttackers') check(events.some(e => e.type === 'AttackersDeclared'), 'ordinary-real-nonempty-attacks');
       if (choice.action.type === 'DeclareBlockers') check(events.some(e => e.type === 'BlockersDeclared'), 'ordinary-real-nonempty-blocks');
       if (choice.action.type === 'ActivateAbility') check(choice.context.targetId !== choice.action.data.source_id, 'ordinary-never-self-untap');
+      // A successfully cast spell is now public; never log uncast hand names.
+      const publicCastName = choice.action.type === 'CastSpell' ? post.objects[choice.action.data.object_id]?.name : undefined;
+      if (choice.action.type === 'CastSpell') check(typeof publicCastName === 'string', 'ordinary-public-cast-name-after-real-cast');
       const sample = { n: roots.length + 1, kind: choice.kind, actionType: choice.action.type, actor: choice.actor, turn: current.turn_number,
+        ...(publicCastName === undefined ? {} : { publicCastName }),
         completedRealRoot: true, snapshotUtf8Bytes, captureMs, saveMs, canonicalPreSha256: digest,
         declarationActionCount: trace.length, normalTraceSha256: sha(stringifyJSON(trace)), restoreEligibility: eligibility,
         operationAndValidationMs: performance.now() - rootStart - saveMs };
@@ -704,9 +719,10 @@ function ordinary() {
     receipt('ordinary-restore', { pass: false, status: 'NOT RUN', reason: 'bounded final live state outside existing Priority control contract; never manufacture pass' });
   } else {
     check(eligible.length >= 3, 'ordinary-at-least-three-eligible-priority-roots');
+    const positions = ordinaryProbePositions(eligible);
     const currentRaw = rawState(), probeTiming = {}; profileCurrent = probeTiming;
     const suiteStart = performance.now(), samples = [];
-    for (const position of [0, Math.floor((eligible.length - 1) / 2), eligible.length - 1]) {
+    for (const position of positions) {
       const root = eligible[position]; stage = 'ordinary-restore-root-' + root.sample.n;
       const probeStart = performance.now(), restoreMs = restore(root.pre), probeMs = performance.now() - probeStart;
       const continuationStart = performance.now();
@@ -718,11 +734,16 @@ function ordinary() {
       equalWithVerifiedRekey(root.postRaw, rawState(), 'ordinary-restored-complete-post-with-one-exact-rekey');
       const continuationMs = performance.now() - continuationStart;
       const reinstallStart = performance.now(); restore(currentRaw);
-      samples.push({ eligiblePosition: position, operationIndex: root.sample.n, kind: root.sample.kind, restoreMs, probeMs, continuationMs,
+      samples.push({ eligiblePosition: position, operationIndex: root.sample.n, kind: root.sample.kind,
+        actionType: root.sample.actionType, actor: root.sample.actor, turn: root.sample.turn,
+        ...(root.sample.publicCastName === undefined ? {} : { publicCastName: root.sample.publicCastName }),
+        restoreMs, probeMs, continuationMs,
         currentReinstallProbeMs: performance.now() - reinstallStart });
     }
     profileCurrent = null;
+    check(samples.length === 5 && restoreAttempt === 30, 'ordinary-five-complete-probes-and-thirty-checked-installs');
     receipt('ordinary-restore', { pass: true, eligiblePriorityRoots: eligible.length, samples, checkedInstallCount: restoreAttempt,
+      selection: 'first/last eligible land plus all three existing eligible main-casts, exactly five probes in this unchanged three-turn-pair fixture; non-Priority excluded',
       suiteMs: performance.now() - suiteStart, probeTiming, authorityContract: 'unchanged exact private epoch rotation/full remaining equality/new never-used namespace/actual stale refusal and fresh-vs-normal transition',
       rootContinuationProof: 'fresh legal action, exact actor/action/all event trace and complete post envelope with one precisely verified rekey' });
   }
