@@ -243,6 +243,7 @@ def run_browser(args, manifest, contents, result):
     browser = None
     process = None
     page = None
+    primary_error = None
     result["cleanup"] = {"result": "running", "steps": []}
     try:
         result["stage"] = "start-http-server"
@@ -316,9 +317,9 @@ def run_browser(args, manifest, contents, result):
         require(page.locator("#qa-a2-run").is_disabled(), "one-run button remained enabled")
         result["stage"] = "complete"
     except Exception as error:
+        primary_error = error
         if result["stage"] == "launch-browser":
-            # Launch errors precede gameplay and contain no SDP or ICE descriptions.
-            result["launchError"] = str(error)[:12_000]
+            result["launchError"] = "Browser launch failed; inspect preserved launch stderr and errorDetails."
         elif page is not None:
             for key, selector in [("a1Text", "#qa-a1-output"), ("a2Text", "#qa-a2-output"), ("status", "#qa-harness-status")]:
                 try:
@@ -326,10 +327,12 @@ def run_browser(args, manifest, contents, result):
                 except Exception:
                     pass
         raise
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
         # Keep an earlier observation failure authoritative while retaining every
         # teardown failure. A successful observation never hides failed cleanup.
-        primary_error = sys.exc_info()[1]
         failures = []
 
         def clean(stage, action):
@@ -409,7 +412,7 @@ def main():
     except Exception as error:
         result["errorType"] = type(error).__name__
         result["errorDetails"] = error_details(error)
-        result["error"] = str(error) if isinstance(error, ValueError) else "Execution failed; see stage and available launch/A1/A2 evidence."
+        result["error"] = "Execution failed; see stage, errorDetails, cleanup and available launch/A1/A2 evidence."
     finally:
         result["driverElapsedSeconds"] = time.monotonic() - started
         write_json(args.output_dir / "result.json", result)

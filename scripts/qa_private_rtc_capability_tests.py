@@ -293,6 +293,22 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(self.result["cleanup"]["result"], "fail")
         self.server.server_close.assert_called_once()
 
+    def test_unrelated_caller_exception_cannot_suppress_cleanup_failure(self):
+        self.browser.close.side_effect = OSError(errno.EBADF, "private-close-detail")
+        try:
+            raise ValueError("unrelated-caller-exception")
+        except ValueError:
+            error = self.run_fault()
+        self.assertIsInstance(error, OSError)
+        self.assertEqual(error.errno, errno.EBADF)
+        self.assertEqual(self.result["cleanup"]["result"], "fail")
+
+    def test_launch_exception_text_is_not_saved(self):
+        self.playwright.chromium.connect_over_cdp.side_effect = ValueError("private-launch-message /private/launch/path")
+        self.assertIsInstance(self.run_fault(), ValueError)
+        self.assertNotIn("private-launch-message", json.dumps(self.result))
+        self.assertNotIn("/private/launch/path", json.dumps(self.result))
+
     def test_successful_cleanup_keeps_complete_and_reaps_before_profile_removal(self):
         self.assertIsNone(self.run_fault())
         self.assertEqual(self.result["stage"], "complete")
@@ -319,10 +335,10 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(self.process.wait.call_args_list, [unittest.mock.call(timeout=5), unittest.mock.call(timeout=5)])
         self.assertEqual(cleanup["browserProcess"], {"terminateSent": True, "killSent": True, "exitCode": -9})
 
-    def test_main_saves_passed_a2_but_returns_failure_with_safe_error_code(self):
+    def main_failure(self, error):
         def fail_cleanup(args, manifest, contents, result):
             result.update(stage="complete", a2={"result": "pass"}, cleanup={"result": "fail"})
-            raise OSError(errno.ENOTEMPTY, "private-message", "/private/profile/name")
+            raise error
 
         output = self.args.output_dir / "result-run"
         argv = ["driver", "--build-dir", "not-used", "--output-dir", str(output),
@@ -336,10 +352,19 @@ class CleanupTests(unittest.TestCase):
         saved = json.loads((output / "result.json").read_text())
         self.assertEqual(saved["result"], "fail")
         self.assertEqual(saved["a2"]["result"], "pass")
-        self.assertEqual(saved["errorDetails"]["errno"], errno.ENOTEMPTY)
-        self.assertEqual(saved["errorDetails"]["code"], "ENOTEMPTY")
         self.assertNotIn("private-message", json.dumps(saved))
         self.assertNotIn("/private/profile/name", json.dumps(saved))
+        return saved
+
+    def test_main_saves_passed_a2_but_returns_failure_with_safe_error_code(self):
+        saved = self.main_failure(OSError(errno.ENOTEMPTY, "private-message", "/private/profile/name"))
+        self.assertEqual(saved["errorDetails"]["errno"], errno.ENOTEMPTY)
+        self.assertEqual(saved["errorDetails"]["code"], "ENOTEMPTY")
+
+    def test_cleanup_value_error_never_saves_private_text_or_path(self):
+        saved = self.main_failure(ValueError("private-message /private/profile/name"))
+        self.assertEqual(saved["errorDetails"]["type"], "ValueError")
+        self.assertIsNone(saved["errorDetails"]["errno"])
 
 
 if __name__ == "__main__":
