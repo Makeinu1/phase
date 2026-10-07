@@ -21,6 +21,49 @@ await mkdir(evidence, { recursive: true });
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 let originalGlue, draftGlue, draftPayload, fixture;
 const publicMethods = ['default', 'ping', 'initialize_game', 'load_card_database', 'submit_action', 'submit_interaction_js', 'export_game_state_json', 'restore_game_state', 'get_game_state', 'get_legal_actions_js'];
+// Executed in the page for DOM observations only; input stays normal CDP input.
+function observeControl(selector, attemptDisabled, probePoint) {
+  const describe = element => {
+    if (!element) return null;
+    const style = getComputedStyle(element);
+    return { tag: element.tagName, id: element.id, class: element.getAttribute('class')?.slice(0, 400),
+      text: element.textContent?.trim().slice(0, 180), rect: element.getBoundingClientRect().toJSON(),
+      disabled: element.disabled ?? null, display: style.display, visibility: style.visibility, pointerEvents: style.pointerEvents };
+  };
+  const inspect = element => {
+    if (!element) return { target: null, samples: [], point: null };
+    const r = element.getBoundingClientRect(), samples = []; let point = null;
+    for (const fx of [.5,.2,.8,.1,.9]) for (const fy of [.5,.2,.8,.1,.9]) {
+      const x = r.left + r.width * fx, y = r.top + r.height * fy, hit = document.elementFromPoint(x, y), ancestors = [];
+      for (let ancestor = hit, n = 0; ancestor && n < 6; ancestor = ancestor.parentElement, n++) ancestors.push(describe(ancestor));
+      const matches = !!hit && (hit === element || element.contains(hit));
+      samples.push({ x, y, matches, ancestors });
+      if (matches && !point && (attemptDisabled ? element.disabled : !element.disabled)) point = { x, y };
+    }
+    const probeHit = probePoint ? document.elementFromPoint(probePoint.x, probePoint.y) : null;
+    const probe = probePoint ? { ...probePoint, matches: !!probeHit && (probeHit === element || element.contains(probeHit)), hit: describe(probeHit) } : null;
+    return { target: describe(element), samples, point, probe };
+  };
+  const matches = document.querySelectorAll(selector), element = matches[0];
+  element?.scrollIntoView({ block: 'nearest' });
+  const observation = inspect(element), previews = [...document.querySelectorAll('[data-card-preview]')].map(describe);
+  const dismiss = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Dismiss'
+    && button.parentElement?.parentElement?.querySelector('p')?.textContent.trim() === 'Phase skips are automatic. Use stops or Full Control when you want paper-style priority windows.'
+    && [...button.parentElement.querySelectorAll('button')].some(sibling => sibling.textContent.trim() === 'Learn Flow'));
+  const nudge = dismiss?.parentElement.parentElement;
+  const nudgeBlocksTarget = !!nudge && observation.samples.some(({ x, y, matches }) => !matches && nudge.contains(document.elementFromPoint(x, y)));
+  const inPreview = (x, y) => previews.some(({ rect }) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
+  let neutral = null;
+  for (const [x, y] of [[4, innerHeight / 2], [4, innerHeight / 4], [innerWidth / 2, innerHeight / 2], [innerWidth / 4, innerHeight / 3]]) {
+    const hit = document.elementFromPoint(x, y);
+    if (hit && !inPreview(x, y) && !nudge?.contains(hit)
+      && !hit.closest('button,a,input,select,textarea,[contenteditable],[role="button"],[role="dialog"],[role="tooltip"],[data-card-hover],[data-card-preview],[data-hand-card],[data-permanent-card],[data-object-id],[data-action-button-panel],[data-player-hand]')) {
+      neutral = { x, y, hit: describe(hit) }; break;
+    }
+  }
+  return { selector, matchCount: matches.length, ...observation, previews, hoveredCards: document.querySelectorAll('[data-card-hover]:hover').length,
+    neutral, flowNudge: nudge ? { target: describe(nudge), blocksTarget: nudgeBlocksTarget, dismiss: inspect(dismiss) } : null };
+}
 try {
   originalGlue = await readFile(path.join(payload, 'engine_wasm.js'));
   assert.equal(digest(originalGlue), 'cc3e67a1e4cf930a9107826aa676ee9b36a16494c92887897ec881251cc0ea6a');
@@ -206,14 +249,46 @@ try {
         await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'z', code: 'KeyZ', windowsVirtualKeyCode: 90 }, pageSession);
         await evaluate('globalThis.__qaUiRequest=null;globalThis.__qaUiClicked();true');
       } else {
-      const point = await evaluate(`(() => {
-        const element = document.querySelector(${JSON.stringify(selector)}); if (!element || (${JSON.stringify(attemptDisabled ?? false)} ? !element.disabled : element.disabled)) return null;
-        element.scrollIntoView({block:'nearest'}); const r = element.getBoundingClientRect();
-        for (const fx of [.5,.2,.8,.1,.9]) for (const fy of [.5,.2,.8,.1,.9]) {
-          const x=r.left+r.width*fx,y=r.top+r.height*fy,hit=document.elementFromPoint(x,y);
-          if (hit && (hit === element || element.contains(hit))) return {x,y};
-        } return null;
-      })()`);
+      const inspect = (probePoint = null) => evaluate(`(${observeControl.toString()})(${JSON.stringify(selector)},${JSON.stringify(attemptDisabled ?? false)},${JSON.stringify(probePoint)})`);
+      let observation = await inspect(), point = observation.point;
+      const undoObservation = localHandoffUi && selector === '[data-local-history-undo="true"]';
+      let controlEvidence;
+      const persist = () => writeFile(path.join(evidence, 'ui-control-observations.json'), JSON.stringify(controlEvidence, null, 2) + '\n');
+      const capture = async name => {
+        const screenshot = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, pageSession);
+        await writeFile(path.join(evidence, `${name}.png`), Buffer.from(screenshot.data, 'base64'));
+      };
+      if (undoObservation || !point) {
+        const measurements = [{ step: 'before-input', observation }], actions = [];
+        controlEvidence = { candidateSha: process.env.GITHUB_SHA, selector, measurements, actions };
+        await persist();
+        if (!point) await capture('blocked-control-before-input');
+        if (undoObservation && !point && observation.matchCount === 1 && observation.target && !observation.target.disabled && observation.target.rect.width > 0 && observation.target.rect.height > 0) {
+          if (observation.neutral) {
+            const { x, y } = observation.neutral;
+            actions.push({ type: 'ordinary-mouse-leave-card', x, y }); await persist();
+            await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }, pageSession);
+            // Existing hover dismissal ticks every 300ms and skips its first tick.
+            await pause(1000); observation = await inspect(); point = observation.point;
+            measurements.push({ step: 'after-ordinary-mouse-leave', observation }); await persist();
+          }
+          if (!point && observation.flowNudge?.blocksTarget && observation.flowNudge.dismiss.point) {
+            const dismissPoint = observation.flowNudge.dismiss.point;
+            actions.push({ type: 'ordinary-flow-nudge-Dismiss', ...dismissPoint }); await persist();
+            await call('Input.dispatchMouseEvent', { type: 'mouseMoved', ...dismissPoint }, pageSession);
+            await pause(100); observation = await inspect(dismissPoint);
+            measurements.push({ step: 'before-ordinary-Dismiss-pointer-down', observation }); await persist();
+            const dismissReady = observation.flowNudge?.dismiss.probe?.matches && !observation.flowNudge.dismiss.target.disabled;
+            if (!dismissReady) await capture('blocked-Dismiss-under-pointer');
+            assert(dismissReady, 'ordinary Dismiss remains unobstructed under the pointer');
+            await call('Input.dispatchMouseEvent', { type: 'mousePressed', ...dismissPoint, button: 'left', clickCount: 1 }, pageSession);
+            await call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...dismissPoint, button: 'left', clickCount: 1 }, pageSession);
+            await pause(300); observation = await inspect(); point = observation.point;
+            measurements.push({ step: 'after-ordinary-flow-nudge-Dismiss', observation }); await persist();
+          }
+          await capture(point ? 'undo-control-after-ordinary-dismissal' : 'blocked-control-after-ordinary-dismissal');
+        }
+      }
       assert(point, 'existing enabled visible product control is clickable');
       if (screenshot) {
         assert(/^[a-z-]+$/.test(screenshot), 'fixed screenshot basename');
@@ -221,6 +296,13 @@ try {
         await writeFile(path.join(evidence, `${screenshot}.png`), Buffer.from(capture.data, 'base64'));
       }
       await call('Input.dispatchMouseEvent', {type:'mouseMoved',...point}, pageSession);
+      if (undoObservation) {
+        await pause(100); observation = await inspect(point);
+        controlEvidence.measurements.push({ step: 'before-Undo-pointer-down', observation }); await persist();
+        const undoReady = observation.matchCount === 1 && observation.probe?.matches && !observation.target.disabled;
+        if (!undoReady) await capture('blocked-Undo-under-pointer');
+        assert(undoReady, 'unique enabled Undo remains unobstructed under the pointer');
+      }
       for (let count=1; count <= (double ? 2 : 1); count++) {
         await call('Input.dispatchMouseEvent', {type:'mousePressed',...point,button:'left',clickCount:count}, pageSession);
         await call('Input.dispatchMouseEvent', {type:'mouseReleased',...point,button:'left',clickCount:count}, pageSession);
