@@ -47,22 +47,35 @@ function observeControl(selector, attemptDisabled, probePoint) {
   const matches = document.querySelectorAll(selector), element = matches[0];
   element?.scrollIntoView({ block: 'nearest' });
   const observation = inspect(element), previews = [...document.querySelectorAll('[data-card-preview]')].map(describe);
-  const dismiss = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Dismiss'
-    && button.parentElement?.parentElement?.querySelector('p')?.textContent.trim() === 'Phase skips are automatic. Use stops or Full Control when you want paper-style priority windows.'
-    && [...button.parentElement.querySelectorAll('button')].some(sibling => sibling.textContent.trim() === 'Learn Flow'));
-  const nudge = dismiss?.parentElement.parentElement;
-  const nudgeBlocksTarget = !!nudge && observation.samples.some(({ x, y, matches }) => !matches && nudge.contains(document.elementFromPoint(x, y)));
+  // Existing product first-run hints are sequenced Flow -> Sandbox -> Report.
+  const definitions = [
+    { id: 'flow', message: 'Phase skips are automatic. Use stops or Full Control when you want paper-style priority windows.', cta: 'Learn Flow' },
+    { id: 'sandbox-tools', message: 'Set up any board state with Sandbox Tools — add cards and tokens, change life and counters, copy permanents, or jump phases. Open it anytime with the ` key.', cta: 'Open Sandbox Tools' },
+    { id: 'card-report', message: 'See a card render or play wrong? Tap the report flag in the top-left to flag it so we can fix it.', cta: 'Report a Card' },
+  ];
+  const buttons = [...document.querySelectorAll('button')], nudges = [];
+  for (const definition of definitions) {
+    const matches = buttons.filter(button => button.textContent.trim() === 'Dismiss'
+      && button.parentElement?.parentElement?.querySelector('p')?.textContent.trim() === definition.message
+      && [...button.parentElement.querySelectorAll('button')].some(sibling => sibling.textContent.trim() === definition.cta));
+    for (const dismiss of matches) {
+      const element = dismiss.parentElement.parentElement;
+      nudges.push({ id: definition.id, matchCount: matches.length, element, dismiss,
+        blocksTarget: observation.samples.some(({ x, y, matches }) => !matches && element.contains(document.elementFromPoint(x, y))) });
+    }
+  }
+  const nudge = nudges.find(nudge => nudge.blocksTarget);
   const inPreview = (x, y) => previews.some(({ rect }) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
   let neutral = null;
   for (const [x, y] of [[4, innerHeight / 2], [4, innerHeight / 4], [innerWidth / 2, innerHeight / 2], [innerWidth / 4, innerHeight / 3]]) {
     const hit = document.elementFromPoint(x, y);
-    if (hit && !inPreview(x, y) && !nudge?.contains(hit)
+    if (hit && !inPreview(x, y) && !nudges.some(nudge => nudge.element.contains(hit))
       && !hit.closest('button,a,input,select,textarea,[contenteditable],[role="button"],[role="dialog"],[role="tooltip"],[data-card-hover],[data-card-preview],[data-hand-card],[data-permanent-card],[data-object-id],[data-action-button-panel],[data-player-hand]')) {
       neutral = { x, y, hit: describe(hit) }; break;
     }
   }
   return { selector, matchCount: matches.length, ...observation, previews, hoveredCards: document.querySelectorAll('[data-card-hover]:hover').length,
-    neutral, flowNudge: nudge ? { target: describe(nudge), blocksTarget: nudgeBlocksTarget, dismiss: inspect(dismiss) } : null };
+    neutral, nudge: nudge ? { id: nudge.id, matchCount: nudge.matchCount, target: describe(nudge.element), blocksTarget: nudge.blocksTarget, dismiss: inspect(nudge.dismiss) } : null };
 }
 try {
   originalGlue = await readFile(path.join(payload, 'engine_wasm.js'));
@@ -272,19 +285,24 @@ try {
             await pause(1000); observation = await inspect(); point = observation.point;
             measurements.push({ step: 'after-ordinary-mouse-leave', observation }); await persist();
           }
-          if (!point && observation.flowNudge?.blocksTarget && observation.flowNudge.dismiss.point) {
-            const dismissPoint = observation.flowNudge.dismiss.point;
-            actions.push({ type: 'ordinary-flow-nudge-Dismiss', ...dismissPoint }); await persist();
+          const dismissed = new Set();
+          for (let count = 0; !point && count < 3; count++) {
+            const nudge = observation.nudge;
+            if (!nudge?.blocksTarget || nudge.matchCount !== 1 || !nudge.dismiss.point || dismissed.has(nudge.id)) break;
+            const dismissPoint = nudge.dismiss.point;
+            actions.push({ type: 'ordinary-nudge-Dismiss', id: nudge.id, ...dismissPoint }); await persist();
             await call('Input.dispatchMouseEvent', { type: 'mouseMoved', ...dismissPoint }, pageSession);
             await pause(100); observation = await inspect(dismissPoint);
-            measurements.push({ step: 'before-ordinary-Dismiss-pointer-down', observation }); await persist();
-            const dismissReady = observation.flowNudge?.dismiss.probe?.matches && !observation.flowNudge.dismiss.target.disabled;
+            measurements.push({ step: `before-${nudge.id}-Dismiss-pointer-down`, observation }); await persist();
+            const dismissReady = observation.nudge?.id === nudge.id && observation.nudge.matchCount === 1
+              && observation.nudge.dismiss.probe?.matches && !observation.nudge.dismiss.target.disabled;
             if (!dismissReady) await capture('blocked-Dismiss-under-pointer');
             assert(dismissReady, 'ordinary Dismiss remains unobstructed under the pointer');
             await call('Input.dispatchMouseEvent', { type: 'mousePressed', ...dismissPoint, button: 'left', clickCount: 1 }, pageSession);
             await call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...dismissPoint, button: 'left', clickCount: 1 }, pageSession);
-            await pause(300); observation = await inspect(); point = observation.point;
-            measurements.push({ step: 'after-ordinary-flow-nudge-Dismiss', observation }); await persist();
+            dismissed.add(nudge.id); await pause(300); observation = await inspect(); point = observation.point;
+            measurements.push({ step: `after-${nudge.id}-Dismiss`, observation }); await persist();
+            await capture(`after-${nudge.id}-Dismiss`);
           }
           await capture(point ? 'undo-control-after-ordinary-dismissal' : 'blocked-control-after-ordinary-dismissal');
         }
