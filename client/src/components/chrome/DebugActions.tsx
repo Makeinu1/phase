@@ -1,7 +1,9 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useState } from "react";
 
 import type { DebugAction } from "../../adapter/types";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { usePlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -26,7 +28,7 @@ export function DebugActions() {
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const dispatch = useGameDispatch();
   const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
-  const toggleDebugInteractionMode = useUiStore((s) => s.toggleDebugInteractionMode);
+  const toggleDebugInteractionMode = useLocalUiAction((s) => s.toggleDebugInteractionMode);
   const localPlayerId = usePlayerId();
   // Single-player / AI / local games leave `debug_permitted` empty, in which
   // case `debug_mode` itself is the engine gate and the panel renders as

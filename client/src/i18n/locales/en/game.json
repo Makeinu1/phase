@@ -237,6 +237,13 @@
     "waitingForGame": "Waiting for game...",
     "clickOpponent": "Click an opponent to view their board",
     "undo": "Undo",
+    "localSeat": {
+      "selected": "Operating seat: Player {{seat}}",
+      "pass": "Pass to Player {{seat}}",
+      "hidden": "Hands and game details are hidden during handoff.",
+      "show": "Show Player {{seat}}",
+      "loading": "Loading Player {{seat}}"
+    },
     "localHistory": {
       "count": "Local history (actions): {{count}}",
       "busy": "Local history: processing",

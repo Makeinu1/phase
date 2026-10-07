@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -56,9 +57,9 @@ export function GameLogPanel() {
   const logPanelLastChoice = usePreferencesStore((s) => s.logPanelLastChoice);
   const isGameOver = useGameStore((s) => s.gameState?.waiting_for?.type === "GameOver");
   const isOpen = useUiStore((s) => s.logPanelOpen);
-  const setLogPanelOpen = useUiStore((s) => s.setLogPanelOpen);
-  const setLogPanelOpenByUser = useUiStore((s) => s.setLogPanelOpenByUser);
-  const inspectObjectSticky = useUiStore((s) => s.inspectObjectSticky);
+  const setLogPanelOpen = useLocalUiAction((s) => s.setLogPanelOpen);
+  const setLogPanelOpenByUser = useLocalUiAction((s) => s.setLogPanelOpenByUser);
+  const inspectObjectSticky = useLocalUiAction((s) => s.inspectObjectSticky);
   const gameSessionGeneration = useGameStore((s) => s.gameSessionGeneration);
   const isMobile = useIsMobile();
 

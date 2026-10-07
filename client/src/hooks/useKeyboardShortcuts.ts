@@ -6,7 +6,9 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
-import { dispatchAction } from "../game/dispatch";
+import { useGameDispatch } from "./useGameDispatch";
+import { useGameStoreDispatch, useLocalSeatBinding } from "./useLocalSeat";
+import { isLocalSeatCurrent } from "../game/localHistorySession";
 import { getPlayerId } from "./usePlayerId";
 import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
@@ -33,6 +35,9 @@ import {
  * - Triple-tap (touch): Toggle debug panel (iPad/mobile)
  */
 export function useKeyboardShortcuts(): void {
+  const dispatchAction = useGameDispatch();
+  const boundDispatch = useGameStoreDispatch();
+  const binding = useLocalSeatBinding();
   useAltToggle();
   useShiftHeld();
 
@@ -64,6 +69,7 @@ export function useKeyboardShortcuts(): void {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (!isLocalSeatCurrent(binding)) return;
       // Don't fire shortcuts when typing in input fields
       const target = e.target as HTMLElement;
       if (
@@ -78,7 +84,6 @@ export function useKeyboardShortcuts(): void {
       const {
         gameState,
         waitingFor,
-        dispatch,
         undo,
         stateHistory,
         localHistory,
@@ -86,6 +91,7 @@ export function useKeyboardShortcuts(): void {
         manaPaymentShortcutActions,
         adapter,
       } = useGameStore.getState();
+      const dispatch = binding ? boundDispatch : useGameStore.getState().dispatch;
       const uiState = useUiStore.getState();
 
       // Flex Layout edit mode owns Escape while active so it can't fall through
@@ -150,7 +156,7 @@ export function useKeyboardShortcuts(): void {
           if (!e.ctrlKey && !e.metaKey && !isAuthorityRemote(gameMode)) {
             e.preventDefault();
             if (localHistory ? localHistory.canUndo : stateHistory.length > 0) {
-              undo();
+              if (binding) undo(binding); else undo();
             }
           }
           break;
@@ -236,5 +242,5 @@ export function useKeyboardShortcuts(): void {
     return () => {
       window.removeEventListener("keydown", handler);
     };
-  }, []);
+  }, [binding, boundDispatch, dispatchAction]);
 }

@@ -1,8 +1,10 @@
+import { useLocalSeatBinding } from "../../hooks/useLocalSeat";
+import { isLocalSeatCurrent } from "../../game/localHistorySession";
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useCallback, useEffect, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 
 import { HAND_DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 
 const HOLD_DELAY_MS = 400;
 const PRE_HOLD_MOVE_THRESHOLD_PX = 12;
@@ -55,11 +57,12 @@ export function useHandScrubPreview(
     onReleaseToCast?: (objectId: number) => void;
   } = {},
 ) {
+  const binding = useLocalSeatBinding();
   const { isPlayable, canReleaseToCast, onReleaseToCast } = options;
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
-  const dismissPreview = useUiStore((s) => s.dismissPreview);
-  const setMobileHandGesture = useUiStore((s) => s.setMobileHandGesture);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
+  const dismissPreview = useLocalUiAction((s) => s.dismissPreview);
+  const setMobileHandGesture = useLocalUiAction((s) => s.setMobileHandGesture);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerIdRef = useRef<number | null>(null);
   const startRef = useRef({ x: 0, y: 0 });
@@ -167,6 +170,7 @@ export function useHandScrubPreview(
   );
 
   const finishScrub = useCallback((allowCast = false) => {
+    if (!isLocalSeatCurrent(binding)) return;
     const wasScrubbing = scrubbingRef.current;
     const castObjectId =
       allowCast && castReadyRef.current ? activeObjectIdRef.current : null;
@@ -188,7 +192,7 @@ export function useHandScrubPreview(
       );
     }
     if (castObjectId != null) onReleaseToCast?.(castObjectId);
-  }, [clearActiveCard, clearClickSuppression, clearHoldTimer, dismissPreview, onReleaseToCast, setMobileHandGesture]);
+  }, [clearActiveCard, clearClickSuppression, clearHoldTimer, dismissPreview, onReleaseToCast, setMobileHandGesture, binding]);
 
   useEffect(() => {
     return () => {

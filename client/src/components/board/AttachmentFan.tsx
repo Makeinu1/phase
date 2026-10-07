@@ -1,3 +1,6 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+import { useGameInteraction } from "../../hooks/useLocalSeat";
 import { type CSSProperties, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
@@ -5,7 +8,7 @@ import { useTranslation } from "react-i18next";
 
 import type { InteractionSubmission } from "../../adapter/generated/interaction/index.ts";
 import type { ObjectId } from "../../adapter/types.ts";
-import { dispatchAction, dispatchInteraction } from "../../game/dispatch.ts";
+
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -76,16 +79,18 @@ function fanCardSizingStyle(cardCount: number): CSSProperties {
  * convenience opened from the "⧉" badge, not a forced modal.
  */
 export function AttachmentFan() {
+  const dispatchInteraction = useGameInteraction();
+  const dispatchAction = useGameDispatch();
   const hostId = useUiStore((s) => s.attachmentFanHostId);
-  const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
-  const dismissPreview = useUiStore((s) => s.dismissPreview);
+  const setAttachmentFanHost = useLocalUiAction((s) => s.setAttachmentFanHost);
+  const dismissPreview = useLocalUiAction((s) => s.dismissPreview);
 
   const objects = useGameStore((s) => s.gameState?.objects);
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const canActForWaitingState = useCanActForWaitingState();
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
   // Mode 2's gate: THE same affordance sets the battlefield ring uses, so the fan
   // can never offer what the board would not. `AttachmentFan` is a single portaled
   // overlay (GamePage.tsx:1885), not a per-permanent component — one subscription,
@@ -189,6 +194,8 @@ export function AttachmentFan() {
       }
     },
     [
+      dispatchAction,
+      dispatchInteraction,
       affordances,
       canActivate,
       close,

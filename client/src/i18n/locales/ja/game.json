@@ -242,6 +242,13 @@
     "waitingForGame": "ゲームを待っています…",
     "clickOpponent": "対戦相手をクリックして盤面を表示",
     "undo": "元に戻す",
+    "localSeat": {
+      "selected": "操作席：プレイヤー{{seat}}",
+      "pass": "プレイヤー{{seat}}へ渡す",
+      "hidden": "席の受渡し中は手札とゲームの詳細を隠しています。",
+      "show": "プレイヤー{{seat}}の表示を開く",
+      "loading": "プレイヤー{{seat}}の表示を準備中"
+    },
     "localHistory": {
       "count": "操作履歴：{{count}}件",
       "busy": "操作履歴：処理中",

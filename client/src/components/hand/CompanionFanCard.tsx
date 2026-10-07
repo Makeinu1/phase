@@ -1,3 +1,6 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { memo, useRef } from "react";
 import { motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
@@ -6,8 +9,7 @@ import { useTranslation } from "react-i18next";
 import type { CompanionInfo } from "../../adapter/types.ts";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
 import type { ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
 
@@ -46,8 +48,9 @@ const CompanionFanCard = memo(function CompanionFanCard({
   marginLeft,
   zIndex,
 }: CompanionFanCardProps) {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
-  const setDragging = useUiStore((s) => s.setDragging);
+  const setDragging = useLocalUiAction((s) => s.setDragging);
   const cardName = companion.card.card.name;
   const { src, rungs, advanceFailedSource } = useCardImage(cardName, { size: "normal" });
   // Suppress dragSnapToOrigin only when the flick actually activated, so a

@@ -1,6 +1,8 @@
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { useTranslation } from "react-i18next";
 
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { useGameStore } from "../../stores/gameStore.ts";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { YieldMuteIcon } from "../stack/YieldMuteIcon.tsx";
@@ -16,6 +18,7 @@ import { YieldMuteIcon } from "../stack/YieldMuteIcon.tsx";
  * revoke echoes the stored `YieldTarget` verbatim.
  */
 export function PriorityYieldList() {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const yields = useGameStore((s) => s.gameState?.priority_yields);
   const objects = useGameStore((s) => s.gameState?.objects);

@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 
+import { useLocalSeatBinding } from "../../hooks/useLocalSeat";
 import { isAuthorityRemote, useGameStore } from "../../stores/gameStore.ts";
 
 /**
@@ -13,13 +14,14 @@ export function UndoButton() {
     (s) => s.localHistory ? s.localHistory.canUndo : s.stateHistory.length > 0 && !isAuthorityRemote(s.gameMode),
   );
   const history = useGameStore((s) => s.localHistory);
+  const binding = useLocalSeatBinding();
   const undo = useGameStore((s) => s.undo);
 
   if (!canUndo && !history) return null;
   return (
     <>
     <button
-      onClick={undo}
+      onClick={() => binding ? undo(binding) : undo()}
       disabled={!canUndo}
       data-local-history-undo={history ? "true" : undefined}
       className="flex items-center gap-1 rounded-md bg-gray-800/80 px-2.5 py-1 text-[11px] font-medium text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"

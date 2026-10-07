@@ -1,14 +1,14 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 
 export function HandBadge({ className }: { className?: string } = {}) {
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const handSize = useGameStore((s) => s.gameState?.players[playerId]?.hand.length ?? 0);
-  const setMobileHandOpen = useUiStore((s) => s.setMobileHandOpen);
+  const setMobileHandOpen = useLocalUiAction((s) => s.setMobileHandOpen);
 
   if (handSize === 0) return null;
 

@@ -1,3 +1,5 @@
+import { useGameDispatch } from "../hooks/useGameDispatch";
+
 import { createContext, useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -39,7 +41,7 @@ import { restrictAiPoolByBracket } from "../services/aiRandomPool";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
-import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { processRemoteUpdate } from "../game/dispatch";
 import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
 import { debugLog } from "../game/debugLog";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
@@ -694,6 +696,7 @@ export function GameProvider({
   onResumeReset,
   children,
 }: GameProviderProps) {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const localHistoryRequestRef = useRef(localHistoryRequested);
   localHistoryRequestRef.current = localHistoryRequested;

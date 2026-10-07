@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -18,7 +19,7 @@ export function LifeRedistributionModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const perspectiveId = usePerspectivePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   const choose = useCallback(
     (optionIndex: number) => {

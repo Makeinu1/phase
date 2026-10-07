@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -44,7 +45,7 @@ export function PlayerHud() {
   const showMatchScore = useGameStore((s) => s.gameState?.match_config?.match_type === "Bo3");
   const stormCount = useGameStore((s) => s.gameState?.derived?.storm_count ?? 0);
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
   const compact = isMobile || isCompactHeight;

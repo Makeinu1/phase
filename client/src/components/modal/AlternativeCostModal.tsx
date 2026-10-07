@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
@@ -262,7 +263,7 @@ function describeAdditionalCostDescription(
 export function AlternativeCostModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   if (waitingFor?.type !== "AlternativeCastChoice") return null;
   if (!canActForWaitingState) return null;

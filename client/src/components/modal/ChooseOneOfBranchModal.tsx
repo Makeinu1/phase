@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -24,7 +25,7 @@ export function ChooseOneOfBranchModal() {
   const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   const branchCount = useMemo(() => {
     if (waitingFor?.type !== "ChooseOneOfBranch") return 0;

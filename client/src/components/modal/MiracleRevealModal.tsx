@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import type { GameAction, ManaCost, WaitingFor } from "../../adapter/types.ts";
@@ -11,7 +12,7 @@ type MiracleReveal = Extract<WaitingFor, { type: "MiracleReveal" }>;
 export function MiracleRevealModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   if (!canActForWaitingState) return null;
 

@@ -1,11 +1,14 @@
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { useTranslation } from "react-i18next";
 
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { useGameStore } from "../../stores/gameStore.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 
 export function PlanechasePanel() {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const legalActions = useGameStore((s) => s.legalActions);

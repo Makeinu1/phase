@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -14,7 +15,7 @@ export function PrecastCopyShortcutOfferModal() {
   const { t } = useTranslation("game");
   const canAct = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   const handlePropose = useCallback(() => {
     if (waitingFor?.type !== "PrecastCopyShortcutOffer") return;
@@ -72,7 +73,7 @@ export function RespondToPrecastCopyShortcutModal() {
   const { t } = useTranslation("game");
   const canAct = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   const handleAccept = useCallback(() => {
     if (waitingFor?.type !== "RespondToPrecastCopyShortcut") return;

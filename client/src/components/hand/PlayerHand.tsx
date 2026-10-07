@@ -1,3 +1,7 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { isLocalSeatCurrent } from "../../game/localHistorySession";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+import { useLocalSeatBinding } from "../../hooks/useLocalSeat";
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform, useReducedMotion } from "framer-motion";
 import type { MotionValue, PanInfo } from "framer-motion";
@@ -14,7 +18,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import type { GameObject, ManaCost, ObjectId, Zone } from "../../adapter/types.ts";
 import {
@@ -82,6 +86,10 @@ interface PlayerHandProps {
 }
 
 export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
+  const seatUi_dismissPreview = useLocalUiAction(s => s.dismissPreview);
+  const seatUi_openDebugContextMenu = useLocalUiAction(s => s.openDebugContextMenu);
+  const dispatchAction = useGameDispatch();
+  const previewSeat = useLocalSeatBinding();
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -96,9 +104,9 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   );
   const mobileHandGesture = useUiStore((s) => s.mobileHandGesture);
   // Use dispatchAction (animation pipeline) instead of store dispatch
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const setMobileHandOpen = useUiStore((s) => s.setMobileHandOpen);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
+  const setMobileHandOpen = useLocalUiAction((s) => s.setMobileHandOpen);
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
   const [expanded, setExpanded] = useState(false);
@@ -133,7 +141,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   const handSort = usePreferencesStore((s) => s.handSort);
   const setHandSort = usePreferencesStore((s) => s.setHandSort);
   const handFilter = useUiStore((s) => s.handFilter);
-  const setHandFilter = useUiStore((s) => s.setHandFilter);
+  const setHandFilter = useLocalUiAction((s) => s.setHandFilter);
   const handCardIds = useMemo(
     () => (player?.hand ?? []).filter((id) => objects?.[id] && id !== pendingObjectId),
     [player?.hand, objects, pendingObjectId],
@@ -145,9 +153,9 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
     if (!interactionBegan) return;
 
     if (useUiStore.getState().previewSource === "playerHand") {
-      useUiStore.getState().dismissPreview();
+      seatUi_dismissPreview();
     }
-  }, [interactionDisabled]);
+  }, [interactionDisabled, seatUi_dismissPreview]);
   const organizer = useCardOrganizer({
     cards: handCardIds,
     objects: objects ?? EMPTY_OBJECTS,
@@ -182,6 +190,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
 
   const playCard = useCallback(
     (objectId: number) => {
+      if (!isLocalSeatCurrent(previewSeat)) return;
       if (!hasPriority || !objects) return;
       const obj = objects[objectId];
       if (!obj) return;
@@ -201,7 +210,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
         setPendingAbilityChoice({ objectId: objectId as ObjectId, actions: allActions });
       }
     },
-    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
+    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, dispatchAction, previewSeat],
   );
 
   const isMobileHandCardPlayable = useCallback(
@@ -227,6 +236,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   });
 
   const previewManaPayment = useCallback((objectId: number) => {
+    if (!isLocalSeatCurrent(previewSeat)) return;
     const requestId = ++manaPaymentPreviewRequestId.current;
     const store = useGameStore.getState();
     const object = store.gameState?.objects[objectId];
@@ -241,8 +251,9 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       return;
     }
 
-    void previewAutomaticManaPayment(action, getPlayerId())
+    void previewAutomaticManaPayment(action, getPlayerId(), previewSeat)
       .then((sourceIds) => {
+        if (!isLocalSeatCurrent(previewSeat)) return;
         const current = useGameStore.getState();
         if (
           manaPaymentPreviewRequestId.current === requestId
@@ -254,12 +265,13 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
         }
       })
       .catch(() => {
+        if (!isLocalSeatCurrent(previewSeat)) return;
         const current = useGameStore.getState();
         if (manaPaymentPreviewRequestId.current === requestId) {
           current.clearManaPaymentPreview();
         }
       });
-  }, []);
+  }, [previewSeat]);
 
   const hoveredSlotRef = useRef<number | null>(null);
   const shouldReduceMotion = useReducedMotion();
@@ -454,14 +466,14 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, interactionDisabled, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
+    [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, interactionDisabled, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV, dispatchAction],
   );
 
   const handleCardClick = useCallback(
     (objectId: number, e?: React.MouseEvent) => {
       if (useUiStore.getState().debugInteractionMode && e) {
         e.stopPropagation();
-        useUiStore.getState().openDebugContextMenu({
+        seatUi_openDebugContextMenu({
           objectId,
           x: e.clientX,
           y: e.clientY,
@@ -478,7 +490,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       setSelectedCardId(objectId);
       inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     },
-    [isMobile, hasPriority, inspectObject, setMobileHandOpen],
+    [isMobile, hasPriority, inspectObject, setMobileHandOpen, seatUi_openDebugContextMenu],
   );
 
   const handleCardDoubleClick = useCallback(
@@ -551,7 +563,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
     arrowRotateRaw.set(0);
     insertionSlotMV.set(-1);
     draggingIndexMV.set(-1);
-  }, [arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV]);
+  }, [arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV, dispatchAction]);
   const handleMouseEnter = useCallback((id: number) => {
     inspectObject(id, undefined, "hover", "cursor", "playerHand");
   }, [inspectObject]);
@@ -914,8 +926,8 @@ const HandCard = memo(function HandCard({
   onMouseEnter,
   onMouseLeave,
 }: HandCardProps) {
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setDragging = useUiStore((s) => s.setDragging);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setDragging = useLocalUiAction((s) => s.setDragging);
   const isMobileDragged = useUiStore(
     (s) =>
       s.mobileHandGesture?.phase === "drag"
@@ -966,7 +978,7 @@ const HandCard = memo(function HandCard({
   const backFace = useBackFaceSpellCost(objectId, backFaceManaCost);
   const playedRef = useRef(false);
 
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     setPreviewSticky(true);
@@ -1148,9 +1160,9 @@ const ZoneFanCard = memo(function ZoneFanCard({
   onMouseEnter,
   onMouseLeave,
 }: ZoneFanCardProps) {
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setDragging = useUiStore((s) => s.setDragging);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setDragging = useLocalUiAction((s) => s.setDragging);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     setPreviewSticky(true);

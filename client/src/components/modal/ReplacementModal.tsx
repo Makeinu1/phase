@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Reorder } from "framer-motion";
@@ -30,7 +31,7 @@ const EMPTY_CANDIDATES: ReplacementCandidateSummary[] = [];
 export function ReplacementModal() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const hoverProps = useInspectHoverProps();
 
   const isReplacementChoice = waitingFor?.type === "ReplacementChoice";

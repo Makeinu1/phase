@@ -1,3 +1,5 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback, useMemo, useRef, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -12,6 +14,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+
 import {
   getPlayerZoneIds,
   getWaitingForObjectChoiceIds,
@@ -60,11 +63,11 @@ export function ZoneViewer({
   const objects = useGameStore((s) => s.gameState?.objects);
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const openDebugContextMenu = useUiStore((s) => s.openDebugContextMenu);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
+  const openDebugContextMenu = useLocalUiAction((s) => s.openDebugContextMenu);
   const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
   const debugMenuAnchorRef = useRef<HTMLElement | null>(null);
   const dispatchAction = useGameDispatch();

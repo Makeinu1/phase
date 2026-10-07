@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 /* eslint-disable react-refresh/only-export-components */
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -290,7 +291,7 @@ export function ObjectSelect({
   // fuchsia ring + pulse for the debug-highlighted object. Decoupling from
   // `hoveredObjectId` also avoids fighting the standard hover-lift behavior
   // when the user is just trying to inspect from afar.
-  const setDebugHighlight = useUiStore((s) => s.setDebugHighlightedObjectId);
+  const setDebugHighlight = useLocalUiAction((s) => s.setDebugHighlightedObjectId);
 
   // Clear the highlight when the dropdown closes for any reason (selection,
   // outside-click, Escape). The cleanup function ALSO runs on component
@@ -417,7 +418,7 @@ export function PlayerSelect({
   const players = useGameStore((s) => s.gameState?.players);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const myId = usePerspectivePlayerId();
-  const setDebugHighlightedPlayerId = useUiStore((s) => s.setDebugHighlightedPlayerId);
+  const setDebugHighlightedPlayerId = useLocalUiAction((s) => s.setDebugHighlightedPlayerId);
 
   const items = useMemo(
     () =>

@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { strToU8, zipSync } from "fflate";
 import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -65,6 +66,8 @@ export function DebugPanel({
 }: {
   aiDecisionDiagnosticsAvailable?: boolean;
 }) {
+  const seatUi_toggleDebugPanel = useLocalUiAction(s => s.toggleDebugPanel);
+  const seatUi_openCardReportDialog = useLocalUiAction(s => s.openCardReportDialog);
   const { t } = useTranslation(["common", "game"]);
   const open = useUiStore((s) => s.debugPanelOpen);
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
@@ -99,9 +102,9 @@ export function DebugPanel({
   // Tab lives in uiStore so external entry points (Sandbox Tools nudge/button)
   // can open the panel straight to "actions" via `openSandboxTools()`.
   const activeTab = useUiStore((s) => s.debugPanelTab);
-  const setActiveTab = useUiStore((s) => s.setDebugPanelTab);
+  const setActiveTab = useLocalUiAction((s) => s.setDebugPanelTab);
   const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
-  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useLocalUiAction((s) => s.setAiDecisionCaptureEnabled);
   // Deliberately NOT `!hasRemoteHumans(gameMode)`, despite reading like a
   // company question. This is the set of modes whose adapter implements
   // `restoreState`: `WasmAdapter` does; `WebSocketAdapter.restoreState`
@@ -206,9 +209,9 @@ export function DebugPanel({
   // renders at z-[9999], above the report dialog's z-50 overlay, so leaving it
   // open would hide the dialog behind it.
   const handleReportCard = useCallback(() => {
-    useUiStore.getState().toggleDebugPanel();
-    useUiStore.getState().openCardReportDialog();
-  }, []);
+    seatUi_toggleDebugPanel();
+    seatUi_openCardReportDialog();
+  }, [seatUi_openCardReportDialog, seatUi_toggleDebugPanel]);
 
   // Do not use `scrollIntoView()` here. The panel is rendered inside the
   // paint-contained game board, so that method can also scroll the locked game
@@ -332,7 +335,7 @@ export function DebugPanel({
           Debug Panel
         </span>
         <button
-          onClick={() => useUiStore.getState().toggleDebugPanel()}
+          onClick={() => seatUi_toggleDebugPanel()}
           className="text-gray-500 hover:text-gray-300"
         >
           &times;

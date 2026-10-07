@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AnimatePresence,
@@ -305,7 +306,7 @@ function CardPreviewInner({
   const { t } = useTranslation("game");
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const previewObjectId = objectId === undefined ? inspectedObjectId : objectId;
-  const dismissPreview = useUiStore((s) => s.dismissPreview);
+  const dismissPreview = useLocalUiAction((s) => s.dismissPreview);
   const showDebugId = useUiStore((s) => s.debugPanelOpen || s.debugInteractionMode);
   const obj = useGameStore((s) =>
     previewObjectId != null ? s.gameState?.objects[previewObjectId] ?? null : null,

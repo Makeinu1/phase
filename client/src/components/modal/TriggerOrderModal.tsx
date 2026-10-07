@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -21,7 +22,7 @@ const EMPTY_TRIGGER_SUMMARIES: PendingTriggerSummary[] = [];
 export function TriggerOrderModal() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const hoverProps = useInspectHoverProps();
 
   const isOrderTriggers = waitingFor?.type === "OrderTriggers";

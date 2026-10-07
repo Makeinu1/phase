@@ -1,3 +1,5 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { type CSSProperties, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -64,7 +66,7 @@ export function OpponentHud({
   const [kickTarget, setKickTarget] = useState<PlayerId | null>(null);
   const playerId = usePerspectivePlayerId();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
-  const setFocusedOpponent = useUiStore((s) => s.setFocusedOpponent);
+  const setFocusedOpponent = useLocalUiAction((s) => s.setFocusedOpponent);
   const followActiveOpponent = usePreferencesStore((s) => s.followActiveOpponent);
   const setFollowActiveOpponent = usePreferencesStore((s) => s.setFollowActiveOpponent);
   const opponentHudDensity = usePreferencesStore((s) => s.opponentHudDensity);
@@ -168,7 +170,7 @@ export function OpponentHud({
   ]);
 
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const canActForWaitingState = useCanActForWaitingState();
   // `null` = the engine is not asking THIS client to click a target; `[]` = it is
   // asking but nothing is legal yet. `isTargeting` needs that distinction, which
@@ -648,7 +650,7 @@ function OpponentTab({
   const auraIds = useGameStore(
     (s) => s.gameState?.derived?.auras_attached_to_player?.[String(playerId)] ?? EMPTY_OBJECT_IDS,
   );
-  const setEnchantmentsDialogPlayer = useUiStore((s) => s.setEnchantmentsDialogPlayer);
+  const setEnchantmentsDialogPlayer = useLocalUiAction((s) => s.setEnchantmentsDialogPlayer);
   const auraBadgeRef = useRef<HTMLSpanElement>(null);
   const [auraHoverOpen, setAuraHoverOpen] = useState(false);
   const auraCloseTimerRef = useRef<number | null>(null);

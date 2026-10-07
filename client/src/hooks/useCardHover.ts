@@ -1,8 +1,9 @@
+import { useLocalUiAction } from "./useLocalSeat";
 import { useCallback } from "react";
 
 import { useLongPress } from "./useLongPress.ts";
 import { useIsMobile } from "./useIsMobile.ts";
-import { useUiStore, type PreviewSource } from "../stores/uiStore.ts";
+import { type PreviewSource } from "../stores/uiStore.ts";
 
 /**
  * Combined mouse hover + touch long-press handlers for card preview.
@@ -15,8 +16,8 @@ import { useUiStore, type PreviewSource } from "../stores/uiStore.ts";
  *   <div {...handlers} onClick={() => { if (!firedRef.current) doClick(); }} />
  */
 export function useCardHover(objectId: number | null, previewSource?: PreviewSource) {
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
   const isMobile = useIsMobile();
 
   const { handlers: longPressHandlers, firedRef } = useLongPress(

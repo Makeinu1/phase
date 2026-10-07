@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -13,7 +14,7 @@ import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 export function ManualManaToggle() {
   const { t } = useTranslation("game");
   const manualManaOverride = useUiStore((s) => s.manualManaOverride);
-  const toggleManualMana = useUiStore((s) => s.toggleManualManaOverride);
+  const toggleManualMana = useLocalUiAction((s) => s.toggleManualManaOverride);
 
   return (
     <button

@@ -37,6 +37,8 @@ function resolveLocalSeat(
 }
 
 function currentLocalPlayerId(): PlayerId {
+  const game = useGameStore.getState();
+  if (game.gameMode === "local" && game.localHistory) return game.localHistory.seat;
   return resolveLocalSeat(
     useGameStore.getState().gameMode,
     useMultiplayerStore.getState().activePlayerId,
@@ -50,6 +52,8 @@ function currentLocalPlayerId(): PlayerId {
 export function usePlayerId(): PlayerId {
   const gameMode = useGameStore((s) => s.gameMode);
   const activePlayerId = useMultiplayerStore((s) => s.activePlayerId);
+  const localSeat = useGameStore((s) => s.gameMode === "local" ? s.localHistory?.seat : undefined);
+  if (localSeat !== undefined) return localSeat;
 
   return resolveLocalSeat(gameMode, activePlayerId, PLAYER_ID);
 }
@@ -102,6 +106,8 @@ export function waitingPlayer(waitingFor: WaitingFor | null): PlayerId | null {
 export function usePerspectivePlayerId(): PlayerId {
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
+  const localHistory = useGameStore((s) => s.localHistory);
+  if (localHistory) return playerId;
   if (!gameState) return playerId;
   return gameState.turn_decision_controller === playerId ? gameState.active_player : playerId;
 }

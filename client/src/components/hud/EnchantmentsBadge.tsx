@@ -1,10 +1,10 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePlayerId, waitingPlayer } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 
@@ -59,7 +59,7 @@ export function EnchantmentsBadge({ playerId }: Props) {
   const auraIds = useGameStore(
     (s) => s.gameState?.derived?.auras_attached_to_player?.[String(playerId)] ?? STABLE_EMPTY,
   );
-  const setEnchantmentsDialogPlayer = useUiStore((s) => s.setEnchantmentsDialogPlayer);
+  const setEnchantmentsDialogPlayer = useLocalUiAction((s) => s.setEnchantmentsDialogPlayer);
 
   // A player-attached Aura has no battlefield surface — this badge is its only
   // entry point. When the engine asks THIS seat for an object choice that one

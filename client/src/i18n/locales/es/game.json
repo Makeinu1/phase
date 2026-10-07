@@ -237,6 +237,13 @@
     "waitingForGame": "Esperando la partida...",
     "clickOpponent": "Haz clic en un oponente para ver su tablero",
     "undo": "Deshacer",
+    "localSeat": {
+      "selected": "Operating seat: Player {{seat}}",
+      "pass": "Pass to Player {{seat}}",
+      "hidden": "Hands and game details are hidden during handoff.",
+      "show": "Show Player {{seat}}",
+      "loading": "Loading Player {{seat}}"
+    },
     "localHistory": {
       "count": "Historial local (acciones): {{count}}",
       "busy": "Historial local: procesando",

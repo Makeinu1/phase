@@ -237,6 +237,13 @@
     "waitingForGame": "Oczekiwanie na grę...",
     "clickOpponent": "Kliknij przeciwnika, aby zobaczyć jego pole bitwy",
     "undo": "Cofnij",
+    "localSeat": {
+      "selected": "Operating seat: Player {{seat}}",
+      "pass": "Pass to Player {{seat}}",
+      "hidden": "Hands and game details are hidden during handoff.",
+      "show": "Show Player {{seat}}",
+      "loading": "Loading Player {{seat}}"
+    },
     "localHistory": {
       "count": "Historia lokalna (akcje): {{count}}",
       "busy": "Historia lokalna: przetwarzanie",

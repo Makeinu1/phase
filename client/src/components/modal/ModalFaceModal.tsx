@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
@@ -16,7 +17,7 @@ export function ModalFaceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActions = useGameStore((s) => s.legalActions);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   if (waitingFor?.type !== "ModalFaceChoice") return null;
   if (!canActForWaitingState) return null;

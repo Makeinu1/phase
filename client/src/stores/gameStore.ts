@@ -28,7 +28,7 @@ import { reportStructuredActionRejection } from "../game/actionRejectionReporter
 import { getPlayerId } from "../hooks/usePlayerId";
 import { captureTrustedCheckpoint, loadCheckpoints, saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
-import { currentLocalHistory, endLocalHistorySession, permitLocalHistoryCommit, startLocalHistorySession, type LocalHistoryView } from "../game/localHistorySession";
+import { currentLocalHistory, endLocalHistorySession, permitLocalHistoryCommit, startLocalHistorySession, initialLocalViewer, publicLocalLogs, isLocalSeatCurrent, type LocalHistoryView, type LocalSeatBinding } from "../game/localHistorySession";
 import { prepareLocalGameplayPreferences } from "../hooks/useGameplayPreferencesSync";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -353,8 +353,8 @@ interface GameStoreActions {
    * snapshot to `restoreState` and no undo history to rebuild.
    */
   resumeNativeSolo: (gameId: string, adapter: EngineAdapter) => Promise<void>;
-  dispatch: (action: GameAction) => Promise<GameEvent[]>;
-  undo: () => Promise<void>;
+  dispatch: (action: GameAction, binding?: LocalSeatBinding | null) => Promise<GameEvent[]>;
+  undo: (binding?: LocalSeatBinding | null) => Promise<void>;
   /**
    * Replace the server-published rollback targets. Only `dispatch.ts` calls
    * this, and only from inside its generation gate — a superseded remote update
@@ -616,6 +616,7 @@ export const useGameStore = create<GameStore>()(
       try {
         if (historyGeneration !== null) await prepareLocalGameplayPreferences(adapter, historyGeneration, checkHistorySetup);
         snapshot = await adapter.getSnapshot();
+        if (historyGeneration !== null) snapshot = await initialLocalViewer(adapter, snapshot.seq);
         checkHistorySetup();
       } catch (error) {
         if (historyGeneration !== null) {
@@ -635,7 +636,7 @@ export const useGameStore = create<GameStore>()(
           throw error;
         }
       }
-      const initLogEntries = (initResult.log_entries ?? []).map((entry, i) => ({
+      const initLogEntries = (localHistory ? publicLocalLogs(initResult.log_entries) : initResult.log_entries ?? []).map((entry, i) => ({
         ...entry,
         seq: i,
       }));
@@ -737,10 +738,11 @@ export const useGameStore = create<GameStore>()(
       await seedResumedServerGame(get, gameId, adapter);
     },
 
-    dispatch: async (action) => {
+    dispatch: async (action, binding) => {
+      if (!isLocalSeatCurrent(binding)) return [];
       const submittedAction = applySpellPaymentPreference(action);
       const localHistory = currentLocalHistory();
-      if (localHistory) return (await localHistory.dispatch({ kind: "action", action: submittedAction }, getPlayerId())).events;
+      if (localHistory) return (await localHistory.dispatch({ kind: "action", action: submittedAction }, getPlayerId(), binding)).events;
       const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
@@ -811,9 +813,10 @@ export const useGameStore = create<GameStore>()(
       return result.events;
     },
 
-    undo: async () => {
+    undo: async (binding) => {
+      if (!isLocalSeatCurrent(binding)) return;
       const localHistory = currentLocalHistory();
-      if (localHistory) return localHistory.undo();
+      if (localHistory) return localHistory.undo(binding);
       const { stateHistory, adapter, gameMode } = get();
       if (isAuthorityRemote(gameMode)) return;
       if (stateHistory.length === 0 || !adapter) return;

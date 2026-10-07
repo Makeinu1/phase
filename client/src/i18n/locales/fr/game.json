@@ -237,6 +237,13 @@
     "waitingForGame": "En attente de la partie...",
     "clickOpponent": "Cliquez sur un adversaire pour voir son plateau",
     "undo": "Annuler",
+    "localSeat": {
+      "selected": "Operating seat: Player {{seat}}",
+      "pass": "Pass to Player {{seat}}",
+      "hidden": "Hands and game details are hidden during handoff.",
+      "show": "Show Player {{seat}}",
+      "loading": "Loading Player {{seat}}"
+    },
     "localHistory": {
       "count": "Historique local (actions) : {{count}}",
       "busy": "Historique local : traitement",

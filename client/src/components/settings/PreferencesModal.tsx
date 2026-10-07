@@ -1,3 +1,4 @@
+import { useLocalPreferenceAction } from "../../hooks/useLocalSeat";
 import {
   useCallback,
   useEffect,
@@ -202,7 +203,7 @@ export function PreferencesModal({
   const setCollapseSupport = usePreferencesStore((s) => s.setCollapseSupport);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
-  const setPriorityPassingMode = usePreferencesStore((s) => s.setPriorityPassingMode);
+  const setPriorityPassingMode = useLocalPreferenceAction((s) => s.setPriorityPassingMode);
   const setExperimentalTournamentsEnabled = usePreferencesStore((s) => s.setExperimentalTournamentsEnabled);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);

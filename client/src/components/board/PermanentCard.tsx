@@ -1,3 +1,6 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { motion, useReducedMotion } from "framer-motion";
 import type React from "react";
 import { memo, useCallback, useId, useMemo, useRef } from "react";
@@ -6,7 +9,7 @@ import { useTranslation } from "react-i18next";
 import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -272,6 +275,8 @@ export const PermanentCard = memo(function PermanentCard({
   onPrimaryClickOverride,
   coveredIds,
 }: PermanentCardProps) {
+  const seatUi_openDebugContextMenu = useLocalUiAction(s => s.openDebugContextMenu);
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
@@ -354,17 +359,17 @@ export const PermanentCard = memo(function PermanentCard({
   } = useBoardInteractionState();
 
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
-  const selectObject = useUiStore((s) => s.selectObject);
-  const hoverObject = useUiStore((s) => s.hoverObject);
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const selectObject = useLocalUiAction((s) => s.selectObject);
+  const hoverObject = useLocalUiAction((s) => s.hoverObject);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
   const debugHighlightedObjectId = useUiStore((s) => s.debugHighlightedObjectId);
   const combatMode = useUiStore((s) => s.combatMode);
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
-  const toggleAttacker = useUiStore((s) => s.toggleAttacker);
+  const toggleAttacker = useLocalUiAction((s) => s.toggleAttacker);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const combatClickHandler = useUiStore((s) => s.combatClickHandler);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
-  const toggleSelectedCard = useUiStore((s) => s.toggleSelectedCard);
+  const toggleSelectedCard = useLocalUiAction((s) => s.toggleSelectedCard);
   // Hover is read as derived booleans, NOT the raw hoveredObjectId, so hovering
   // any permanent re-renders only the card whose hovered/lifted state actually
   // flips — not every PermanentCard on the board. O(1) per hover, not O(N).
@@ -413,9 +418,9 @@ export const PermanentCard = memo(function PermanentCard({
     ? selectedCardIds.filter((id) => boardChoice.objectIds.includes(id))
     : [];
 
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const setAttachmentFanHost = useUiStore((s) => s.setAttachmentFanHost);
-  const dismissPreview = useUiStore((s) => s.dismissPreview);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
+  const setAttachmentFanHost = useLocalUiAction((s) => s.setAttachmentFanHost);
+  const dismissPreview = useLocalUiAction((s) => s.dismissPreview);
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   // On compact-height (landscape phones), use a subtler 12° rotation:
@@ -430,7 +435,7 @@ export const PermanentCard = memo(function PermanentCard({
 
   const isUndoableTap = undoableTapObjectIds.has(objectId);
 
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
       inspectObject(objectId);
@@ -632,7 +637,7 @@ export const PermanentCard = memo(function PermanentCard({
     if (longPressFired.current) { longPressFired.current = false; return; }
     if (useUiStore.getState().debugInteractionMode) {
       e.stopPropagation();
-      useUiStore.getState().openDebugContextMenu({
+      seatUi_openDebugContextMenu({
         objectId,
         x: e.clientX,
         y: e.clientY,

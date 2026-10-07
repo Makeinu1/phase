@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import type { GameAction, ManaCost } from "../../adapter/types.ts";
@@ -15,7 +16,7 @@ import { DialogShell } from "./DialogShell.tsx";
 export function CascadeChoiceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   if (waitingFor?.type !== "CastOffer") return null;
   const kind = waitingFor.data.kind;

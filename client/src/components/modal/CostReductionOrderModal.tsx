@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -35,7 +36,7 @@ const EMPTY_SHARDS: ManaCostShard[] = [];
 export function CostReductionOrderModal() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   const isOrdering = waitingFor?.type === "OrderCostReductions";
   const reductions = isOrdering ? waitingFor.data.reductions : EMPTY_REDUCTIONS;

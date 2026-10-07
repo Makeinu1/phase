@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useId } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,7 +10,7 @@ export function FullControlToggle({ className }: { className?: string } = {}) {
   const { t } = useTranslation("game");
   const tooltipId = useId();
   const fullControl = useUiStore((s) => s.fullControl);
-  const toggleFullControl = useUiStore((s) => s.toggleFullControl);
+  const toggleFullControl = useLocalUiAction((s) => s.toggleFullControl);
   const isCompactHeight = useIsCompactHeight();
 
   // On landscape phones, only show when ON (so the user can turn it off);

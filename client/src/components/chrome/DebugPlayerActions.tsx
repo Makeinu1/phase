@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useState } from "react";
 
 import type { DebugAction, ManaType, PlayerCounterKind, PlayerId } from "../../adapter/types";
@@ -229,7 +230,8 @@ function ModifyEnergyForm({ onDispatch }: Props) {
 // this remains scoped to the perspective seat rather than offering a picker
 // that could expose opponent library identities.
 function BrowseLibraryForm() {
-  const openDebugLibraryViewer = useUiStore((s) => s.openDebugLibraryViewer);
+  const seatUi_toggleDebugPanel = useLocalUiAction(s => s.toggleDebugPanel);
+  const openDebugLibraryViewer = useLocalUiAction((s) => s.openDebugLibraryViewer);
   const perspectivePlayerId = usePerspectivePlayerId();
 
   const openLibrary = () => {
@@ -237,7 +239,7 @@ function BrowseLibraryForm() {
     // aria-modal library viewer, just like the panel's Report Card action, so
     // no visually higher background surface remains pointer-accessible.
     if (useUiStore.getState().debugPanelOpen) {
-      useUiStore.getState().toggleDebugPanel();
+      seatUi_toggleDebugPanel();
     }
     openDebugLibraryViewer(perspectivePlayerId);
   };

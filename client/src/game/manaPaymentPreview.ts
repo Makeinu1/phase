@@ -1,5 +1,6 @@
 import type { GameAction, ObjectId, PlayerId } from "../adapter/types";
 import { useGameStore } from "../stores/gameStore";
+import { isLocalSeatCurrent, type LocalSeatBinding } from "./localHistorySession";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
 /**
@@ -10,7 +11,9 @@ import { applySpellPaymentPreference } from "./castPaymentMode";
 export async function previewAutomaticManaPayment(
   action: GameAction,
   actor: PlayerId,
+  binding?: LocalSeatBinding | null,
 ): Promise<ObjectId[] | null> {
+  if (!isLocalSeatCurrent(binding)) return null;
   const submittedAction = applySpellPaymentPreference(action);
   if (
     submittedAction.type !== "CastSpell"
@@ -24,5 +27,5 @@ export async function previewAutomaticManaPayment(
 
   const previewEpoch = store.engineCommitEpoch;
   const sourceIds = await store.adapter.previewManaPayment(submittedAction, actor);
-  return useGameStore.getState().engineCommitEpoch === previewEpoch ? sourceIds : null;
+  return isLocalSeatCurrent(binding) && useGameStore.getState().engineCommitEpoch === previewEpoch ? sourceIds : null;
 }

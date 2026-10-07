@@ -1,3 +1,5 @@
+import { useLocalUiAction } from "../hooks/useLocalSeat";
+import { LocalSeatBoundary } from "../components/board/LocalSeatBoundary";
 import {
   type CSSProperties,
   type RefObject,
@@ -159,6 +161,7 @@ import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
+
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
@@ -792,6 +795,7 @@ export function GamePage() {
       onNoDeck={handleNoDeck}
       onResumeReset={handleResumeReset}
     >
+      <LocalSeatBoundary>
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
@@ -823,6 +827,7 @@ export function GamePage() {
           navigate("/setup");
         }}
       />
+      </LocalSeatBoundary>
     </GameProvider>
   );
 }
@@ -1002,7 +1007,7 @@ function GamePageContent({
     return canActForWaitingState && choice != null;
   }, [canActForWaitingState, objects, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
-  const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
+  const setHelpSheetOpen = useLocalUiAction((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
   const dismissedSandboxToolsNudge = usePreferencesStore((s) => s.dismissedSandboxToolsNudge);
   const dismissedReportCardNudge = usePreferencesStore((s) => s.dismissedReportCardNudge);
@@ -1024,7 +1029,7 @@ function GamePageContent({
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
   const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
-  const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
+  const setAiDecisionCaptureEnabled = useLocalUiAction((s) => s.setAiDecisionCaptureEnabled);
   const [aiDecisionReceipt, setAiDecisionReceipt] = useState<AiDecisionDiagnosticReceipt | null>(null);
   // GamePage owns the only local diagnostic subscription. Adapter events remain
   // gameplay-only so no receipt can enter P2P/server state or wire traffic.
@@ -2713,8 +2718,8 @@ function MulliganBottomCardsPrompt({
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
-  const cycleSelectedCard = useUiStore((s) => s.cycleSelectedCard);
-  const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
+  const cycleSelectedCard = useLocalUiAction((s) => s.cycleSelectedCard);
+  const clearSelectedCards = useLocalUiAction((s) => s.clearSelectedCards);
   const hoverProps = useInspectHoverProps();
 
   // Issue #1546: `selectedCardIds` is a single store array shared with targeting,
@@ -3281,7 +3286,7 @@ function AbilityChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const pending = useUiStore((s) => s.pendingAbilityChoice);
-  const setPending = useUiStore((s) => s.setPendingAbilityChoice);
+  const setPending = useLocalUiAction((s) => s.setPendingAbilityChoice);
   const obj = useGameStore((s) =>
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
@@ -3948,7 +3953,7 @@ function DebugModeBanner() {
   const { t } = useTranslation("game");
   const active = useUiStore((s) => s.debugInteractionMode);
   const visible = useUiStore((s) => s.debugClickModeButtonVisible);
-  const toggle = useUiStore((s) => s.toggleDebugInteractionMode);
+  const toggle = useLocalUiAction((s) => s.toggleDebugInteractionMode);
 
   if (!active && !visible) return null;
 

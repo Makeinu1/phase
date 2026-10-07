@@ -22,17 +22,12 @@ jobs:
     env:
       F_DRAFT_PAYLOAD: ${{ github.workspace }}/draft-payload
       F_LOCAL_UI: '1'
-      F_LOCAL_PROGRESS_UI: '1'
+      F_LOCAL_HANDOFF_UI: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
           path: control
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /client/
-            /scripts/
-            /data-files.json
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -114,9 +109,22 @@ jobs:
         if: ${{ !cancelled() && steps.browser.outcome == 'success' && steps.pnpm.outcome == 'success' }}
         working-directory: control/client
         run: pnpm install --frozen-lockfile
+      - name: Exact candidate client regression checks (no Rust build)
+        id: regression
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        working-directory: source
+        run: |
+          F_EVIDENCE="$GITHUB_WORKSPACE/adapter-evidence/regression-guard" \
+            python3 ../control/scripts/ci/undo-history-runtime-guard.py candidate-client-regression \
+            bash -eu -c '
+              cd "$GITHUB_WORKSPACE/control/client"
+              pnpm exec tsc -b --pretty false
+              pnpm exec eslint src/game/localHistorySession.ts src/hooks/useLocalSeat.ts src/hooks/useGameDispatch.ts
+              pnpm exec vitest run --coverage.enabled=false
+            '
       - name: QA module dependency selfcheck before engine campaign
         id: module
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.regression.outcome == 'success' }}
         working-directory: source
         run: |
           python3 ../control/scripts/ci/undo-history-preflight-guard.py QA-module-load \
@@ -124,7 +132,7 @@ jobs:
             node ../control/scripts/ci/undo-history-adapter-run.mjs \
             "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
             "$GITHUB_WORKSPACE/adapter-evidence/module-selfcheck" --module-selfcheck-only
-      - name: Local history ON and OFF progress diagnosis with Setup AI control
+      - name: Explicit Local seat handoff, land Undo and real UI reexecution
         if: ${{ !cancelled() && steps.module.outcome == 'success' }}
         working-directory: source
         run: |
@@ -153,7 +161,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: undo-history-local-progress-ui-evidence
+          name: undo-history-local-handoff-ui-evidence
           path: adapter-evidence
           if-no-files-found: warn
           retention-days: 7

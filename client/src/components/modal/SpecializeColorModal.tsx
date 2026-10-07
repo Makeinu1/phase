@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+
 import type { ManaColor, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 

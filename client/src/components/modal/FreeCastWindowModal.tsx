@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -19,7 +20,7 @@ export function FreeCastWindowModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   if (waitingFor?.type !== "CastOffer") return null;
   const kind = waitingFor.data.kind;

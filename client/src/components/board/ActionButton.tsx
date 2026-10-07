@@ -1,9 +1,12 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+import { useLocalSeatBinding } from "../../hooks/useLocalSeat";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
-import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
+import { dispatchResolveAll } from "../../game/dispatch.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -42,6 +45,8 @@ function getActionButtonMode(
 }
 
 export function ActionButton() {
+  const dispatchAction = useGameDispatch();
+  const localSeat = useLocalSeatBinding();
   const { t } = useTranslation("game");
   const priorityTooltipId = useId();
   const resolveTooltipId = useId();
@@ -61,15 +66,15 @@ export function ActionButton() {
   );
 
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
-  const selectAllAttackers = useUiStore((s) => s.selectAllAttackers);
+  const selectAllAttackers = useLocalUiAction((s) => s.selectAllAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
-  const assignBlocker = useUiStore((s) => s.assignBlocker);
-  const removeBlockerAssignment = useUiStore((s) => s.removeBlockerAssignment);
-  const clearCombatSelection = useUiStore((s) => s.clearCombatSelection);
-  const setCombatMode = useUiStore((s) => s.setCombatMode);
-  const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
+  const assignBlocker = useLocalUiAction((s) => s.assignBlocker);
+  const removeBlockerAssignment = useLocalUiAction((s) => s.removeBlockerAssignment);
+  const clearCombatSelection = useLocalUiAction((s) => s.clearCombatSelection);
+  const setCombatMode = useLocalUiAction((s) => s.setCombatMode);
+  const setCombatClickHandler = useLocalUiAction((s) => s.setCombatClickHandler);
   const pendingBlocker = useUiStore((s) => s.pendingBlocker);
-  const setPendingBlocker = useUiStore((s) => s.setPendingBlocker);
+  const setPendingBlocker = useLocalUiAction((s) => s.setPendingBlocker);
 
   const blockerPairs = useMemo(
     () => blockerAssignmentPairs(blockerAssignments),
@@ -411,7 +416,7 @@ export function ActionButton() {
             <button
               disabled={actionBlocked}
               onClick={() => {
-                void dispatchResolveAll(playerId);
+                void (localSeat ? dispatchResolveAll(playerId, localSeat) : dispatchResolveAll(playerId));
               }}
               aria-describedby={resolveAllTooltipId}
               className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: `${secondaryButtonClass} group relative` })}

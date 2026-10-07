@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -20,7 +21,7 @@ const STABLE_EMPTY: readonly never[] = [];
  */
 export function PlayerEnchantmentsDialog() {
   const playerId = useUiStore((s) => s.enchantmentsDialogPlayer) as PlayerId | null;
-  const setEnchantmentsDialogPlayer = useUiStore((s) => s.setEnchantmentsDialogPlayer);
+  const setEnchantmentsDialogPlayer = useLocalUiAction((s) => s.setEnchantmentsDialogPlayer);
   const auraIds = useGameStore(
     (s) =>
       playerId == null

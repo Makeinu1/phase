@@ -237,6 +237,13 @@
     "waitingForGame": "Warten auf Spiel...",
     "clickOpponent": "Klicke auf einen Gegner, um sein Spielfeld anzusehen",
     "undo": "Rückgängig",
+    "localSeat": {
+      "selected": "Operating seat: Player {{seat}}",
+      "pass": "Pass to Player {{seat}}",
+      "hidden": "Hands and game details are hidden during handoff.",
+      "show": "Show Player {{seat}}",
+      "loading": "Loading Player {{seat}}"
+    },
     "localHistory": {
       "count": "Lokaler Verlauf (Aktionen): {{count}}",
       "busy": "Lokaler Verlauf: Verarbeitung",

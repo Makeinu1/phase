@@ -1,7 +1,7 @@
+import { useLocalUiAction } from "./useLocalSeat";
 import { useCallback, useRef } from "react";
 import type React from "react";
 
-import { useUiStore } from "../stores/uiStore.ts";
 import type { PreviewPlacement } from "../stores/uiStore.ts";
 import { useLongPress } from "./useLongPress.ts";
 import type { ObjectId } from "../adapter/types.ts";
@@ -34,8 +34,8 @@ import type { ObjectId } from "../adapter/types.ts";
  * For per-card components (where useCardHover is callable), prefer useCardHover.
  */
 export function useInspectHoverProps() {
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
 
   // Which card most recently began a press — lets the single shared long-press
   // timer resolve the correct id on fire (one active pointer at a time).

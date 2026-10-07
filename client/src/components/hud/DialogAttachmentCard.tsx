@@ -1,14 +1,16 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { type CSSProperties, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useCanActForWaitingState, usePlayerId, waitingPlayer } from "../../hooks/usePlayerId.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 import {
   collectObjectActions,
   deriveActivationAffordances,
@@ -61,6 +63,7 @@ interface Props {
  *     legalActionsByObject is the right source here.
  */
 export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const playerId = usePlayerId();
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -105,7 +108,7 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
     affordances.activatableObjectIds.has(objectId)
     || affordances.manaTappableObjectIds.has(objectId);
 
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
 
   const { handlers, firedRef } = useCardHover(objectId);
 

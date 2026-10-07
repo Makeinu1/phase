@@ -1,3 +1,6 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import {
   memo,
   useCallback,
@@ -11,7 +14,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { AttackerInfo, GameObject, ObjectId, WaitingFor } from "../../adapter/types.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../viewmodel/battlefieldProps";
@@ -103,13 +106,13 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const combatMode = useUiStore((s) => s.combatMode);
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
-  const setGroupSelectedAttackers = useUiStore((s) => s.setGroupSelectedAttackers);
+  const setGroupSelectedAttackers = useLocalUiAction((s) => s.setGroupSelectedAttackers);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const pendingBlocker = useUiStore((s) => s.pendingBlocker);
-  const setGroupBlockerAssignments = useUiStore((s) => s.setGroupBlockerAssignments);
+  const setGroupBlockerAssignments = useLocalUiAction((s) => s.setGroupBlockerAssignments);
   const combatClickHandler = useUiStore((s) => s.combatClickHandler);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
-  const setGroupSelectedCards = useUiStore((s) => s.setGroupSelectedCards);
+  const setGroupSelectedCards = useLocalUiAction((s) => s.setGroupSelectedCards);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameObjects = useGameStore((s) => s.gameState?.objects);
   const combatAttackers = useGameStore((s) => s.gameState?.combat?.attackers);
@@ -477,6 +480,7 @@ function CollapsedGroupPicker({
   combatClickHandler,
   onClose,
 }: CollapsedGroupPickerProps) {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const objects = useGameStore((s) => s.gameState?.objects);
   const [position, setPosition] = useState<CollapsedPickerPosition | null>(null);
@@ -661,6 +665,7 @@ function BoardChoiceGroupControls({
   setGroupSelectedCards,
   onClose,
 }: BoardChoiceGroupControlsProps) {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const selectedForChoice = selectedCardIds.filter((id) => choice.objectIds.includes(id));
   const selectedInGroup = eligibleIds.filter((id) => selectedCardIds.includes(id));

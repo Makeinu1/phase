@@ -31,7 +31,7 @@ import { useUiStore } from "../stores/uiStore";
 import { pressureMultiplier } from "../utils/stackPressure";
 import { effectiveStackPressure, recordStackResolutions } from "../utils/stackThroughput";
 import { applySpellPaymentPreference } from "./castPaymentMode";
-import { currentLocalHistory } from "./localHistorySession";
+import { currentLocalHistory, isLocalSeatCurrent, type LocalSeatBinding } from "./localHistorySession";
 
 /**
  * Event types whose SFX is deferred to the card slam onImpact callback
@@ -195,7 +195,7 @@ export function abandonPendingDispatches(): void {
  * committed state legitimately lags the adapter's snapshot.
  */
 export function isDispatchIdle(): boolean {
-  if (currentLocalHistory()) return useGameStore.getState().localHistory?.phase === "idle";
+  if (currentLocalHistory()) return useGameStore.getState().localHistory?.phase === "idle" && isLocalSeatCurrent(currentLocalHistory()!.seatBinding());
   return !isAnimating && pendingQueue.length === 0 && inFlightLocalAction === null;
 }
 
@@ -763,8 +763,13 @@ async function dispatchActionInternal(
   proposal?: AiActionProposal,
   proposalOutcome?: (outcome: "applied" | "stale") => void,
   automated = false,
+  seatBinding?: LocalSeatBinding | null,
 ): Promise<void> {
   if (!isBoundGameSessionCurrent(session)) return;
+  if (!isLocalSeatCurrent(seatBinding)) {
+    if (session) throw new Error("Retired Local seat preference");
+    return;
+  }
   const { gameMode } = useGameStore.getState();
   if (gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
     return;
@@ -774,7 +779,7 @@ async function dispatchActionInternal(
   const localHistory = currentLocalHistory();
   if (localHistory) {
     if (proposal || automated) { localHistory.violation(); return; }
-    const result = await localHistory.dispatch({ kind: "action", action: submittedAction }, actor);
+    const result = await localHistory.dispatch({ kind: "action", action: submittedAction }, actor, seatBinding);
     if (session && result.status !== "accepted") throw new Error("Local history preference was not adopted");
     return;
   }
@@ -846,9 +851,9 @@ async function dispatchActionInternal(
 export function dispatchAction(
   action: GameAction,
   actor: number = getPlayerId(),
-  opts?: { automated?: boolean },
+  opts?: { automated?: boolean; localSeat?: LocalSeatBinding | null },
 ): Promise<void> {
-  return dispatchActionInternal(action, actor, null, undefined, undefined, opts?.automated ?? false);
+  return dispatchActionInternal(action, actor, null, undefined, undefined, opts?.automated ?? false, opts?.localSeat);
 }
 
 /** Dispatch an engine-issued AI proposal without ever reconstructing its action. */
@@ -870,11 +875,13 @@ export async function dispatchAiActionProposal(
 export async function dispatchInteraction(
   submission: InteractionSubmission,
   actor: number = getPlayerId(),
+  binding?: LocalSeatBinding | null,
 ): Promise<void> {
+  if (!isLocalSeatCurrent(binding)) return;
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
   const localHistory = currentLocalHistory();
-  if (localHistory) { await localHistory.dispatch({ kind: "interaction", submission }, actor); return; }
+  if (localHistory) { await localHistory.dispatch({ kind: "interaction", submission }, actor, binding); return; }
   const generation = dispatchGeneration;
   const session: BoundGameSession = { adapter, generation: useGameStore.getState().gameSessionGeneration };
 
@@ -911,7 +918,9 @@ export async function dispatchInteraction(
 export async function previewInteractionResponse(
   request: InteractionPreviewRequest,
   actor: number = getPlayerId(),
+  binding?: LocalSeatBinding | null,
 ): Promise<InteractionPreview | null> {
+  if (!isLocalSeatCurrent(binding)) return null;
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
     return null;
@@ -919,7 +928,7 @@ export async function previewInteractionResponse(
   if (!adapter.previewInteraction) return null;
   const previewEpoch = useGameStore.getState().engineCommitEpoch;
   const preview = await adapter.previewInteraction(request, actor);
-  return useGameStore.getState().engineCommitEpoch === previewEpoch ? preview : null;
+  return isLocalSeatCurrent(binding) && useGameStore.getState().engineCommitEpoch === previewEpoch ? preview : null;
 }
 
 /** Dispatch a standing preference only while its captured game lifecycle is
@@ -930,8 +939,9 @@ export function dispatchActionForGameSession(
   adapter: EngineAdapter,
   generation: number,
   actor: number = getPlayerId(),
+  binding?: LocalSeatBinding | null,
 ): Promise<void> {
-  return dispatchActionInternal(action, actor, { adapter, generation });
+  return dispatchActionInternal(action, actor, { adapter, generation }, undefined, undefined, false, binding);
 }
 
 /**
@@ -1101,7 +1111,7 @@ export async function restoreGameState(
  * installs and runs the shared stack-resolution session in the engine; the
  * browser never drains a Ready prefix or selects which future entries pass.
  */
-export async function dispatchResolveAll(requester: number): Promise<void> {
+export async function dispatchResolveAll(requester: number, binding?: LocalSeatBinding | null): Promise<void> {
   await dispatchAction(
     // CR 117.3d: the button is the requester's own pre-commitment. `Own` cannot
     // be blocked by a seat that declines or an AI seat that never answers;
@@ -1112,5 +1122,6 @@ export async function dispatchResolveAll(requester: number): Promise<void> {
       data: { max_resolutions: 0, scope: { type: "Own" } },
     },
     requester,
+    { localSeat: binding },
   );
 }

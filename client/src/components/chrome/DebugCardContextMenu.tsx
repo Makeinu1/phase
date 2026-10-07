@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import {
   useEffect,
   useId,
@@ -25,6 +26,7 @@ import {
   type DebugContextMenuSurface,
 } from "../../stores/uiStore";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useFocusScopePortalBranch } from "../ui/FocusScope";
 
@@ -121,16 +123,17 @@ export function DebugCardContextMenu({
   surface: DebugContextMenuSurface;
   anchorRef?: RefObject<HTMLElement | null>;
 }) {
+  const seatUi_closeDebugContextMenu = useLocalUiAction(s => s.closeDebugContextMenu);
   const menu = useUiStore((s) => s.debugContextMenu);
-  const closeMenu = useUiStore((s) => s.closeDebugContextMenu);
+  const closeMenu = useLocalUiAction((s) => s.closeDebugContextMenu);
 
   useEffect(
     () => () => {
       if (useUiStore.getState().debugContextMenu?.surface === surface) {
-        useUiStore.getState().closeDebugContextMenu();
+        seatUi_closeDebugContextMenu();
       }
     },
-    [surface],
+    [surface, seatUi_closeDebugContextMenu],
   );
 
   if (!menu || menu.surface !== surface) return null;

@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -92,7 +93,7 @@ export function CardReportDialog({
 }) {
   const { t } = useTranslation("game");
   const open = useUiStore((s) => s.cardReportDialogOpen);
-  const close = useUiStore((s) => s.closeCardReportDialog);
+  const close = useLocalUiAction((s) => s.closeCardReportDialog);
   const gameState = useGameStore((s) => s.gameState);
   const viewerId = usePlayerId();
   const seatOrder = gameState?.seat_order;

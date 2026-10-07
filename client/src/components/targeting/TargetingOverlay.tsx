@@ -1,3 +1,5 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { AnimatePresence, motion } from "framer-motion";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -118,13 +120,13 @@ export function TargetingOverlay() {
   const canActForWaitingState = useCanActForWaitingState();
   const localPlayerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const stack = useGameStore((s) => s.gameState?.stack);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const targetKind = useGameStore((s) => s.gameState?.derived?.current_target_kind);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
-  const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
+  const clearSelectedCards = useLocalUiAction((s) => s.clearSelectedCards);
 
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const isCopyTargetChoice = waitingFor?.type === "CopyTargetChoice";

@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import {
   useCallback,
   useMemo,
@@ -12,6 +13,7 @@ import type { DebugAction, DebugLibraryCardView } from "../../adapter/types";
 import { CardImage } from "../card/CardImage";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 import { DebugCardContextMenu } from "./DebugCardContextMenu";
@@ -34,7 +36,7 @@ export function DebugLibraryViewer({
   returnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
 }) {
   const viewer = useUiStore((s) => s.debugLibraryViewer);
-  const close = useUiStore((s) => s.closeDebugLibraryViewer);
+  const close = useLocalUiAction((s) => s.closeDebugLibraryViewer);
 
   if (!viewer) return null;
 
@@ -57,7 +59,7 @@ function DebugLibraryViewerInner({
   returnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
 }) {
   const libraryCards = useGameStore((s) => s.gameState?.derived?.debug_library_cards);
-  const openDebugContextMenu = useUiStore((s) => s.openDebugContextMenu);
+  const openDebugContextMenu = useLocalUiAction((s) => s.openDebugContextMenu);
   const dispatch = useGameDispatch();
   const debugMenuAnchorRef = useRef<HTMLElement | null>(null);
 

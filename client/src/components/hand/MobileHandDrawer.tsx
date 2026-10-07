@@ -1,3 +1,6 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { memo, useCallback, useEffect, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -12,7 +15,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
   collectObjectActions,
@@ -32,9 +35,11 @@ interface MobileHandDrawerProps {
 }
 
 export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDrawerProps) {
+  const seatUi_dismissPreview = useLocalUiAction(s => s.dismissPreview);
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const isOpen = useUiStore((s) => s.mobileHandOpen);
-  const setOpen = useUiStore((s) => s.setMobileHandOpen);
+  const setOpen = useLocalUiAction((s) => s.setMobileHandOpen);
   const playerId = usePerspectivePlayerId();
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -42,9 +47,9 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
     (s) => s.gameState?.derived?.prospective_storm_counts ?? EMPTY_STORM_COUNTS,
   );
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const openDebugContextMenu = useUiStore((s) => s.openDebugContextMenu);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
+  const openDebugContextMenu = useLocalUiAction((s) => s.openDebugContextMenu);
 
   const canActForWaitingState = useCanActForWaitingState();
   const hasPriority = useGameStore((s) =>
@@ -63,9 +68,9 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
     if (!interactionDisabled) return;
     setOpen(false);
     if (useUiStore.getState().previewSource === "playerHand") {
-      useUiStore.getState().dismissPreview();
+      seatUi_dismissPreview();
     }
-  }, [interactionDisabled, setOpen]);
+  }, [interactionDisabled, setOpen, seatUi_dismissPreview]);
 
   useEffect(() => {
     if (
@@ -97,7 +102,7 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
   const handSort = usePreferencesStore((s) => s.handSort);
   const setHandSort = usePreferencesStore((s) => s.setHandSort);
   const handFilter = useUiStore((s) => s.handFilter);
-  const setHandFilter = useUiStore((s) => s.setHandFilter);
+  const setHandFilter = useLocalUiAction((s) => s.setHandFilter);
   const handCardIds = useMemo(
     () => (player?.hand ?? []).filter((id) => objects?.[id] && id !== pendingObjectId),
     [player?.hand, objects, pendingObjectId],
@@ -143,7 +148,7 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
         setPendingAbilityChoice({ objectId: objectId as ObjectId, actions: allActions });
       }
     },
-    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, setOpen],
+    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, setOpen, dispatchAction],
   );
 
   if (interactionDisabled || !player || !objects) return null;
@@ -269,8 +274,8 @@ const DrawerCard = memo(function DrawerCard({
   onPlay,
   onDebugOpen,
 }: DrawerCardProps) {
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
   const { src, rungs, advanceFailedSource } = useCardImage(cardName, {
     size: "normal",

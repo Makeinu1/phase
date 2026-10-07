@@ -1,3 +1,4 @@
+import { useGameInteraction, useInteractionPreview, useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import type { TFunction } from "i18next";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -21,7 +22,7 @@ import type {
   ViewerInteraction,
 } from "../../adapter/generated/interaction";
 import type { IterationCount, ResourceAxis, WaitingFor, WinKind } from "../../adapter/types.ts";
-import { dispatchInteraction, previewInteractionResponse } from "../../game/dispatch.ts";
+
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { familyOf, UNBOUNDED_FAMILY_LABEL_KEY, UnboundedBadge } from "../hud/HudBadges.tsx";
@@ -317,8 +318,10 @@ function DeclareShortcutOffer({
   data: Extract<WaitingFor, { type: "LoopShortcut" }>["data"];
   spec: ShortcutSpec | null;
 }) {
+  const dispatchInteraction = useGameInteraction();
+  const previewInteractionResponse = useInteractionPreview();
   const { t } = useTranslation("game");
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   // Read here rather than passed down: the routing rule and the submission's `interactionId` both
   // need it, and the parent already reads it for the `key`.
   const offerId = useGameStore((s) => shortcutInteractionId(s.viewerInteraction));
@@ -831,7 +834,7 @@ function RespondToShortcut({
   data: Extract<WaitingFor, { type: "RespondToShortcut" }>["data"];
 }) {
   const { t } = useTranslation("game");
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   // Both selectors return a reference INTO store state (or null), so both are `Object.is`-stable.
   const spec = useGameStore((s) => shortcutReplySpec(s.viewerInteraction));
   const publishedCandidates = useGameStore((s) => shortcutReplyCandidates(s.viewerInteraction));

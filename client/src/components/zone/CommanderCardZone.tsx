@@ -1,10 +1,14 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { isLocalSeatCurrent } from "../../game/localHistorySession";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+import { useLocalSeatBinding } from "../../hooks/useLocalSeat";
 import { useCallback, useMemo, useRef } from "react";
 import { motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -71,6 +75,9 @@ function CommanderCard({
   commander: GameObject;
   splitOverview: boolean;
 }) {
+  const seatUi_openDebugContextMenu = useLocalUiAction(s => s.openDebugContextMenu);
+  const dispatchAction = useGameDispatch();
+  const previewSeat = useLocalSeatBinding();
   const { t } = useTranslation("game");
   const isSignatureSpell = commander.signature_spell != null;
   const displayName = useLocalizedCardName(commander.name) ?? commander.name;
@@ -79,8 +86,8 @@ function CommanderCard({
   const effectiveCost = useGameStore(
     (s) => s.spellCosts[String(commander.id)],
   );
-  const inspectObject = useUiStore((s) => s.inspectObject);
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
   // Canonical art path (services/cardImageLookup): resolve by the engine's
   // `printed_ref.oracle_id` + face name, exactly as every other object surface
   // (PermanentCard, StackEntry, GraveyardPile, CardPreview) does. The bare
@@ -164,14 +171,16 @@ function CommanderCard({
   const dragCast = useDragToCast({ castAction, hasPriority: canCast, useDistanceThreshold: true });
   const manaPaymentPreviewRequestId = useRef(0);
   const startManaPaymentPreview = useCallback(() => {
+    if (!isLocalSeatCurrent(previewSeat)) return;
     const requestId = ++manaPaymentPreviewRequestId.current;
     if (!castAction) {
       useGameStore.getState().clearManaPaymentPreview();
       return;
     }
 
-    void previewAutomaticManaPayment(castAction, getPlayerId())
+    void previewAutomaticManaPayment(castAction, getPlayerId(), previewSeat)
       .then((sourceIds) => {
+        if (!isLocalSeatCurrent(previewSeat)) return;
         const store = useGameStore.getState();
         if (manaPaymentPreviewRequestId.current !== requestId) return;
         if (sourceIds === null) {
@@ -181,15 +190,17 @@ function CommanderCard({
         }
       })
       .catch(() => {
+        if (!isLocalSeatCurrent(previewSeat)) return;
         if (manaPaymentPreviewRequestId.current === requestId) {
           useGameStore.getState().clearManaPaymentPreview();
         }
       });
-  }, [castAction]);
+  }, [castAction, previewSeat]);
   const stopManaPaymentPreview = useCallback(() => {
+    if (!isLocalSeatCurrent(previewSeat)) return;
     manaPaymentPreviewRequestId.current += 1;
     useGameStore.getState().clearManaPaymentPreview();
-  }, []);
+  }, [previewSeat]);
   // Framer Motion does not suppress the synthetic click that follows a
   // drag gesture on a <motion.button>. Without this guard, a successful
   // drag-cast would immediately trigger the click handler and open the
@@ -213,7 +224,7 @@ function CommanderCard({
         if (firedRef.current) return;
         if (useUiStore.getState().debugInteractionMode) {
           e.stopPropagation();
-          useUiStore.getState().openDebugContextMenu({
+          seatUi_openDebugContextMenu({
             objectId: commander.id,
             x: e.clientX,
             y: e.clientY,

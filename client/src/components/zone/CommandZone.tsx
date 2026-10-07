@@ -1,13 +1,15 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import {
   collectObjectActions,
@@ -127,6 +129,7 @@ export function CommandZone({ playerId }: CommandZoneProps) {
  * available on hover.
  */
 function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
+  const dispatchAction = useGameDispatch();
   const isCompactHeight = useIsCompactHeight();
   // DISPLAY identity only. Art, source and rules text are group-invariant by
   // construction of the grouping key (`source | description`), so any member
@@ -153,7 +156,7 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
   const canActForWaitingState = useCanActForWaitingState();
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
   // THE single authority. `emblemActions.length > 0` had NEITHER a WaitingFor
   // gate nor a seat gate, so an opponent's chip was clickable from this viewer's
   // seat (D4); membership in the shared sets closes both at once.
@@ -208,7 +211,7 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
         return _exhaustive;
       }
     }
-  }, [activeMember, affordances, setPendingAbilityChoice]);
+  }, [activeMember, affordances, setPendingAbilityChoice, dispatchAction]);
 
   return (
     <div

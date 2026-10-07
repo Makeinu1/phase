@@ -1,3 +1,4 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { memo, useMemo, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -10,7 +11,6 @@ import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterD
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
@@ -33,7 +33,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const counterDisplay = useCounterDisplay(objectId);
   const isMobile = useIsMobile();
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
   const isCompactHeight = useIsCompactHeight();
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,

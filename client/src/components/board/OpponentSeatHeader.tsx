@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useCallback, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -40,7 +41,7 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
   const [kickOpen, setKickOpen] = useState(false);
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
   const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
   const avatar = usePlayerAvatarImage(avatarIdentity);

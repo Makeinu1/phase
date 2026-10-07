@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -5,7 +6,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 export function PassButton() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const stackSize = useGameStore((s) => s.gameState?.stack.length ?? 0);
 
   const hasPriority =

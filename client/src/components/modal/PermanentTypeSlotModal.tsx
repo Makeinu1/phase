@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import type { CoreType, GameAction, WaitingFor } from "../../adapter/types.ts";
@@ -11,7 +12,7 @@ type SlotChoice = Extract<WaitingFor, { type: "ChoosePermanentTypeSlot" }>;
 export function PermanentTypeSlotModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   if (waitingFor?.type !== "ChoosePermanentTypeSlot") return null;
   if (!canActForWaitingState) return null;

@@ -1,3 +1,6 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import type { CSSProperties } from "react";
 
 import { motion } from "framer-motion";
@@ -12,10 +15,9 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
@@ -62,6 +64,7 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
@@ -73,12 +76,12 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const revealedCards = useGameStore(
     (s) => s.gameState?.derived?.stack_revealed_cards?.[entry.id],
   );
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const inspectObject = useLocalUiAction((s) => s.inspectObject);
   // A spell's stack entry id is its object id, so a card flight veils the
   // entry by that id.
   const flightHidden = useFlightVeil(entry.id);
 
-  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const setPreviewSticky = useLocalUiAction((s) => s.setPreviewSticky);
   const priorityYields = useGameStore((s) => s.gameState?.priority_yields);
   // CR 117.3d: a triggered ability can be pre-committed to auto-pass priority via
   // the always-visible yield pill rendered below (the menu it opens dispatches

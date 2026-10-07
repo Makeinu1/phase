@@ -1,15 +1,16 @@
+import { useLocalUiAction } from "../../hooks/useLocalSeat";
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
 import {
   playOrCastActionsForObject,
@@ -108,7 +109,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
-  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const setPendingAbilityChoice = useLocalUiAction((s) => s.setPendingAbilityChoice);
   // `hoverProps` owns the long-press → sticky-preview gesture and swallows the
   // click that follows it in the capture phase, so this component needs neither
   // its own useLongPress nor a firedRef guard on the button.

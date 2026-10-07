@@ -1,3 +1,4 @@
+import { useLocalPreferenceAction } from "../../hooks/useLocalSeat";
 import type { Phase, PhaseStop, PhaseStopScope } from "../../adapter/types";
 import { useId, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -166,7 +167,7 @@ export function usePhaseStopCycle(phase: Phase): {
   cyclePhase: () => void;
 } {
   const phaseStops = usePreferencesStore((s) => s.phaseStops);
-  const setPhaseStops = usePreferencesStore((s) => s.setPhaseStops);
+  const setPhaseStops = useLocalPreferenceAction((s) => s.setPhaseStops);
   const stop = phaseStops.find((s) => s.phase === phase);
 
   const cyclePhase = () => {

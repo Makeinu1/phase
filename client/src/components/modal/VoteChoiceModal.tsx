@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+
 import type { WaitingFor } from "../../adapter/types.ts";
 
 type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;

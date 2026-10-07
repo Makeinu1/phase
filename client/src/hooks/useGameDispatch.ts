@@ -1,14 +1,12 @@
 import { useCallback } from "react";
-
 import type { GameAction } from "../adapter/types";
 import { currentSnapshot, dispatchAction } from "../game/dispatch";
+import { useLocalSeatBinding } from "./useLocalSeat";
 
-/**
- * Backward-compatible hook delegating to the standalone dispatch.
- * New code should prefer useDispatch() from GameProvider context.
- */
-export function useGameDispatch(): (action: GameAction) => Promise<void> {
-  return useCallback((action: GameAction) => dispatchAction(action), []);
+export function useGameDispatch() {
+  const binding = useLocalSeatBinding();
+  return useCallback((action: GameAction, actor?: number) =>
+    binding ? dispatchAction(action, actor ?? binding.seat, { localSeat: binding })
+      : actor === undefined ? dispatchAction(action) : dispatchAction(action, actor), [binding]);
 }
-
 export { currentSnapshot };

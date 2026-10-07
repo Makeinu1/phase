@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -17,7 +18,7 @@ import { AmountInput, parseAmount } from "./AmountInput.tsx";
 export function AssistPaymentUI() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const canAct = useCanActForWaitingState();
 
   const isAssistPayment = waitingFor?.type === "AssistPayment";

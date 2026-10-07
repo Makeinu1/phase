@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -42,7 +43,7 @@ export function ManaPaymentUI() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const canAct = useCanActForWaitingState();
 
   const isManaPayment = waitingFor?.type === "ManaPayment";
@@ -653,7 +654,7 @@ export function ManaSourceSelectionUI() {
   const { t } = useTranslation("game");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const canAct = useCanActForWaitingState();
 
   if (waitingFor?.type !== "ManaSourceSelection" || !canAct) return null;

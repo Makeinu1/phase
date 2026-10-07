@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { TargetRef, WaitingFor } from "../../adapter/types.ts";

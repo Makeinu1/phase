@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
@@ -58,7 +59,7 @@ const VARIANT_KEYS: Partial<Record<CastingVariant["type"], string>> = {
 export function CastingVariantModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
 
   if (waitingFor?.type !== "CastingVariantChoice") return null;
   if (!canActForWaitingState) return null;

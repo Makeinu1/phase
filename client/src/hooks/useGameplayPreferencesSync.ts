@@ -10,7 +10,7 @@ import { dispatchActionForGameSession } from "../game/dispatch";
 import { useGameStore } from "../stores/gameStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
-import { currentLocalHistory } from "../game/localHistorySession";
+import { captureLocalSeat, currentLocalHistory, isLocalSeatCurrent, type LocalSeatBinding } from "../game/localHistorySession";
 import { getPlayerId } from "./usePlayerId";
 
 /**
@@ -35,11 +35,14 @@ type LastSent = {
   stops?: readonly PhaseStop[];
   mode?: PriorityPassingMode;
   presentation?: LocalGameplayPresentation;
+  seat?: number;
+  seatGeneration?: number;
 };
-export interface LocalGameplayPresentation { priorityPassingMode: PriorityPassingMode; fullControl: boolean }
+export interface LocalGameplayPresentation { priorityPassingMode: PriorityPassingMode; fullControl: boolean; manualManaOverride?: boolean }
 const gameplayPresentation = (): LocalGameplayPresentation => ({
   priorityPassingMode: usePreferencesStore.getState().priorityPassingMode,
   fullControl: useUiStore.getState().fullControl,
+  manualManaOverride: useUiStore.getState().manualManaOverride,
 });
 
 // Module-scoped so React StrictMode remounts cannot resend preferences for the
@@ -59,28 +62,30 @@ export async function prepareLocalGameplayPreferences(adapter: EngineAdapter, ge
   checkCurrent();
   await adapter.submitAction({ type: "SetPriorityPassingMode", data: { mode } }, getPlayerId());
   checkCurrent();
-  lastSent = { adapter, generation, stops, mode, presentation };
+  lastSent = { adapter, generation, stops, mode, presentation, seat: 0, seatGeneration: 1 };
 }
 
 /** Pending controls can already show POST; retain the last committed PRE display. */
-export function localGameplayPresentation(adapter: EngineAdapter, generation: number, state: GameState): LocalGameplayPresentation {
-  const mode = state.priority_passing_modes?.[getPlayerId()] ?? "Standard";
+export function localGameplayPresentation(adapter: EngineAdapter, generation: number, state: GameState, binding: LocalSeatBinding): LocalGameplayPresentation {
+  const mode = state.priority_passing_modes?.[binding.seat] ?? "Standard";
   if (effectivePriorityPassingMode() === mode) return gameplayPresentation();
-  if (lastSent?.adapter === adapter && lastSent.generation === generation && lastSent.mode === mode && lastSent.presentation) return { ...lastSent.presentation };
+  if (lastSent?.adapter === adapter && lastSent.generation === generation && lastSent.seat === binding.seat && lastSent.seatGeneration === binding.generation && lastSent.mode === mode && lastSent.presentation) return { ...lastSent.presentation };
   return { priorityPassingMode: mode, fullControl: false };
 }
 
 /** Restore projects the engine's PRE settings; it must not resend POST settings. */
-export function adoptLocalGameplayPreferences(adapter: EngineAdapter, generation: number, state: GameState, presentation: LocalGameplayPresentation): void {
-  const actor = getPlayerId();
+export function adoptLocalGameplayPreferences(adapter: EngineAdapter, generation: number, state: GameState, presentation: LocalGameplayPresentation, binding: LocalSeatBinding): void {
+  if (!binding.session.ownsSeat(binding)) throw new Error("Retired Local settings adoption");
+  const actor = binding.seat;
   const stops = state.phase_stops?.[actor] ?? [];
   const mode = state.priority_passing_modes?.[actor] ?? "Standard";
-  lastSent = { adapter, generation, stops: stops.slice(), mode, presentation };
+  lastSent = { adapter, generation, stops: stops.slice(), mode, presentation, seat: actor, seatGeneration: binding.generation };
   usePreferencesStore.setState({
     phaseStops: stops.slice(),
     priorityPassingMode: presentation.priorityPassingMode,
   });
-  useUiStore.setState({ fullControl: presentation.fullControl });
+  if (!binding.session.ownsSeat(binding)) throw new Error("Retired Local settings adoption");
+  useUiStore.setState({ fullControl: presentation.fullControl, manualManaOverride: presentation.manualManaOverride ?? false });
 }
 
 function phaseStopsEqual(a: readonly PhaseStop[], b: readonly PhaseStop[]): boolean {
@@ -90,20 +95,22 @@ function phaseStopsEqual(a: readonly PhaseStop[], b: readonly PhaseStop[]): bool
     );
 }
 
-function isCurrentSession(adapter: EngineAdapter, generation: number): boolean {
+function isCurrentSession(adapter: EngineAdapter, generation: number, binding: LocalSeatBinding | null): boolean {
   const game = useGameStore.getState();
   return (
-    game.adapter === adapter
+    isLocalSeatCurrent(binding)
+    && game.adapter === adapter
     && game.gameSessionGeneration === generation
     && game.gameState !== null
   );
 }
 
-function successfulSendFor(adapter: EngineAdapter, generation: number): LastSent {
-  if (lastSent?.adapter === adapter && lastSent.generation === generation) {
+function successfulSendFor(adapter: EngineAdapter, generation: number, binding: LocalSeatBinding | null): LastSent {
+  if (lastSent?.adapter === adapter && lastSent.generation === generation
+    && (binding ? lastSent.seat === binding.seat && lastSent.seatGeneration === binding.generation : lastSent.seat === undefined)) {
     return lastSent;
   }
-  return { adapter, generation };
+  return { adapter, generation, ...(binding ? { seat: binding.seat, seatGeneration: binding.generation } : {}) };
 }
 
 async function drainGameplayPreferenceSync(): Promise<void> {
@@ -120,22 +127,22 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         gameState,
       } = useGameStore.getState();
       if (!adapter || !gameState) continue;
+      const binding = captureLocalSeat();
+      const send = (action: Parameters<typeof dispatchActionForGameSession>[0]) => binding
+        ? dispatchActionForGameSession(action, adapter, generation, binding.seat, binding)
+        : dispatchActionForGameSession(action, adapter, generation);
       // A blocked send is not a success. The idle transition below re-arms
       // pending user settings after the current root/restore is terminal.
-      if (currentLocalHistory() && useGameStore.getState().localHistory?.phase !== "idle") continue;
+      if (currentLocalHistory() && (useGameStore.getState().localHistory?.phase !== "idle" || !isLocalSeatCurrent(binding))) continue;
 
       const stops = usePreferencesStore.getState().phaseStops;
       const mode = effectivePriorityPassingMode();
       const presentation = gameplayPresentation();
-      const sent = successfulSendFor(adapter, generation);
+      const sent = successfulSendFor(adapter, generation, binding);
 
       if (!sent.stops || !phaseStopsEqual(sent.stops, stops)) {
         try {
-          await dispatchActionForGameSession(
-            { type: "SetPhaseStops", data: { stops: [...stops] } },
-            adapter,
-            generation,
-          );
+          await send({ type: "SetPhaseStops", data: { stops: [...stops] } });
         } catch {
           // dispatchAction reports engine failures. Leave this value unsent so
           // the next store notification can retry it.
@@ -143,9 +150,9 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         }
 
         const currentStops = usePreferencesStore.getState().phaseStops;
-        if (isCurrentSession(adapter, generation) && phaseStopsEqual(currentStops, stops)) {
+        if (isCurrentSession(adapter, generation, binding) && phaseStopsEqual(currentStops, stops)) {
           lastSent = {
-            ...successfulSendFor(adapter, generation),
+            ...successfulSendFor(adapter, generation, binding),
             stops: stops.slice(),
           };
         } else {
@@ -154,7 +161,7 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         }
       }
 
-      if (!isCurrentSession(adapter, generation)) {
+      if (!isCurrentSession(adapter, generation, binding)) {
         syncRequested = true;
         continue;
       }
@@ -165,24 +172,20 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         continue;
       }
 
-      const modeSent = successfulSendFor(adapter, generation);
+      const modeSent = successfulSendFor(adapter, generation, binding);
       if (modeSent.mode !== mode) {
         try {
-          await dispatchActionForGameSession(
-            { type: "SetPriorityPassingMode", data: { mode } },
-            adapter,
-            generation,
-          );
+          await send({ type: "SetPriorityPassingMode", data: { mode } });
         } catch {
           // As above, a rejected dispatch must remain retryable.
           continue;
         }
 
         if (
-          isCurrentSession(adapter, generation)
+          isCurrentSession(adapter, generation, binding)
           && effectivePriorityPassingMode() === mode
         ) {
-          lastSent = { ...successfulSendFor(adapter, generation), mode, presentation };
+          lastSent = { ...successfulSendFor(adapter, generation, binding), mode, presentation };
         } else {
           syncRequested = true;
         }
@@ -212,6 +215,8 @@ export function useGameplayPreferencesSync(): void {
         state.gameState !== null,
         state.engineCommitEpoch,
         state.localHistory?.phase,
+        state.localHistory?.seatGeneration,
+        state.localHistory?.concealed,
       ] as const,
       (next, previous) => {
         // A failed preference's own capture/recovery/idle notifications are

@@ -1,3 +1,4 @@
+import { useGameStoreDispatch } from "../../hooks/useLocalSeat";
 import { useTranslation } from "react-i18next";
 
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
@@ -13,7 +14,7 @@ import { DialogShell } from "./DialogShell.tsx";
 export function RippleRevealChoiceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const dispatch = useGameStore((s) => s.dispatch);
+  const dispatch = useGameStoreDispatch();
   const { t } = useTranslation("game");
 
   if (waitingFor?.type !== "RippleRevealChoice") return null;

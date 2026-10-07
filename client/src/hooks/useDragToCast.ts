@@ -1,8 +1,12 @@
+import { useLocalSeatBinding } from "./useLocalSeat";
+import { isLocalSeatCurrent } from "../game/localHistorySession";
+import { useGameDispatch } from "./useGameDispatch";
+
 import { useCallback } from "react";
 import type { PanInfo } from "framer-motion";
 
 import type { GameAction } from "../adapter/types.ts";
-import { dispatchAction } from "../game/dispatch.ts";
+
 
 /**
  * Upward-drag threshold (pixels) at which a drag gesture counts as "play this
@@ -40,8 +44,11 @@ export function useDragToCast({
   isInSourceZone,
   useDistanceThreshold,
 }: UseDragToCastOptions) {
+  const dispatchAction = useGameDispatch();
+  const binding = useLocalSeatBinding();
   return useCallback(
     (_event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo): boolean => {
+      if (!isLocalSeatCurrent(binding)) return false;
       if (!hasPriority) return false;
       if (isInSourceZone?.(info)) return false;
       const pastThreshold = useDistanceThreshold
@@ -58,6 +65,6 @@ export function useDragToCast({
       }
       return false;
     },
-    [castAction, onPlay, hasPriority, isInSourceZone, useDistanceThreshold],
+    [castAction, onPlay, hasPriority, isInSourceZone, useDistanceThreshold, dispatchAction, binding],
   );
 }

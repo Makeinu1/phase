@@ -1,7 +1,9 @@
+import { useGameDispatch } from "../../hooks/useGameDispatch";
+
 import { useTranslation } from "react-i18next";
 
 import type { MayTriggerAutoChoiceSelector } from "../../adapter/types.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+
 import { useGameStore } from "../../stores/gameStore.ts";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 
@@ -16,6 +18,7 @@ import { PopoverMenu } from "../menu/PopoverMenu.tsx";
  * actor scoping on the write, and each remove echoes the stored selector verbatim.
  */
 export function MayTriggerAutoChoiceList() {
+  const dispatchAction = useGameDispatch();
   const { t } = useTranslation("game");
   const choices = useGameStore((s) => s.gameState?.may_trigger_auto_choices) ?? [];
   const replacementChoices = useGameStore((s) => s.gameState?.replacement_auto_choices) ?? [];
