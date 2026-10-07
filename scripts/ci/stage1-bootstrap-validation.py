@@ -11,9 +11,13 @@ import re
 import sys
 
 RUNTIME_SOURCE = {'sha':'3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a','tree':'476902cc596151448d4a9ba3964ecebf6985cf62'}
-CONSUMER_SOURCE = {'sha':'d1fcc3ff19bc02da4701227c95207110411c724b','tree':'69e82d7a3f17fc9e12419c54218333ec73ff4861',
+CONSUMER_SOURCE = {'sha':'ca0055c7c7136fe312db3a9dd8bef934fc88b7c7','tree':'13470dd992d4b31f60d13a0fce2c5b1e51a629c2',
     'declaration_path':'client/src/wasm/engine_wasm.d.ts','declaration_size':39992,
-    'declaration_sha256':'8bc1cc21a04d46529e415df480db3a129baa4f535c21de6b4535c652bac54bab'}
+    'declaration_sha256':'8bc1cc21a04d46529e415df480db3a129baa4f535c21de6b4535c652bac54bab',
+    'profile':'declaration-sync-plus-two-p0-adapter-fixtures',
+    'test_fixtures': {
+        'client/src/adapter/__tests__/engine-worker.test.ts': {'size':4911,'sha256':'cea1f68fba28d1a27e71a56ab54143236b1c6e84f251ce9af534c8289cc15a0b'},
+        'client/src/adapter/__tests__/wasm-adapter.test.ts': {'size':69687,'sha256':'7535669a778de40774b5a8f5af2cdf50a2cd53b86f4427b6f43d0230bb0657c1'}}}
 
 def digest(path):
     with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -128,11 +132,26 @@ def source():
         assert git(validation, 'rev-parse', RUNTIME_SOURCE['sha'] + '^{tree}') == RUNTIME_SOURCE['tree']
         assert git(validation, 'rev-parse', CONSUMER_SOURCE['sha'] + '^{tree}') == CONSUMER_SOURCE['tree']
         assert git(validation, 'rev-list', '--parents', '-n', '1', CONSUMER_SOURCE['sha']).split() == [CONSUMER_SOURCE['sha'],RUNTIME_SOURCE['sha']]
+        assert set(CONSUMER_SOURCE) == {'sha','tree','declaration_path','declaration_size','declaration_sha256','profile','test_fixtures'}
+        assert CONSUMER_SOURCE['profile'] == 'declaration-sync-plus-two-p0-adapter-fixtures'
+        assert CONSUMER_SOURCE['declaration_path'] == 'client/src/wasm/engine_wasm.d.ts'
+        fixtures = CONSUMER_SOURCE['test_fixtures']
+        assert type(fixtures) is dict and set(fixtures) == {'client/src/adapter/__tests__/engine-worker.test.ts','client/src/adapter/__tests__/wasm-adapter.test.ts'}
+        assert all(type(item) is dict and set(item) == {'size','sha256'} and type(item['size']) is int and item['size'] > 0
+            and isinstance(item['sha256'],str) and re.fullmatch('[a-f0-9]{64}',item['sha256']) for item in fixtures.values())
+        files = {CONSUMER_SOURCE['declaration_path']: {'size':CONSUMER_SOURCE['declaration_size'],'sha256':CONSUMER_SOURCE['declaration_sha256']}, **fixtures}
         delta = git(validation, 'diff', '--raw', '--no-renames', '--no-abbrev', RUNTIME_SOURCE['sha'], CONSUMER_SOURCE['sha'])
-        assert re.fullmatch(r':100644 100644 [a-f0-9]{40} [a-f0-9]{40} M\t' + re.escape(CONSUMER_SOURCE['declaration_path']), delta)
-        declaration = subprocess.check_output(['git','-C',str(validation),'show',CONSUMER_SOURCE['sha'] + ':' + CONSUMER_SOURCE['declaration_path']])
-        assert len(declaration) == CONSUMER_SOURCE['declaration_size'] and hashlib.sha256(declaration).hexdigest() == CONSUMER_SOURCE['declaration_sha256']
-        if role == 'consumer': assert (source / CONSUMER_SOURCE['declaration_path']).read_bytes() == declaration
+        records = delta.splitlines(); assert len(records) == 3
+        changed_paths = set()
+        for record in records:
+            match = re.fullmatch(r':100644 100644 [a-f0-9]{40} [a-f0-9]{40} M\t([^\t\r\n]+)', record)
+            assert match and match[1] in files and match[1] not in changed_paths
+            changed_paths.add(match[1])
+        assert changed_paths == set(files)
+        for name, item in files.items():
+            blob = subprocess.check_output(['git','-C',str(validation),'show',CONSUMER_SOURCE['sha'] + ':' + name])
+            assert len(blob) == item['size'] and hashlib.sha256(blob).hexdigest() == item['sha256']
+            if role == 'consumer': assert (source / name).read_bytes() == blob
         validation_declaration = (validation / CONSUMER_SOURCE['declaration_path']).read_bytes()
         assert len(validation_declaration) == 39904 and hashlib.sha256(validation_declaration).hexdigest() == 'ea1186d716535ef7867d9bcdb7838c1e7521074f2aa2584e6891e0fae02004f3'
         changed = git(validation, 'diff', '--name-only', RUNTIME_SOURCE['sha'], 'HEAD').splitlines()
@@ -172,7 +191,7 @@ def source():
             'validation_sha': os.environ['GITHUB_SHA'], 'validation_tree': git(validation, 'rev-parse', 'HEAD^{tree}'),
             'workflow_sha256': hashlib.sha256(current.encode()).hexdigest(), 'guard_sha256': guard_hash,
             'product_equal': True, 'input_sha256': pins, 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': 1,
-            'source_role': role, 'runtime_source': RUNTIME_SOURCE, 'consumer_source': CONSUMER_SOURCE, 'consumer_declaration_only': True}
+            'source_role': role, 'runtime_source': RUNTIME_SOURCE, 'consumer_source': CONSUMER_SOURCE, 'consumer_declaration_only': False}
         (root / 'source-manifest.json').write_text(json.dumps(value) + '\n')
         print('{"stage1_sources_admitted":true,"product_equal":true}')
     except Exception as error:
@@ -1432,7 +1451,7 @@ def copy_runtime():
 
 
 def green():
-    import hashlib, json, os, subprocess
+    import hashlib, json, os, re, subprocess
     from pathlib import Path
     root = Path(os.environ['MANUAL_EVIDENCE'])
     def load(name):
@@ -1446,11 +1465,16 @@ def green():
         'product_equal','input_sha256','run_id','run_attempt','source_role','runtime_source','consumer_source','consumer_declaration_only'}
     complete &= source.get('source_sha') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == CONSUMER_SOURCE['sha'] and source.get('source_tree') == CONSUMER_SOURCE['tree']
     complete &= source.get('source_role') == 'consumer' and source.get('runtime_source') == RUNTIME_SOURCE
-    complete &= source.get('consumer_source') == CONSUMER_SOURCE and source.get('consumer_declaration_only') is True
+    complete &= source.get('consumer_source') == CONSUMER_SOURCE and source.get('consumer_declaration_only') is False
+    complete &= (CONSUMER_SOURCE.get('profile') == 'declaration-sync-plus-two-p0-adapter-fixtures' and type(CONSUMER_SOURCE.get('test_fixtures')) is dict
+        and set(CONSUMER_SOURCE['test_fixtures']) == {'client/src/adapter/__tests__/engine-worker.test.ts','client/src/adapter/__tests__/wasm-adapter.test.ts'})
     complete &= os.environ['STAGE1_CONSUMER_SHA'] == CONSUMER_SOURCE['sha'] and os.environ['STAGE1_CONSUMER_TREE'] == CONSUMER_SOURCE['tree']
     complete &= os.environ['STAGE1_JOB_NAME'] == 'stage1-validation-green' and source.get('run_id') == int(os.environ['GITHUB_RUN_ID']) and source.get('run_attempt') == 1
     complete &= os.environ['BOOTSTRAP_BASE_SHA'] == '8fcd0f33451058f55b110e707d50497545763615' and os.environ['BOOTSTRAP_BASE_TREE'] == '85f6682f6a2db68e5a67e23719f2126e3d241133'
     try:
+        assert set(CONSUMER_SOURCE) == {'sha','tree','declaration_path','declaration_size','declaration_sha256','profile','test_fixtures'}
+        assert CONSUMER_SOURCE['declaration_path'] == 'client/src/wasm/engine_wasm.d.ts'
+        assert set(CONSUMER_SOURCE['test_fixtures']) == {'client/src/adapter/__tests__/engine-worker.test.ts','client/src/adapter/__tests__/wasm-adapter.test.ts'}
         assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == CONSUMER_SOURCE['sha']
         assert subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip() == CONSUMER_SOURCE['tree']
         assert subprocess.check_output(['git','status','--porcelain'],text=True).strip() == ''
@@ -1459,6 +1483,11 @@ def green():
         assert subprocess.check_output(['git','-C','../validation-source','status','--porcelain'],text=True).strip() == ''
         tracked = Path(CONSUMER_SOURCE['declaration_path']).read_bytes()
         assert len(tracked) == CONSUMER_SOURCE['declaration_size'] and hashlib.sha256(tracked).hexdigest() == CONSUMER_SOURCE['declaration_sha256']
+        for name, item in CONSUMER_SOURCE['test_fixtures'].items():
+            assert type(item) is dict and set(item) == {'size','sha256'} and type(item['size']) is int and item['size'] > 0
+            assert isinstance(item['sha256'],str) and re.fullmatch('[a-f0-9]{64}',item['sha256'])
+            tracked_fixture = Path(name).read_bytes()
+            assert len(tracked_fixture) == item['size'] and hashlib.sha256(tracked_fixture).hexdigest() == item['sha256']
     except Exception: complete = False
     complete &= source.get('guard_sha256') == os.environ['STAGE1_GUARD_SHA256']
     import datetime, re
