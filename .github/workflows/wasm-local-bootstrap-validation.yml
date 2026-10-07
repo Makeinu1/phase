@@ -4751,6 +4751,9 @@ jobs:
           bootstrap-stage1-validation-green-evidence/runner-enabled-error.json
           bootstrap-stage1-validation-green-evidence/red-adjudication.json
           bootstrap-stage1-validation-green-evidence/adapter-assertions.json
+          bootstrap-stage1-validation-green-evidence/client-adapter-tests-runner.stdout
+          bootstrap-stage1-validation-green-evidence/client-adapter-tests-runner.stderr
+          bootstrap-stage1-validation-green-evidence/client-adapter-tests-runner-exit.json
           bootstrap-stage1-validation-green-evidence/baseline-terminal.json
           bootstrap-stage1-validation-green-evidence/product-terminal.json
           bootstrap-stage1-validation-green-evidence/baseline-source.txt

@@ -1314,31 +1314,44 @@ def declarations():
 def adapter_tests():
     import json, os, re, subprocess
     from pathlib import Path
-    summary = {'runner_exit_code': None, 'report_valid': False, 'all_selected_tests_passed': False}
+    summary = {'runner_exit_code': None, 'report_valid': False, 'all_selected_tests_passed': False,
+        'raw_retention_complete': False}
     result = None
     try:
-        result = subprocess.run([
-            'pnpm', '--dir', 'client', 'exec', 'vitest', 'run', '--config', 'vitest.config.ts',
-            '--pool=forks', '--isolate', '--maxWorkers=1', '--no-file-parallelism',
-            '--coverage.enabled=false', '--reporter=json', '--silent=true',
-            'src/adapter/__tests__/engine-worker.test.ts',
-            'src/adapter/__tests__/engine-worker-client.test.ts',
-            'src/adapter/__tests__/wasm-adapter.test.ts',
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace',
-            env={**os.environ, 'NO_COLOR': '1', 'FORCE_COLOR': '0'})
-        summary['runner_exit_code'] = result.returncode
-        summary.update(runner_stdout_bytes=len(result.stdout.encode('utf-8')), runner_stderr_bytes=len(result.stderr.encode('utf-8')),
+        root = Path(os.environ['MANUAL_EVIDENCE'])
+        stdout_path = root / 'client-adapter-tests-runner.stdout'
+        stderr_path = root / 'client-adapter-tests-runner.stderr'
+        exit_path = root / 'client-adapter-tests-runner-exit.json'
+        with stdout_path.open('xb') as stdout_file, stderr_path.open('xb') as stderr_file:
+            with exit_path.open('x') as exit_file:
+                exit_file.write(json.dumps({'runner_exit_code':None}) + '\n')
+            result = subprocess.run([
+                'pnpm', '--dir', 'client', 'exec', 'vitest', 'run', '--config', 'vitest.config.ts',
+                '--pool=forks', '--isolate', '--maxWorkers=1', '--no-file-parallelism',
+                '--coverage.enabled=false', '--reporter=json', '--silent=true',
+                'src/adapter/__tests__/engine-worker.test.ts',
+                'src/adapter/__tests__/engine-worker-client.test.ts',
+                'src/adapter/__tests__/wasm-adapter.test.ts',
+            ], stdout=stdout_file, stderr=stderr_file,
+                env={**os.environ, 'NO_COLOR': '1', 'FORCE_COLOR': '0'})
+            summary['runner_exit_code'] = result.returncode
+            exit_path.write_text(json.dumps({'runner_exit_code':result.returncode}) + '\n')
+        summary['raw_retention_complete'] = True
+        summary.update(runner_stdout_bytes=stdout_path.stat().st_size, runner_stderr_bytes=stderr_path.stat().st_size,
             failed_assertions=[], failure_output_retained=False)
-        assert summary['runner_stdout_bytes'] <= 4*1024**2
+        with stdout_path.open('rb') as stream: raw_stdout = stream.read(4*1024**2 + 1)
+        with stderr_path.open('rb') as stream: raw_stderr = stream.read(65536 + 1)
+        assert len(raw_stdout) <= 4*1024**2
+        stdout = raw_stdout.decode('utf-8'); stderr = raw_stderr.decode('utf-8')
         summary['diagnostic_projection'] = {'status':'unknown','diagnostics':[], 'codes_withheld':0,'locations_withheld':0}
-        if len(result.stderr) <= 65536:
+        if len(raw_stderr) <= 65536:
             for literal, code in [('No such file or directory (os error 2)','path-missing'),
                 ('Permission denied (os error 13)','permission-denied'),('Not a directory (os error 20)','not-a-directory')]:
-                if literal in result.stderr:
+                if literal in stderr:
                     summary['diagnostic_projection']['diagnostics'].append({'level':'error','code':code,'location':None})
             if summary['diagnostic_projection']['diagnostics']: summary['diagnostic_projection']['status'] = 'matched-static-portions'
         else: summary['diagnostic_projection']['status'] = 'output-over-bound'
-        report = json.loads(result.stdout)
+        report = json.loads(stdout)
         statuses = [case['status'] for file in report['testResults'] for case in file['assertionResults']]
         counts = {status: statuses.count(status) for status in ['passed', 'failed', 'skipped', 'pending', 'todo', 'disabled']}
         valid = (len(report['testResults']) == 3 and len(statuses) > 0 and
