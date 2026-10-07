@@ -8073,8 +8073,7 @@ mod ordinary_initializer_preservation_tests {
         for (index, input) in failures().into_iter().enumerate() {
             let before = snapshot();
             let error = initialize_game_inner(input, InitSessionKind::Local)
-                .err()
-                .expect("fixture refused");
+                .expect_err("fixture refused");
             assert!(
                 error["error"] == true && error["reasons"].is_array(),
                 "ordinary refusal envelope"
@@ -8134,8 +8133,7 @@ mod ordinary_initializer_preservation_tests {
                 InitSessionKind::Local
             };
             let error = initialize_game_inner(limited_inputs(), other)
-                .err()
-                .expect("occupied refusal");
+                .expect_err("occupied refusal");
             assert!(error["engine_occupied"] == true, "typed occupied flag");
             preserved(before);
         }
@@ -8344,8 +8342,7 @@ mod experimental_local_bootstrap_tests {
         );
         let before = snapshot();
         let error = initialize_experimental_local_game_inner(limited_inputs())
-            .err()
-            .expect("host refuses bootstrap");
+            .expect_err("host refuses bootstrap");
         assert!(error["engine_occupied"] == true, "host refusal typed");
         preserved(before);
         reset();
