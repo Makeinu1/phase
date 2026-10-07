@@ -3036,6 +3036,21 @@ jobs:
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
       if: steps.selection.outputs.native_off == 'EMPTY' || steps.selection.outputs.native != 'FULL'
+    - name: Check exact Rust formatting
+      working-directory: candidate-source
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs crates/engine/src/game/effects/life.rs' > "$MANUAL_EVIDENCE/candidate-format.control.log" 2>&1
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-format >> "$MANUAL_EVIDENCE/candidate-format.control.log" 2>&1
+        projection_code=$?
+        printf '{"label":"candidate-format","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-format.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+      if: steps.selection.outputs.native != 'FULL'
     - name: Build the single missing native off archive
       working-directory: candidate-source
       run: |
@@ -3224,21 +3239,6 @@ jobs:
         retention-days: 7
         overwrite: false
       if: steps.selection.outputs.native == 'EMPTY'
-    - name: Check exact Rust formatting
-      working-directory: candidate-source
-      run: |
-        set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs crates/engine/src/game/effects/life.rs' > "$MANUAL_EVIDENCE/candidate-format.control.log" 2>&1
-        command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-format >> "$MANUAL_EVIDENCE/candidate-format.control.log" 2>&1
-        projection_code=$?
-        printf '{"label":"candidate-format","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-format.control.log"
-        control_code=$?
-        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
-        set -e
-        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
-        exit "$projection_code"
-      if: steps.selection.outputs.native != 'FULL'
     - name: Check exact candidate clippy
       working-directory: candidate-source
       run: |
