@@ -213,7 +213,7 @@ async function retirePendingIntoFreshLocal() {
   await until(() => game().localHistory.phase === 'idle' && game().localHistory.entries === newPre.entries + 1 && json(pending()) === '[1]', 'fresh-legal-Keep-after-old-terminal');
   check(owned.actions.length === count + 1 && owned.actions.at(-1).actor === 0 && owned.actions.at(-1).action.type === 'MulliganDecision'
     && owned.actions.at(-1).responseType === 'result', 'fresh-real-Keep-success');
-  await input(null, { captureOnly: true, screenshot: 'local-retirement-fresh-legal-Keep' });
+  await input(null, { captureOnly: true, screenshot: 'local-retirement-fresh-legal-keep' });
   await input(null, { key: 'z' });
   await until(() => game().localHistory.phase === 'idle' && game().localHistory.entries === newPre.entries && pending().length === 2, 'fresh-ordinary-Undo-after-old-terminal');
   const newUndoRaw = await raw(); equalRekey(newPreRaw, newUndoRaw);
@@ -221,7 +221,7 @@ async function retirePendingIntoFreshLocal() {
   const newUndo = view(); check(withoutAuthority(newPre.state) === withoutAuthority(newUndo.state), 'fresh-Undo-complete-viewer-PRE-except-fresh-authority');
   for (const key of ['legal', 'logs', 'events', 'currentEvents', 'nextLogSeq', 'pending', 'entries', 'seat', 'phaseStops', 'priorityMode', 'fullControl', 'manualMana']) check(json(newPre[key]) === json(newUndo[key]), `fresh-Undo-exact-PRE-${key}`);
   check(owned.restores.length === 1 && owned.restores[0] === newPreRaw && game().stateHistory.length === 0, 'fresh-Undo-exact-engine-PRE-input');
-  await input(null, { captureOnly: true, screenshot: 'local-retirement-fresh-Undo-restored' }); mark('fresh-legal-operation-and-ordinary-Undo-success');
+  await input(null, { captureOnly: true, screenshot: 'local-retirement-fresh-undo-restored' }); mark('fresh-legal-operation-and-ordinary-Undo-success');
   const proof = { pass: true, oldIdentity, newIdentity, timeline: probe.timeline, originalNativeCalls: probe.nativeCalls,
     oldNativeStatus: probe.nativeStatus, oldNativeError: probe.nativeError, oldDispatchStatus: probe.dispatchStatus, oldDispatchOutcome: probe.dispatchOutcome,
     oldDispatches: probe.dispatches, heldSuccess: { id: held.id, responseType: held.responseType, action: held.action, released: held.released },
