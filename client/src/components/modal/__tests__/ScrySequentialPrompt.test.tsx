@@ -45,17 +45,27 @@ function selectInteraction(id: string): ViewerInteraction {
 
 // Store/projection fixture and mocked dispatch only. This exercises the real
 // CardChoiceModal controls, not a live engine, WASM, or P2P connection.
-function setPrompt(interactionId: string) {
-  const waitingFor: WaitingFor = { type: "ScryChoice", data: { player: 0, cards: [41] } };
+function setPrompt(interactionId: string, options: {
+  projection?: ViewerInteraction;
+  scryPromptId?: InteractionId;
+  player?: number;
+} = {}) {
+  const waitingFor: WaitingFor = { type: "ScryChoice", data: { player: options.player ?? 0, cards: [41] } };
+  const derived = {
+    unique_authorized_submitter: options.player ?? 0,
+    scry_prompt_id: options.scryPromptId,
+  };
   useGameStore.setState({
-    gameMode: "online",
+    gameMode: options.scryPromptId ? "local" : "online",
     gameState: buildGameState({
+      active_player: options.scryPromptId ? 1 : 0,
       players: [buildPlayer({ id: 0, library: [41] }), buildPlayer({ id: 1 })],
       objects: { 41: card },
       waiting_for: waitingFor,
+      derived,
     }),
     waitingFor,
-    viewerInteraction: selectInteraction(interactionId),
+    viewerInteraction: options.projection ?? selectInteraction(interactionId),
   });
 }
 
@@ -98,5 +108,87 @@ describe("consecutive Scry prompt identity (UI fixture)", () => {
 
     expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({ type: "SelectCards", data: { cards: [41] } });
     expect(screen.getByRole("button", { name: "Top" })).toBeInTheDocument();
+  });
+
+  function omittedOpportunities(kind: "waiting" | "unsupported"): ViewerInteraction {
+    return {
+      ...selectInteraction("fixture.omitted"),
+      canSubmit: kind === "unsupported",
+      opportunities: [],
+      availability: kind === "waiting"
+        ? { type: "waiting" }
+        : { type: "unsupported", data: { reason: "payloadTooLarge" } },
+    };
+  }
+
+  it.each(["waiting", "unsupported"] as const)(
+    "keeps Bottom for the same engine prompt ID when opportunities are %s",
+    (kind) => {
+      const options = {
+        projection: omittedOpportunities(kind),
+        scryPromptId: "fixture.scry.2.1" as InteractionId,
+      };
+      setPrompt("fixture.omitted", options);
+      render(<CardChoiceModal />);
+      fireEvent.click(screen.getByRole("button", { name: "Top" }));
+
+      act(() => setPrompt("fixture.omitted", options));
+
+      expect(screen.getByRole("button", { name: "Bottom" })).toBeInTheDocument();
+      expect(useGameStore.getState().viewerInteraction).toEqual(options.projection);
+      expect(dispatchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps Bottom when the same prompt moves between normal and Unsupported projections", () => {
+    const id = "fixture.scry.transition" as InteractionId;
+    setPrompt(id, { scryPromptId: id });
+    render(<CardChoiceModal />);
+    fireEvent.click(screen.getByRole("button", { name: "Top" }));
+
+    act(() => setPrompt(id, {
+      scryPromptId: id, projection: omittedOpportunities("unsupported"),
+    }));
+    expect(screen.getByRole("button", { name: "Bottom" })).toBeInTheDocument();
+
+    act(() => setPrompt(id, { scryPromptId: id }));
+    expect(screen.getByRole("button", { name: "Bottom" })).toBeInTheDocument();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["waiting", "unsupported"] as const)(
+    "starts the next engine prompt on Top without changing the %s projection",
+    (kind) => {
+      const projection = omittedOpportunities(kind);
+      setPrompt("fixture.omitted", {
+        projection, scryPromptId: "fixture.scry.2.1" as InteractionId,
+      });
+      render(<CardChoiceModal />);
+      fireEvent.click(screen.getByRole("button", { name: "Top" }));
+      fireEvent.click(screen.getByRole("button", { name: /Confirm/i }));
+      expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({ type: "SelectCards", data: { cards: [] } });
+      dispatchMock.mockClear();
+
+      act(() => setPrompt("fixture.omitted", {
+        projection, scryPromptId: "fixture.scry.2.2" as InteractionId,
+      }));
+      fireEvent.click(screen.getByRole("button", { name: /Confirm/i }));
+
+      expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({ type: "SelectCards", data: { cards: [41] } });
+      expect(screen.getByRole("button", { name: "Top" })).toBeInTheDocument();
+      expect(useGameStore.getState().viewerInteraction).toEqual(projection);
+    },
+  );
+
+  it("does not offer another player's Scry controls when an ID is present", () => {
+    setPrompt("fixture.omitted", {
+      projection: omittedOpportunities("waiting"),
+      scryPromptId: "fixture.other-player" as InteractionId,
+      player: 1,
+    });
+    render(<CardChoiceModal />);
+
+    expect(screen.queryByRole("button", { name: /Confirm/i })).not.toBeInTheDocument();
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 });

@@ -173,6 +173,7 @@ export function CardChoiceModal() {
   const activeSelectInteractionId = useGameStore((s) =>
     selectionInteractionId(s.viewerInteraction),
   );
+  const scryPromptId = useGameStore((s) => s.gameState?.derived?.scry_prompt_id);
 
   if (!waitingFor) return null;
 
@@ -183,6 +184,7 @@ export function CardChoiceModal() {
         <ScryModal
           key={
             activeSelectInteractionId ??
+            scryPromptId ??
             `${waitingFor.data.player}:${waitingFor.data.cards.join(",")}`
           }
           data={waitingFor.data}
