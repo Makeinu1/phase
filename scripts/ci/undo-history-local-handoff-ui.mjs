@@ -176,7 +176,7 @@ async function retirePendingIntoFreshLocal() {
   trace('busy-clicks-checked'); mark('real-unsettled-success-busy-duplicate-Undo-seat-no-mutation');
 
   stage = 'ordinary-menu-exit-with-old-request-pending';
-  await input(`button[aria-label="${i18n.t('game:gameMenu.menu')}"]`); await button(i18n.t('game:gameMenu.mainMenu'));
+  await input(`button[aria-label="${i18n.t('common:gameMenu.menu')}"]`); await button(i18n.t('common:gameMenu.mainMenu'));
   await until(() => location.pathname === '/' && oldWorker.terminated && !currentLocalHistory() && game().adapter === null
     && probe.nativeStatus === 'rejected', 'ordinary-exit-terminates-old-Worker-and-actual-native-RPC');
   check(probe.dispatchStatus === 'pending' && probe.client.pending.size === 0 && !oldSession.ownsSession() && !held.released, 'old-logical-continuation-still-pending-after-real-disposal');
