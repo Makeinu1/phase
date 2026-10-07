@@ -264,7 +264,7 @@ try {
       } else {
       const inspect = (probePoint = null) => evaluate(`(${observeControl.toString()})(${JSON.stringify(selector)},${JSON.stringify(attemptDisabled ?? false)},${JSON.stringify(probePoint)})`);
       let observation = await inspect(), point = observation.point;
-      const undoObservation = localHandoffUi && selector === '[data-local-history-undo="true"]';
+      const undoObservation = localHandoffUi && selector === '[data-local-history-undo="true"]' && !attemptDisabled;
       let controlEvidence;
       const persist = () => writeFile(path.join(evidence, 'ui-control-observations.json'), JSON.stringify(controlEvidence, null, 2) + '\n');
       const capture = async name => {
