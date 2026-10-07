@@ -136,10 +136,16 @@ async function campaign() {
     check(game().waitingFor?.type === 'Priority' && Number.isInteger(actor), 'finite-opening-awaits-normal-priority');
     if (getPlayerId() !== actor) await handoff(actor);
     let control;
-    await until(() => { control = [...document.querySelectorAll('button[aria-describedby]')].find(b => !b.disabled && visible(b) && /priority/i.test(document.getElementById(b.getAttribute('aria-describedby'))?.textContent ?? '')); return !!control; }, 'real-ordinary-priority-button');
-    control.dataset.qaHandoffTarget = String(++targetSerial); const roots = game().localHistory.entries;
+    const passTooltip = i18n.t('game:actionButton.priorityTooltip').trim();
+    await until(() => {
+      const controls = [...document.querySelectorAll('[data-action-button-panel] button[aria-describedby]')].filter(b => !b.disabled && visible(b) && document.getElementById(b.getAttribute('aria-describedby'))?.textContent.trim() === passTooltip);
+      check(controls.length <= 1, 'ordinary-PassPriority-control-is-unambiguous'); control = controls[0]; return !!control;
+    }, 'real-ordinary-priority-button');
+    control.dataset.qaHandoffTarget = String(++targetSerial); const roots = game().localHistory.entries, submitted = owned.actions.length;
     await input(`[data-qa-handoff-target="${targetSerial}"]`);
-    await until(() => game().localHistory.phase === 'idle' && game().localHistory.entries === roots + 1, 'ordinary-pass-committed'); passes++;
+    await until(() => game().localHistory.phase === 'idle' && game().localHistory.entries === roots + 1, 'ordinary-pass-committed');
+    const authored = owned.actions.slice(submitted);
+    check(authored.length === 1 && authored[0].actor === actor && authored[0].action.type === 'PassPriority' && authored[0].responseType === 'result', 'ordinary-control-submits-only-real-PassPriority-by-selected-actor'); passes++;
   }
   check(getPlayerId() === 0 && game().legalActions.some(a => a.type === 'PlayLand'), 'finite-land-priority-reached');
   const land = game().legalActions.find(a => a.type === 'PlayLand'), objectId = land.data.object_id;
