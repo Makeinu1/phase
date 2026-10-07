@@ -346,8 +346,10 @@ def package():
                 assert all(re.fullmatch('[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*', part) and part not in ['.','..'] for part in relative.split('/'))
                 functions = re.findall(r'^function __wbg_get_imports\(\) \{\n(.*?)^\}', glue, re.M | re.S); assert len(functions) == 1
                 returned = re.findall(r'^    return \{\n([^{}]*)^    \};[ \t]*$', functions[0], re.M); assert len(returned) == 1
-                bindings = re.findall(r"['\"]([^'\"\r\n]+)['\"]:[ \t]*([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*,", returned[0])
-                assert len(re.findall(r"['\"]" + re.escape(module) + r"['\"]\s*:", returned[0])) == 1
+                entry = r'        "([^"\\\r\n]+)": ([A-Za-z_$][A-Za-z0-9_$]*),\n'
+                assert re.fullmatch(r'        __proto__: null,\n(?:' + entry + r')+', returned[0])
+                bindings = re.findall(entry, returned[0])
+                assert sum(path == module for path, _ in bindings) == 1
                 assert [binding for binding in bindings if binding[0] == module or binding[1] == namespace] == [(module, namespace)]
                 assert snippet_files == [relative]
                 assert (output / relative).read_bytes() == Path('crates/engine-wasm/src/experimental-local-worker-realm.js').read_bytes()
@@ -622,8 +624,10 @@ def admit():
                         namespace, module = imports[0]
                         functions = re.findall(r'^function __wbg_get_imports\(\) \{\n(.*?)^\}', glue, re.M | re.S); assert len(functions) == 1
                         returned = re.findall(r'^    return \{\n([^{}]*)^    \};[ \t]*$', functions[0], re.M); assert len(returned) == 1
-                        bindings = re.findall(r"['\"]([^'\"\r\n]+)['\"]:[ \t]*([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*,", returned[0])
-                        assert len(re.findall(r"['\"]" + re.escape(module) + r"['\"]\s*:", returned[0])) == 1
+                        entry = r'        "([^"\\\r\n]+)": ([A-Za-z_$][A-Za-z0-9_$]*),\n'
+                        assert re.fullmatch(r'        __proto__: null,\n(?:' + entry + r')+', returned[0])
+                        bindings = re.findall(entry, returned[0])
+                        assert sum(path == module for path, _ in bindings) == 1
                         assert [binding for binding in bindings if binding[0] == module or binding[1] == namespace] == [(module, namespace)]
                         assert archive.read(snippet) == Path('crates/engine-wasm/src/experimental-local-worker-realm.js').read_bytes()
                     else: assert imports == [] and snippets == set()
