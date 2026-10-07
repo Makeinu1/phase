@@ -1351,6 +1351,7 @@ def adapter_tests():
                            tests_skipped=counts['skipped'], tests_pending=counts['pending'],
                            tests_todo=counts['todo'], tests_disabled=counts['disabled'],
                            all_selected_tests_passed=result.returncode == 0 and counts['passed'] == len(statuses))
+            failure_kinds_identified = True
             for file in report['testResults']:
                 selected = ['client/src/adapter/__tests__/engine-worker.test.ts','client/src/adapter/__tests__/engine-worker-client.test.ts','client/src/adapter/__tests__/wasm-adapter.test.ts']
                 paths = [path for path in selected if Path(file['name']).resolve() == Path(path).resolve()]
@@ -1371,7 +1372,9 @@ def adapter_tests():
                     assert places; line,column = map(int,places[0]); assert 1 <= line <= len(lines) and 1 <= column <= len(lines[line-1]) + 1
                     matcher = re.search(r'\.(to[A-Z][A-Za-z]+)\(', lines[line-1])
                     error_class = next((name for name in ['AssertionError','TypeError','ReferenceError','RangeError','SyntaxError'] if re.search(r'^' + name + ':',text,re.M)),None)
-                    timeout = re.search(r'(?:Test|Hook) timed out in ([1-9][0-9]{0,6})ms',text)
+                    timeout_sentinel = re.match(r'^Error: STACK_TRACE_ERROR(?:\n|$)',text) is not None
+                    failure_code = 'TimeoutExpired' if timeout_sentinel else error_class
+                    timeout = None if timeout_sentinel else re.search(r'(?:Test|Hook) timed out in ([1-9][0-9]{0,6})ms',text)
                     comparison = re.search(r'^AssertionError: expected (true|false|-?[0-9]{1,6}) to (be|equal|be less than|be greater than) (true|false|-?[0-9]{1,6})(?: // Object\.is equality)?$',text,re.M)
                     values = None
                     if comparison:
@@ -1381,14 +1384,15 @@ def adapter_tests():
                         'matcher':matcher[1] if matcher else None,'error_class':error_class,'comparison':values,
                         'timeout_ms':int(timeout[1]) if timeout and int(timeout[1]) <= 1500000 else None,'message_count':len(messages),
                         'dynamic_values_withheld':comparison is None}
+                    failure_kinds_identified &= timeout_sentinel or any(entry[field] is not None for field in ['matcher','error_class','comparison','timeout_ms'])
                     summary['failed_assertions'].append(entry)
                     if len(summary['diagnostic_projection']['diagnostics']) < 3:
-                        summary['diagnostic_projection']['diagnostics'].append({'level':'error','code':error_class,
+                        summary['diagnostic_projection']['diagnostics'].append({'level':'error','code':failure_code,
                             'location':{'path':path,'line':line,'column':column}})
-                        summary['diagnostic_projection']['codes_withheld'] += int(error_class is None)
+                        summary['diagnostic_projection']['codes_withheld'] += int(failure_code is None)
             assert len(summary['failed_assertions']) == counts['failed']
-            summary['failure_output_retained'] = True
-            if counts['failed']: summary['diagnostic_projection']['status'] = 'matched-static-portions'
+            summary['failure_output_retained'] = failure_kinds_identified
+            if counts['failed']: summary['diagnostic_projection']['status'] = 'matched-static-portions' if summary['failure_output_retained'] else 'unknown'
     except Exception as error:
         summary['error'] = 'adapter-report-unavailable'
         summary['diagnostic_projection'] = helper_exception(error)
