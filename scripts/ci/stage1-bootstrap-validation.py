@@ -34,7 +34,7 @@ def receipt_valid(item, label, producer, native, inputs):
     keys = {'label','started_at','source_sha','event_sha','source_tree','argv','input_sha256','environment','guard','preflight',
         'finished_at','exit_code','effective_exit','stop_reason','source_unchanged','.log_sha256','.jsonl_sha256'}
     assert set(item) == keys and item['label'] == label
-    assert item['source_sha'] == 'fb6b25aee964fd5be2e3aba907d48aea339dfcb4' and item['source_tree'] == '0b0206a92943311417afa59f123536fcd8a1b16f'
+    assert item['source_sha'] == '3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a' and item['source_tree'] == '476902cc596151448d4a9ba3964ecebf6985cf62'
     assert item['event_sha'] == producer['sha']
     assert type(item['exit_code']) is int and item['exit_code'] == item['effective_exit'] == 0 and item['stop_reason'] is None and item['source_unchanged'] is True
     assert item['input_sha256'] == {key: inputs[key] for key in ['Cargo.lock','client/pnpm-lock.yaml','rust-toolchain.toml']}
@@ -111,8 +111,8 @@ def source():
         assert event['deleted'] is False
         assert event['after'] == os.environ['GITHUB_WORKFLOW_SHA'] == os.environ['GITHUB_SHA'] == git(validation, 'rev-parse', 'HEAD')
         assert re.fullmatch('[a-f0-9]{40}', os.environ['GITHUB_SHA'])
-        assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == 'fb6b25aee964fd5be2e3aba907d48aea339dfcb4'
-        assert git(source, 'rev-parse', 'HEAD^{tree}') == '0b0206a92943311417afa59f123536fcd8a1b16f'
+        assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == '3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a'
+        assert git(source, 'rev-parse', 'HEAD^{tree}') == '476902cc596151448d4a9ba3964ecebf6985cf62'
         assert git(source, 'status', '--porcelain') == git(validation, 'status', '--porcelain') == ''
         changed = git(validation, 'diff', '--name-only', os.environ['MANUAL_EXPECTED_SOURCE_SHA'], 'HEAD').splitlines()
         assert set(changed) <= {workflow_path, 'scripts/ci/manual-integration-guard.py', 'scripts/ci/stage1-bootstrap-browser.sh', 'scripts/ci/stage1-bootstrap-validation.py'}
@@ -557,7 +557,7 @@ def admit():
                 assert hashlib.sha256(manifest).hexdigest() == record['manifest_sha256']
                 descriptor = json.loads(manifest)
                 assert set(descriptor) == {'schema_version','product','producer','feature','kind','inputs','tools','recipe','files','receipts','raw'} and descriptor['schema_version'] == 1
-                assert descriptor['product'] == {'sha':'fb6b25aee964fd5be2e3aba907d48aea339dfcb4','tree':'0b0206a92943311417afa59f123536fcd8a1b16f'}
+                assert descriptor['product'] == {'sha':'3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a','tree':'476902cc596151448d4a9ba3964ecebf6985cf62'}
                 assert descriptor['producer'] == {name:value for name,value in producer.items() if name != 'job_id'}
                 assert descriptor['feature'] == selected_feature and descriptor['kind'] == kind and descriptor['inputs'] == inputs
                 assert descriptor['recipe'] == recipe(kind,selected_feature) and descriptor['files'] == record['files']
@@ -1132,7 +1132,7 @@ def green():
     complete = value.get('declarations_verified') is True
     source = load('source-manifest.json')
     complete &= source.get('product_equal') is True and source.get('validation_sha') == os.environ['GITHUB_SHA']
-    complete &= source.get('source_sha') == 'fb6b25aee964fd5be2e3aba907d48aea339dfcb4' and source.get('source_tree') == '0b0206a92943311417afa59f123536fcd8a1b16f'
+    complete &= source.get('source_sha') == '3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a' and source.get('source_tree') == '476902cc596151448d4a9ba3964ecebf6985cf62'
     complete &= source.get('guard_sha256') == os.environ['STAGE1_GUARD_SHA256']
     import datetime, re
     inputs = source.get('input_sha256',{})
@@ -1150,7 +1150,7 @@ def green():
             kind = 'native' if key == 'archive' else key
             selected_feature = 'off' if feature == 'native-off' else 'enabled' if native else feature
             descriptor = load(selected_feature + '-' + kind + '-descriptor.json')
-            complete &= descriptor.get('product') == {'sha':'fb6b25aee964fd5be2e3aba907d48aea339dfcb4','tree':'0b0206a92943311417afa59f123536fcd8a1b16f'}
+            complete &= descriptor.get('product') == {'sha':'3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a','tree':'476902cc596151448d4a9ba3964ecebf6985cf62'}
             producer_commands[selected_feature + '-' + kind] = descriptor.get('receipts',{})
             try:
                 assert descriptor.get('recipe') == recipe(kind,selected_feature)
@@ -1202,7 +1202,7 @@ def green():
             'client-types':'pnpm --dir client run type-check','client-lint':'pnpm --dir client run lint --format json',
             'client-protocol':'pnpm --dir client run protocol:check'}
         if label in client_commands: expected_argv = ['bash','-euo','pipefail','-c',client_commands[label]]
-        complete &= bool(record and record.get('source_sha') == expected_sha and record.get('source_tree') == (os.environ['BOOTSTRAP_BASE_TREE'] if label.startswith('baseline-source-') else '0b0206a92943311417afa59f123536fcd8a1b16f') and record.get('label') == label
+        complete &= bool(record and record.get('source_sha') == expected_sha and record.get('source_tree') == (os.environ['BOOTSTRAP_BASE_TREE'] if label.startswith('baseline-source-') else '476902cc596151448d4a9ba3964ecebf6985cf62') and record.get('label') == label
             and record.get('event_sha') == os.environ['GITHUB_SHA'] and record.get('argv') == expected_argv
             and record.get('input_sha256') == {key:source.get('input_sha256',{}).get(key) for key in ['Cargo.lock','client/pnpm-lock.yaml','rust-toolchain.toml']}
             and record.get('exit_code') == record.get('effective_exit') == 0 and record.get('stop_reason') is None and record.get('source_unchanged') is True

@@ -2879,7 +2879,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      MANUAL_EXPECTED_SOURCE_SHA: fb6b25aee964fd5be2e3aba907d48aea339dfcb4
+      MANUAL_EXPECTED_SOURCE_SHA: 3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a
       MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-stage1-native-producer-evidence
       RUST_MIN_STACK: '16777216'
       STAGE1_JOB_NAME: stage1-native-producer
@@ -2887,7 +2887,7 @@ jobs:
     - name: Checkout immutable Stage1 product source
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
-        ref: fb6b25aee964fd5be2e3aba907d48aea339dfcb4
+        ref: 3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a
         path: candidate-source
         persist-credentials: false
     - name: Checkout immutable Stage1 validation source
@@ -3472,7 +3472,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      MANUAL_EXPECTED_SOURCE_SHA: fb6b25aee964fd5be2e3aba907d48aea339dfcb4
+      MANUAL_EXPECTED_SOURCE_SHA: 3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a
       MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-stage1-wasm-producer-evidence
       RUST_MIN_STACK: '16777216'
       STAGE1_JOB_NAME: stage1-wasm-producer
@@ -3480,7 +3480,7 @@ jobs:
     - name: Checkout immutable Stage1 product source
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
-        ref: fb6b25aee964fd5be2e3aba907d48aea339dfcb4
+        ref: 3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a
         path: candidate-source
         persist-credentials: false
     - name: Checkout immutable Stage1 validation source
@@ -4228,7 +4228,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      MANUAL_EXPECTED_SOURCE_SHA: fb6b25aee964fd5be2e3aba907d48aea339dfcb4
+      MANUAL_EXPECTED_SOURCE_SHA: 3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a
       MANUAL_EVIDENCE: ${{ github.workspace }}/bootstrap-stage1-validation-green-evidence
       RUST_MIN_STACK: '16777216'
       STAGE1_JOB_NAME: stage1-validation-green
@@ -4236,7 +4236,7 @@ jobs:
     - name: Checkout immutable Stage1 product source
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       with:
-        ref: fb6b25aee964fd5be2e3aba907d48aea339dfcb4
+        ref: 3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a
         path: candidate-source
         persist-credentials: false
     - name: Checkout immutable Stage1 validation source
