@@ -35,7 +35,7 @@ env:
   BOOTSTRAP_RUNTIME_FILES: '{"engine_wasm.d.ts":{"sha256":"8bc1cc21a04d46529e415df480db3a129baa4f535c21de6b4535c652bac54bab","size":39992},"engine_wasm.js":{"sha256":"4627c04238353d0e2a427b78b802fe1a9437aee87ef27361ff971bc57e85ae9b","size":70262},"engine_wasm_bg.wasm":{"sha256":"ebd72d24d302ec93b471fe84a7e536f3cbce74268d784d33b11b35391d133050","size":129410984},"engine_wasm_bg.wasm.d.ts":{"sha256":"5f945f48384458a2bbd2ea5f1de6037f05f049598444ad851d365e633704bf3b","size":6112}}'
   STAGE1_GUARD_SHA256: 5c299ebede0517de57842c2495ad16aeb1f6b2221df66bb43cbcf4359280ec33
   STAGE1_DIAGNOSTIC_CHECKPOINT: resume
-  STAGE1_NATIVE_OFF_REF: ''
+  STAGE1_NATIVE_OFF_REF: '{"archive":{"kind":"native","feature":"off","producer":{"repository":"Makeinu1/phase","repository_id":1377698441,"sha":"8580c152de07cac67aa6caa646ba6c8f0ef054e3","tree":"08c11c4778d1c9de081b76c1de22bfad5b2dc95d","workflow_path":".github/workflows/wasm-local-bootstrap-validation.yml","workflow_sha256":"3eb278e14a54024c2468694c7ffe61a5a4ccf5c1605b356f18ba46941b4a3f2b","guard_sha256":"5c299ebede0517de57842c2495ad16aeb1f6b2221df66bb43cbcf4359280ec33","run_id":37558382088,"run_attempt":1,"ref":"refs/heads/experiment/manual-wasm-stage1-validation","job_name":"stage1-native-producer","job_id":112589801392},"artifact":{"id":11456115961,"name":"local-worker-bootstrap-stage1-off-native","size":46401991,"sha256":"cab3bf6e4186dc06c98a8de4f5b194dee2b1aafd0de7bbf69e48d54037f0b339"},"manifest_sha256":"bbb2f13d223b0bf94c0b08f35c65b8b8d5a9c4f4f465e3d8a81d853b739a654c","files":{"off.tar.zst":{"size":46703643,"sha256":"4d65cd4b9c7ebc524c75a386b1b21bfeccbd192932b627aa875eb94bdfac6ddc"}}},"checks":null}'
   STAGE1_NATIVE_ENABLED_REF: ''
   STAGE1_WASM_OFF_REF: ''
   STAGE1_WASM_ENABLED_REF: ''

@@ -372,7 +372,7 @@ def package():
 
 
 def pins():
-    import datetime, hashlib, json, os, re, urllib.request
+    import datetime, hashlib, json, os, re, time, urllib.request
     from pathlib import Path
     try:
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -393,14 +393,38 @@ def pins():
         assert datetime.datetime.fromisoformat(metadata['expires_at'].replace('Z','+00:00')) > datetime.datetime.now(datetime.timezone.utc)
         run = metadata['workflow_run']
         assert run['id'] == producer['run_id'] and run['head_sha'] == producer['sha'] and run['repository_id'] == run['head_repository_id'] == 1377698441
-        jobs = api('actions/runs/' + str(producer['run_id']) + '/attempts/1/jobs?per_page=100')
-        assert jobs['total_count'] == len(jobs['jobs']) <= 100
-        selected = [job for job in jobs['jobs'] if job['name'] == producer['job_name']]
-        assert len(selected) == 1 and selected[0]['run_attempt'] == 1
-        job = selected[0]; assert type(job['id']) is int and job['id'] > 0
         boundary = 'Retain ' + feature + ' ' + kind + ' public output'
-        uploads = [step for step in job['steps'] if step['name'] == boundary]
-        assert len(uploads) == 1 and uploads[0]['status'] == 'completed' and uploads[0]['conclusion'] == 'success'
+        job_id = None
+        # The just-finished upload may still be pending in the jobs API. Retry
+        # only that observation, at most five reads and four two-second waits.
+        for attempt in range(1, 6):
+            jobs = api('actions/runs/' + str(producer['run_id']) + '/attempts/1/jobs?per_page=100')
+            assert type(jobs['total_count']) is int and jobs['total_count'] == len(jobs['jobs']) <= 100
+            selected = [job for job in jobs['jobs'] if job['name'] == producer['job_name']]
+            assert len(selected) == 1 and selected[0]['run_attempt'] == 1
+            job = selected[0]; assert type(job['id']) is int and job['id'] > 0
+            assert job_id is None or job['id'] == job_id
+            job_id = job['id']; steps = job['steps']
+            assert isinstance(steps, list) and all(isinstance(step, dict) for step in steps)
+            uploads = [step for step in steps if step['name'] == boundary]
+            upload = uploads[0] if len(uploads) == 1 else {}
+            status, conclusion = upload.get('status'), upload.get('conclusion')
+            statuses = [None, 'queued', 'in_progress', 'completed']
+            conclusions = [None, 'success', 'failure', 'cancelled', 'timed_out', 'skipped', 'action_required', 'neutral', 'stale']
+            print(json.dumps({'upload_metadata_observation':{'attempt':attempt,'job_id':job_id,'matches':len(uploads),
+                'number':upload.get('number') if type(upload.get('number')) is int and 1 <= upload['number'] <= 10000 else None,
+                'job_status':job.get('status') if job.get('status') in statuses[1:] else 'unknown',
+                'status':status if status in statuses else 'unknown','conclusion':conclusion if conclusion in conclusions else 'unknown'}}))
+            numbers = [step['number'] for step in steps]; names = [step['name'] for step in steps]
+            assert all(type(number) is int and number > 0 for number in numbers) and numbers == sorted(set(numbers))
+            assert all(isinstance(name, str) for name in names) and len(names) == len(set(names))
+            assert len(uploads) <= 1 and job['status'] in statuses[1:] and status in statuses and conclusion in conclusions
+            if status == 'completed':
+                assert conclusion == 'success'
+                break
+            assert conclusion is None and job['status'] != 'completed' and attempt < 5
+            time.sleep(2)
+        assert datetime.datetime.fromisoformat(metadata['expires_at'].replace('Z','+00:00')) > datetime.datetime.now(datetime.timezone.utc)
         created = datetime.datetime.fromisoformat(metadata['created_at'].replace('Z','+00:00'))
         assert datetime.datetime.fromisoformat(uploads[0]['started_at'].replace('Z','+00:00')) <= created <= datetime.datetime.fromisoformat(uploads[0]['completed_at'].replace('Z','+00:00'))
         record = {'kind':kind,'feature':feature,'producer':{**producer,'job_id':job['id']},
@@ -484,7 +508,9 @@ def admit():
             elif kind == 'checks': boundaries += ['Check exact Rust formatting','Check exact candidate clippy','Check native checks source after','Package enabled checks public output']
             elif kind == 'raw': boundaries += ['Build the single missing ' + selected_feature + ' WASM','Check ' + selected_feature + ' raw source after','Package ' + selected_feature + ' raw public output']
             else: boundaries += ['Bind the remaining ' + selected_feature + ' WASM','Check ' + selected_feature + ' full source after','Package ' + selected_feature + ' full public output']
-            boundaries += ['Retain ' + selected_feature + ' ' + kind + ' public output','Pin actual ' + selected_feature + ' ' + kind + ' upload metadata']
+            # Admission independently rechecks actual upload metadata and every
+            # artifact byte below; an earlier pin step is not artifact authority.
+            boundaries += ['Retain ' + selected_feature + ' ' + kind + ' public output']
             for name in boundaries:
                 matches = [item for item in steps if item['name'] == name]
                 assert len(matches) == 1 and matches[0]['status'] == 'completed' and matches[0]['conclusion'] == 'success'
@@ -677,11 +703,29 @@ def diagnostic_projection(raw, label, tracked, cwd):
                 'config-type-invalid filesystem-error fixed-config-missing host-mismatch path-missing path-permission-denied '
                 'profile-mismatch required-key-missing target-override text-decode-failed tool-output-empty toolchain-mismatch '
                 'unexpected-error value-parse-failed value-type-invalid version-date-mismatch version-format-invalid version-mismatch').split())
+            upload_observations = 0
             for line in text.splitlines():
                 if not line.startswith('{') or len(line) > 65536: continue
                 try: item = json.loads(line)
                 except ValueError: continue
                 if not isinstance(item,dict): continue
+                if label in ['stage1-off-native-pins','stage1-enabled-native-pins','stage1-enabled-checks-pins',
+                        'stage1-off-raw-pins','stage1-off-full-pins','stage1-enabled-raw-pins','stage1-enabled-full-pins'] and 'upload_metadata_observation' in item:
+                    assert set(item) == {'upload_metadata_observation'}
+                    observation = item['upload_metadata_observation']
+                    assert isinstance(observation,dict) and set(observation) == {'attempt','job_id','matches','number','job_status','status','conclusion'}
+                    upload_observations += 1
+                    assert type(observation['attempt']) is int and observation['attempt'] == upload_observations <= 5
+                    assert type(observation['job_id']) is int and 1 <= observation['job_id'] <= 2**63 - 1
+                    assert type(observation['matches']) is int and 0 <= observation['matches'] <= 1000
+                    assert observation['number'] is None or type(observation['number']) is int and 1 <= observation['number'] <= 10000
+                    assert observation['job_status'] in ['queued','in_progress','completed','unknown']
+                    assert observation['status'] in [None,'queued','in_progress','completed','unknown']
+                    assert observation['conclusion'] in [None,'success','failure','cancelled','timed_out','skipped','action_required','neutral','stale','unknown']
+                    for field in ['attempt','job_id','matches','number','job_status','status','conclusion']:
+                        value['diagnostics'].append({'level':'note','code':'upload-' + field.replace('_','-') + ':' +
+                            ('absent' if observation[field] is None else str(observation[field])),'location':None})
+                    assert len(value['diagnostics']) <= 64
                 projected = item.get('diagnostic_projection')
                 if isinstance(projected,dict):
                     assert set(projected) == {'status','diagnostics','codes_withheld','locations_withheld'}
