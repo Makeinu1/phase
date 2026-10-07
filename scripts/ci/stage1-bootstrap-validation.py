@@ -10,6 +10,11 @@ import hashlib
 import re
 import sys
 
+RUNTIME_SOURCE = {'sha':'3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a','tree':'476902cc596151448d4a9ba3964ecebf6985cf62'}
+CONSUMER_SOURCE = {'sha':'d1fcc3ff19bc02da4701227c95207110411c724b','tree':'69e82d7a3f17fc9e12419c54218333ec73ff4861',
+    'declaration_path':'client/src/wasm/engine_wasm.d.ts','declaration_size':39992,
+    'declaration_sha256':'8bc1cc21a04d46529e415df480db3a129baa4f535c21de6b4535c652bac54bab'}
+
 def digest(path):
     with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
 
@@ -111,10 +116,26 @@ def source():
         assert event['deleted'] is False
         assert event['after'] == os.environ['GITHUB_WORKFLOW_SHA'] == os.environ['GITHUB_SHA'] == git(validation, 'rev-parse', 'HEAD')
         assert re.fullmatch('[a-f0-9]{40}', os.environ['GITHUB_SHA'])
-        assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == '3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a'
-        assert git(source, 'rev-parse', 'HEAD^{tree}') == '476902cc596151448d4a9ba3964ecebf6985cf62'
+        job = os.environ['STAGE1_JOB_NAME']
+        assert job in ['stage1-native-producer','stage1-wasm-producer','stage1-validation-green']
+        role = 'consumer' if job == 'stage1-validation-green' else 'runtime-producer'
+        expected = CONSUMER_SOURCE if role == 'consumer' else RUNTIME_SOURCE
+        assert os.environ['STAGE1_CONSUMER_SHA'] == CONSUMER_SOURCE['sha'] and os.environ['STAGE1_CONSUMER_TREE'] == CONSUMER_SOURCE['tree']
+        assert git(source, 'rev-parse', 'HEAD') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == expected['sha']
+        assert git(source, 'rev-parse', 'HEAD^{tree}') == expected['tree']
         assert git(source, 'status', '--porcelain') == git(validation, 'status', '--porcelain') == ''
-        changed = git(validation, 'diff', '--name-only', os.environ['MANUAL_EXPECTED_SOURCE_SHA'], 'HEAD').splitlines()
+        assert CONSUMER_SOURCE['sha'] != os.environ['GITHUB_SHA']
+        assert git(validation, 'rev-parse', RUNTIME_SOURCE['sha'] + '^{tree}') == RUNTIME_SOURCE['tree']
+        assert git(validation, 'rev-parse', CONSUMER_SOURCE['sha'] + '^{tree}') == CONSUMER_SOURCE['tree']
+        assert git(validation, 'rev-list', '--parents', '-n', '1', CONSUMER_SOURCE['sha']).split() == [CONSUMER_SOURCE['sha'],RUNTIME_SOURCE['sha']]
+        delta = git(validation, 'diff', '--raw', '--no-renames', '--no-abbrev', RUNTIME_SOURCE['sha'], CONSUMER_SOURCE['sha'])
+        assert re.fullmatch(r':100644 100644 [a-f0-9]{40} [a-f0-9]{40} M\t' + re.escape(CONSUMER_SOURCE['declaration_path']), delta)
+        declaration = subprocess.check_output(['git','-C',str(validation),'show',CONSUMER_SOURCE['sha'] + ':' + CONSUMER_SOURCE['declaration_path']])
+        assert len(declaration) == CONSUMER_SOURCE['declaration_size'] and hashlib.sha256(declaration).hexdigest() == CONSUMER_SOURCE['declaration_sha256']
+        if role == 'consumer': assert (source / CONSUMER_SOURCE['declaration_path']).read_bytes() == declaration
+        validation_declaration = (validation / CONSUMER_SOURCE['declaration_path']).read_bytes()
+        assert len(validation_declaration) == 39904 and hashlib.sha256(validation_declaration).hexdigest() == 'ea1186d716535ef7867d9bcdb7838c1e7521074f2aa2584e6891e0fae02004f3'
+        changed = git(validation, 'diff', '--name-only', RUNTIME_SOURCE['sha'], 'HEAD').splitlines()
         assert set(changed) <= {workflow_path, 'scripts/ci/manual-integration-guard.py', 'scripts/ci/stage1-bootstrap-browser.sh', 'scripts/ci/stage1-bootstrap-validation.py'}
         pins = {
             'Cargo.lock': '5285fad7759794f57019d5d73e49cbc35207395b7faf31341da5bc80d32463f0',
@@ -150,7 +171,8 @@ def source():
         value = {'source_sha': os.environ['MANUAL_EXPECTED_SOURCE_SHA'], 'source_tree': git(source, 'rev-parse', 'HEAD^{tree}'),
             'validation_sha': os.environ['GITHUB_SHA'], 'validation_tree': git(validation, 'rev-parse', 'HEAD^{tree}'),
             'workflow_sha256': hashlib.sha256(current.encode()).hexdigest(), 'guard_sha256': guard_hash,
-            'product_equal': True, 'input_sha256': pins, 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': 1}
+            'product_equal': True, 'input_sha256': pins, 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': 1,
+            'source_role': role, 'runtime_source': RUNTIME_SOURCE, 'consumer_source': CONSUMER_SOURCE, 'consumer_declaration_only': True}
         (root / 'source-manifest.json').write_text(json.dumps(value) + '\n')
         print('{"stage1_sources_admitted":true,"product_equal":true}')
     except Exception as error:
@@ -159,7 +181,7 @@ def source():
 
 
 def select():
-    import json, os, re
+    import json, os, re, subprocess
     from pathlib import Path
     try:
         def selected(value, native=False, off=False):
@@ -173,6 +195,15 @@ def select():
             return ('FULL' if record[last] is not None else 'RAW')
         refs = {'native_off': os.environ['STAGE1_NATIVE_OFF_REF'], 'native': os.environ['STAGE1_NATIVE_ENABLED_REF'], 'off': os.environ['STAGE1_WASM_OFF_REF'], 'enabled': os.environ['STAGE1_WASM_ENABLED_REF']}
         states = {key: selected(value, key in ['native_off','native'], key == 'native_off') for key, value in refs.items()}
+        assert states['native_off'] == 'RAW' and states['native'] == states['off'] == 'FULL' and states['enabled'] in ['RAW','FULL']
+        # This immutable checkpoint contains the reviewed, actual saved references.
+        frozen = subprocess.check_output(['git','-C','../validation-source','show',
+            'f4282d932428143cc536fa36107d890cf8ca0bfd:.github/workflows/wasm-local-bootstrap-validation.yml'],text=True)
+        for key, name in [('native_off','STAGE1_NATIVE_OFF_REF'),('native','STAGE1_NATIVE_ENABLED_REF'),('off','STAGE1_WASM_OFF_REF'),('enabled','STAGE1_WASM_ENABLED_REF')]:
+            matches = re.findall(r'^  ' + name + r": '([^'\n]+)'$",frozen,re.M); assert len(matches) == 1
+            expected = json.loads(matches[0]); actual = json.loads(refs[key])
+            if key == 'enabled': assert json.dumps(actual['raw'],sort_keys=True) == json.dumps(expected['raw'],sort_keys=True)
+            else: assert json.dumps(actual,sort_keys=True) == json.dumps(expected,sort_keys=True)
         (Path(os.environ['MANUAL_EVIDENCE']) / 'selection.json').write_text(json.dumps({'states': states, 'product_green': False}) + '\n')
         with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
             for key, state in states.items(): output.write(key + '=' + state + '\n')
@@ -299,11 +330,15 @@ def wasm_tools():
 
 
 def package():
-    import datetime, hashlib, json, os, re, shutil, stat
+    import datetime, hashlib, json, os, re, shutil, stat, subprocess
     from pathlib import Path
     try:
         root = Path(os.environ['MANUAL_EVIDENCE']); temp = Path(os.environ['RUNNER_TEMP'])
         source = json.loads((root / 'source-manifest.json').read_text()); inputs = source['input_sha256']
+        assert source['source_role'] == 'runtime-producer' and source['runtime_source'] == RUNTIME_SOURCE
+        assert source['source_sha'] == RUNTIME_SOURCE['sha'] and source['source_tree'] == RUNTIME_SOURCE['tree']
+        assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == RUNTIME_SOURCE['sha']
+        assert subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip() == RUNTIME_SOURCE['tree']
         feature, kind = os.environ['STAGE1_FEATURE'], os.environ['STAGE1_KIND']
         assert feature in ['off','enabled'] and kind in ['native','checks','raw','full']
         assert kind != 'checks' or feature == 'enabled'
@@ -554,9 +589,56 @@ def admit():
                 if producer['run_id'] == int(os.environ['GITHUB_RUN_ID']): assert job['conclusion'] == 'success'
             if kind == 'raw' and reference['full'] is None and os.environ['STAGE1_REQUIRE_FULL'] == 'false':
                 binding = [item for item in steps if item['name'] == 'Bind the remaining ' + selected_feature + ' WASM']
-                assert len(binding) == 1 and binding[0]['conclusion'] in [None,'skipped']
-                # A completed successful or failed bindgen has spent the one authorized attempt.
-                # RAW retention does not grant another attempt; root owns a new spend decision.
+                assert len(binding) == 1
+                if binding[0]['conclusion'] not in [None,'skipped']:
+                    # One explicit exception for this saved ON RAW, never an ordinary retry.
+                    assert feature == 'enabled' and os.environ['STAGE1_JOB_NAME'] == 'stage1-wasm-producer'
+                    assert binding[0]['status'] == 'completed' and binding[0]['conclusion'] == 'success'
+                    assert os.environ.get('STAGE1_ON_BINDGEN_REVALIDATION') == 'on-raw-11464470377-one-hosted-attempt'
+                    assert source['source_role'] == 'runtime-producer' and source['runtime_source'] == RUNTIME_SOURCE
+                    assert source['source_sha'] == RUNTIME_SOURCE['sha'] and source['source_tree'] == RUNTIME_SOURCE['tree']
+                    assert artifact == {'id':11464470377,'name':'local-worker-bootstrap-stage1-enabled-raw','size':23933560,
+                        'sha256':'0f2d01d9ed001db050929af97fffa990ddebb62c5000aba296cd72a8cf3de43e'}
+                    assert record['manifest_sha256'] == '272aea04543349e484ea465d7e600bc717005ba634747a41792370aa2df5007a'
+                    assert record['files'] == {'engine_wasm.wasm':{'size':132922201,'sha256':'59cd0f90086ce7df1378fcfdee20b9c222408fd2807842684b3193afd6c0de86'}}
+                    assert producer == {'repository':'Makeinu1/phase','repository_id':1377698441,
+                        'sha':'f73810a2949099944a96cec4256f664847c50e32','tree':'322ae3415054028ed9a53a3668c74e26aa3404b3',
+                        'workflow_path':'.github/workflows/wasm-local-bootstrap-validation.yml',
+                        'workflow_sha256':'2ed386faec96d0ebdd51c412ea0c931c3e16cbe0ec65f85a836f4acf999e0aa1',
+                        'guard_sha256':'5c299ebede0517de57842c2495ad16aeb1f6b2221df66bb43cbcf4359280ec33',
+                        'run_id':37576823336,'run_attempt':1,'ref':'refs/heads/experiment/manual-wasm-stage1-validation',
+                        'job_name':'stage1-wasm-producer','job_id':112647733564}
+                    assert os.environ['GITHUB_RUN_ATTEMPT'] == '1' and os.environ['GITHUB_SHA'] == source['validation_sha']
+                    current_id = int(os.environ['GITHUB_RUN_ID']); assert current_id != producer['run_id']
+                    current = api('actions/runs/' + str(current_id) + '/attempts/1')
+                    population = api('actions/runs?branch=experiment%2Fmanual-wasm-stage1-validation&event=push&per_page=100')
+                    assert type(population['total_count']) is int and population['total_count'] == len(population['workflow_runs']) <= 100
+                    ids = [item['id'] for item in population['workflow_runs']]
+                    assert all(type(number) is int and number > 0 for number in ids) and len(ids) == len(set(ids))
+                    assert producer['run_id'] in ids and current_id in ids
+                    later = []
+                    assert re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',run['created_at'])
+                    original_time = datetime.datetime.fromisoformat(run['created_at'].replace('Z','+00:00'))
+                    for item in [current,*population['workflow_runs']]:
+                        assert item['repository']['id'] == item['head_repository']['id'] == 1377698441
+                        assert item['repository']['full_name'] == item['head_repository']['full_name'] == 'Makeinu1/phase'
+                        assert item['path'] == producer['workflow_path'] and item['event'] == 'push' and item['head_branch'] == run['head_branch']
+                        assert re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',item['created_at'])
+                        if item['id'] == producer['run_id']: assert item['created_at'] == run['created_at'] and item['head_sha'] == producer['sha'] and item['run_attempt'] == 1
+                        if item['id'] == current_id:
+                            assert item['head_sha'] == source['validation_sha'] and item['head_commit']['tree_id'] == source['validation_tree']
+                            assert type(item['run_attempt']) is int and item['run_attempt'] == 1 and item['created_at'] == current['created_at']
+                        if item is not current and datetime.datetime.fromisoformat(item['created_at'].replace('Z','+00:00')) > original_time: later.append(item['id'])
+                    assert current['id'] == current_id and later == [current_id]
+                    current_jobs = api('actions/runs/' + str(current_id) + '/attempts/1/jobs?per_page=100')
+                    assert type(current_jobs['total_count']) is int and current_jobs['total_count'] == len(current_jobs['jobs']) <= 100
+                    matches = [item for item in current_jobs['jobs'] if item['name'] == 'stage1-wasm-producer']
+                    assert len(matches) == 1 and matches[0]['run_attempt'] == 1 and matches[0]['status'] == 'in_progress'
+                    assert type(matches[0]['id']) is int and matches[0]['id'] > 0
+                    current_steps = matches[0]['steps']
+                    assert len({item['name'] for item in current_steps}) == len(current_steps)
+                    assert not any(item['name'] == 'Bind the remaining enabled WASM' and
+                        (item.get('started_at') is not None or item['status'] != 'queued' or item.get('conclusion') is not None) for item in current_steps)
             for name,size_key in [(producer['workflow_path'],'workflow_sha256'),('scripts/ci/manual-integration-guard.py','guard_sha256')]:
                 content = api('contents/' + name + '?ref=' + producer['sha'])
                 assert content['encoding'] == 'base64'
@@ -1117,13 +1199,17 @@ def native_tests():
 
 
 def declarations():
-    import json, os, re
+    import hashlib, json, os, re, subprocess
     from pathlib import Path
     root = Path(os.environ['RUNNER_TEMP'])
     off_bytes = (root / 'bootstrap-bindgen-off/engine_wasm.d.ts').read_bytes(); off = off_bytes.decode('utf-8'); on = (root / 'bootstrap-bindgen-enabled/engine_wasm.d.ts').read_text()
+    tracked = Path(CONSUMER_SOURCE['declaration_path']).read_bytes()
+    consumer_matches = (subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == CONSUMER_SOURCE['sha']
+        and subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip() == CONSUMER_SOURCE['tree']
+        and len(tracked) == CONSUMER_SOURCE['declaration_size'] and hashlib.sha256(tracked).hexdigest() == CONSUMER_SOURCE['declaration_sha256'])
     names = lambda text: set(re.findall(r'^export function ([A-Za-z0-9_]+)\(', text, re.M))
     expected = {'initialize_experimental_local_game', 'experimental_local_actor'}
-    passed = (off_bytes == Path('client/src/wasm/engine_wasm.d.ts').read_bytes() and names(on) - names(off) == expected
+    passed = (consumer_matches and off_bytes == tracked and names(on) - names(off) == expected
         and not names(off) - names(on) and not names(off) & expected
         and 'export function initialize_experimental_local_game(request: any): any;' in on
         and 'export function experimental_local_actor(): number | undefined;' in on)
@@ -1194,7 +1280,7 @@ def copy_runtime():
 
 
 def green():
-    import hashlib, json, os
+    import hashlib, json, os, subprocess
     from pathlib import Path
     root = Path(os.environ['MANUAL_EVIDENCE'])
     def load(name):
@@ -1204,7 +1290,24 @@ def green():
     complete = value.get('declarations_verified') is True
     source = load('source-manifest.json')
     complete &= source.get('product_equal') is True and source.get('validation_sha') == os.environ['GITHUB_SHA']
-    complete &= source.get('source_sha') == '3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a' and source.get('source_tree') == '476902cc596151448d4a9ba3964ecebf6985cf62'
+    complete &= set(source) == {'source_sha','source_tree','validation_sha','validation_tree','workflow_sha256','guard_sha256',
+        'product_equal','input_sha256','run_id','run_attempt','source_role','runtime_source','consumer_source','consumer_declaration_only'}
+    complete &= source.get('source_sha') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == CONSUMER_SOURCE['sha'] and source.get('source_tree') == CONSUMER_SOURCE['tree']
+    complete &= source.get('source_role') == 'consumer' and source.get('runtime_source') == RUNTIME_SOURCE
+    complete &= source.get('consumer_source') == CONSUMER_SOURCE and source.get('consumer_declaration_only') is True
+    complete &= os.environ['STAGE1_CONSUMER_SHA'] == CONSUMER_SOURCE['sha'] and os.environ['STAGE1_CONSUMER_TREE'] == CONSUMER_SOURCE['tree']
+    complete &= os.environ['STAGE1_JOB_NAME'] == 'stage1-validation-green' and source.get('run_id') == int(os.environ['GITHUB_RUN_ID']) and source.get('run_attempt') == 1
+    complete &= os.environ['BOOTSTRAP_BASE_SHA'] == '8fcd0f33451058f55b110e707d50497545763615' and os.environ['BOOTSTRAP_BASE_TREE'] == '85f6682f6a2db68e5a67e23719f2126e3d241133'
+    try:
+        assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == CONSUMER_SOURCE['sha']
+        assert subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip() == CONSUMER_SOURCE['tree']
+        assert subprocess.check_output(['git','status','--porcelain'],text=True).strip() == ''
+        assert subprocess.check_output(['git','-C','../validation-source','rev-parse','HEAD'],text=True).strip() == source['validation_sha'] != CONSUMER_SOURCE['sha']
+        assert subprocess.check_output(['git','-C','../validation-source','rev-parse','HEAD^{tree}'],text=True).strip() == source['validation_tree']
+        assert subprocess.check_output(['git','-C','../validation-source','status','--porcelain'],text=True).strip() == ''
+        tracked = Path(CONSUMER_SOURCE['declaration_path']).read_bytes()
+        assert len(tracked) == CONSUMER_SOURCE['declaration_size'] and hashlib.sha256(tracked).hexdigest() == CONSUMER_SOURCE['declaration_sha256']
+    except Exception: complete = False
     complete &= source.get('guard_sha256') == os.environ['STAGE1_GUARD_SHA256']
     import datetime, re
     inputs = source.get('input_sha256',{})
@@ -1259,7 +1362,7 @@ def green():
     for label in labels:
         record = load(label + '.json'); records[label] = record
         before = label in ['stage1-source-before', 'stage1-selection', 'stage1-baseline-identity', 'baseline-source-before', 'stage1-native-off-admission', 'stage1-native-admission', 'stage1-off-admission', 'stage1-enabled-admission']
-        expected_sha = os.environ['BOOTSTRAP_BASE_SHA'] if label.startswith('baseline-source-') else os.environ['MANUAL_EXPECTED_SOURCE_SHA']
+        expected_sha = os.environ['BOOTSTRAP_BASE_SHA'] if label.startswith('baseline-source-') else CONSUMER_SOURCE['sha']
         expected_argv = ['true'] if label in ['stage1-source-before','baseline-source-before','stage1-source-after','baseline-source-after'] else ['bash','-euo','pipefail']
         if label in ['candidate-enabled-browser','candidate-off-browser']:
             expected_argv = ['bash','-euo','pipefail','../validation-source/scripts/ci/stage1-bootstrap-browser.sh']
@@ -1274,7 +1377,7 @@ def green():
             'client-types':'pnpm --dir client run type-check','client-lint':'pnpm --dir client run lint --format json',
             'client-protocol':'pnpm --dir client run protocol:check'}
         if label in client_commands: expected_argv = ['bash','-euo','pipefail','-c',client_commands[label]]
-        complete &= bool(record and record.get('source_sha') == expected_sha and record.get('source_tree') == (os.environ['BOOTSTRAP_BASE_TREE'] if label.startswith('baseline-source-') else '476902cc596151448d4a9ba3964ecebf6985cf62') and record.get('label') == label
+        complete &= bool(record and record.get('source_sha') == expected_sha and record.get('source_tree') == (os.environ['BOOTSTRAP_BASE_TREE'] if label.startswith('baseline-source-') else CONSUMER_SOURCE['tree']) and record.get('label') == label
             and record.get('event_sha') == os.environ['GITHUB_SHA'] and record.get('argv') == expected_argv
             and record.get('input_sha256') == {key:source.get('input_sha256',{}).get(key) for key in ['Cargo.lock','client/pnpm-lock.yaml','rust-toolchain.toml']}
             and record.get('exit_code') == record.get('effective_exit') == 0 and record.get('stop_reason') is None and record.get('source_unchanged') is True
@@ -1315,7 +1418,7 @@ def green():
             'ordinaryDecisionReached': True, 'humanDecisionIssued': True, 'engineIssuedAction': True,
             'snapshotChanged': True, 'replayRecordedOnce': True, 'recordedActionCount': 1}
         observed = rows[0].get('evidence', {}); supplied = observed.get('supplied', {})
-        complete &= supplied.get('candidate_sha') == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] and supplied.get('candidate_tree') == records['stage1-source-before'].get('source_tree')
+        complete &= supplied.get('candidate_sha') == CONSUMER_SOURCE['sha'] and supplied.get('candidate_tree') == CONSUMER_SOURCE['tree'] == records['stage1-source-before'].get('source_tree')
         complete &= supplied.get('baseline_sha') == os.environ['BOOTSTRAP_BASE_SHA'] and supplied.get('baseline_tree') == os.environ['BOOTSTRAP_BASE_TREE']
         artifact_dir = Path(os.environ['RUNNER_TEMP']) / ('bootstrap-bindgen-' + artifact)
         manifest = load(artifact + '-full-descriptor.json')
@@ -1323,12 +1426,19 @@ def green():
             and hashlib.sha256((artifact_dir / name).read_bytes()).hexdigest() == item.get('sha256') for name,item in manifest.get('files',{}).items())
         complete &= observed.get('wasmHash') == hashlib.sha256((artifact_dir / 'engine_wasm_bg.wasm').read_bytes()).hexdigest()
         complete &= supplied.get('glue_sha256') == hashlib.sha256((artifact_dir / 'engine_wasm.js').read_bytes()).hexdigest()
+        complete &= isinstance(observed.get('servedGlueHash'),str) and re.fullmatch('[a-f0-9]{64}',observed['servedGlueHash']) is not None
         expected_keys = {'experimental_local_admission': ['explicitAdmission', 'ordinaryNeverAdmits', 'oldResidentPreserved', 'verifierReadOnly'], 'experimental_strict_requests': ['adapterStrict', 'rawWorkerStrict', 'wasmBoundaryStrict', 'priorOwnerPreserved'], 'experimental_lifecycle': ['failedRestorePreserved', 'checkedRestoreRevoked', 'ordinaryRevoked', 'postureRevoked', 'hostRefused', 'resetRevoked'], 'experimental_privacy_closed': ['privateWireClean', 'manualMutationClosed', 'laterExportsAbsent'], 'experimental_realm_fallback': ['mainThreadRefused', 'fallbackOrdinaryAction', 'fallbackExperimentalRefused'], 'feature_off_refusal': ['refusalPreserved', 'verifierNull', 'ordinaryWorkerLoaded']}
         for row in rows[4:]: complete &= row.get('evidence') == {key: True for key in expected_keys[row['name']]}
-    value.update(checkpoint_mode='stage1-green', product_green=bool(complete), qualifying_baseline_red=False, adapter_assertions=adapter, commands=records, producer_commands=producer_commands, validation_source=source)
+    value.update(checkpoint_mode='stage1-green', product_green=bool(complete), qualifying_baseline_red=False, adapter_assertions=adapter, commands=records, producer_commands=producer_commands, validation_source=source,
+        retained_runtime_source=RUNTIME_SOURCE, declaration_synced_consumer=CONSUMER_SOURCE, current_compile_executed=False)
     (root / 'red-adjudication.json').write_text(json.dumps(value) + '\n')
-    print(json.dumps({'product_green': bool(complete), 'native_selected_total':26,'adapter_selected_total':102}))
-    with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary: summary.write('Stage1 candidate GREEN: ' + str(bool(complete)).lower() + '. Native selected:26. Adapter selected:102.\n')
+    label = '3dae2913生成runtimeをdeclaration同期済みconsumer候補で接続検証'
+    print(json.dumps({'product_green': bool(complete), 'native_selected_total':26,'adapter_selected_total':102,
+        'retained_runtime_source':RUNTIME_SOURCE,'declaration_synced_consumer':CONSUMER_SOURCE,
+        'validation_source':{'sha':source.get('validation_sha'),'tree':source.get('validation_tree')},'current_compile_executed':False,'label':label}))
+    with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+        summary.write(label + ': ' + str(bool(complete)).lower() + '. Native selected:26. Adapter selected:102. Runtime R: ' + RUNTIME_SOURCE['sha'] +
+            '. Consumer C: ' + CONSUMER_SOURCE['sha'] + '. Validation V: ' + str(source.get('validation_sha')) + '. current_compile_executed:false.\n')
     raise SystemExit(0 if complete else 1)
 
 
