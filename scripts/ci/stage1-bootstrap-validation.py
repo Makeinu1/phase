@@ -103,7 +103,7 @@ def source():
     import ast, hashlib, json, os, re, subprocess
     from pathlib import Path
     try:
-        assert os.environ.get('STAGE1_DIAGNOSTIC_CHECKPOINT') in ['fixture-only','resume']
+        assert os.environ.get('STAGE1_DIAGNOSTIC_CHECKPOINT') in ['fixture-only','resume','adapter-only']
         def git(source, *args):
             return subprocess.check_output(['git', '-C', str(source), *args], text=True).strip()
         source = Path('.'); validation = Path('../validation-source')
@@ -976,13 +976,19 @@ def diagnostic_projection(raw, label, tracked, cwd):
                     for diagnostic in projected['diagnostics']:
                         assert set(diagnostic) == {'level','code','location'} and diagnostic['level'] == 'error'
                         code = diagnostic['code']; place = diagnostic['location']
-                        if code is not None and code not in exception_codes:
+                        if code is not None and code not in exception_codes and not (label == 'client-adapter-tests' and code in ['ReferenceError','RangeError','SyntaxError']):
                             assert isinstance(code,str)
                             if code.startswith('errno:'): assert re.fullmatch(r'errno:[1-9][0-9]{0,3}',code) and int(code[6:]) <= 4095
                             else: assert re.fullmatch(r'child-exit:-?(?:0|[1-9][0-9]{0,2})',code) and -255 <= int(code[11:]) <= 255
                         if place is not None:
-                            assert set(place) == {'path','line','column'} and place['path'] == 'scripts/ci/stage1-bootstrap-validation.py'
-                            assert type(place['line']) is int and 1 <= place['line'] <= len(Path(__file__).read_text().splitlines()) and type(place['column']) is int and place['column'] == 1
+                            assert set(place) == {'path','line','column'}
+                            if label == 'client-adapter-tests' and place['path'] in ['client/src/adapter/__tests__/engine-worker.test.ts','client/src/adapter/__tests__/engine-worker-client.test.ts','client/src/adapter/__tests__/wasm-adapter.test.ts']:
+                                assert type(place['line']) is int and type(place['column']) is int
+                                lines = Path(place['path']).read_text().splitlines()
+                                assert 1 <= place['line'] <= len(lines) and 1 <= place['column'] <= len(lines[place['line']-1]) + 1
+                            else:
+                                assert place['path'] == 'scripts/ci/stage1-bootstrap-validation.py'
+                                assert type(place['line']) is int and 1 <= place['line'] <= len(Path(__file__).read_text().splitlines()) and type(place['column']) is int and place['column'] == 1
                         assert len(value['diagnostics']) < 64
                         value['diagnostics'].append({'level':'error','code':code,'location':place})
                     value['codes_withheld'] += projected['codes_withheld']; value['locations_withheld'] += projected['locations_withheld']
@@ -1306,7 +1312,7 @@ def declarations():
 
 
 def adapter_tests():
-    import json, os, subprocess
+    import json, os, re, subprocess
     from pathlib import Path
     summary = {'runner_exit_code': None, 'report_valid': False, 'all_selected_tests_passed': False}
     result = None
@@ -1321,6 +1327,9 @@ def adapter_tests():
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace',
             env={**os.environ, 'NO_COLOR': '1', 'FORCE_COLOR': '0'})
         summary['runner_exit_code'] = result.returncode
+        summary.update(runner_stdout_bytes=len(result.stdout.encode('utf-8')), runner_stderr_bytes=len(result.stderr.encode('utf-8')),
+            failed_assertions=[], failure_output_retained=False)
+        assert summary['runner_stdout_bytes'] <= 4*1024**2
         summary['diagnostic_projection'] = {'status':'unknown','diagnostics':[], 'codes_withheld':0,'locations_withheld':0}
         if len(result.stderr) <= 65536:
             for literal, code in [('No such file or directory (os error 2)','path-missing'),
@@ -1342,9 +1351,48 @@ def adapter_tests():
                            tests_skipped=counts['skipped'], tests_pending=counts['pending'],
                            tests_todo=counts['todo'], tests_disabled=counts['disabled'],
                            all_selected_tests_passed=result.returncode == 0 and counts['passed'] == len(statuses))
+            for file in report['testResults']:
+                selected = ['client/src/adapter/__tests__/engine-worker.test.ts','client/src/adapter/__tests__/engine-worker-client.test.ts','client/src/adapter/__tests__/wasm-adapter.test.ts']
+                paths = [path for path in selected if Path(file['name']).resolve() == Path(path).resolve()]
+                assert len(paths) == 1; path = paths[0]; source = Path(path).read_text(); lines = source.splitlines()
+                literals = re.findall(r'\b(?:describe|it)\(\s*("(?:[^"\\]|\\.)*")',source)
+                titles = {json.loads(literal) for literal in literals}
+                for template in re.findall(r'it\.each\(\[false, true\]\)\(("(?:[^"\\]|\\.)*")',source):
+                    titles.update(json.loads(template).replace('%s',value) for value in ['false','true'])
+                rows = re.search(r'it\.each\(\[\n([\s\S]*?)\n  \]\)\("refuses %s"',source)
+                if rows: titles.update('refuses ' + json.loads(literal) for literal in re.findall(r'^      ("[^"\n]+"),$',rows[1],re.M))
+                for case in file['assertionResults']:
+                    if case['status'] != 'failed': continue
+                    assert case['title'] in titles and all(title in titles for title in case['ancestorTitles'])
+                    messages = case['failureMessages']; assert isinstance(messages,list) and 1 <= len(messages) <= 16
+                    assert all(isinstance(message,str) and len(message) <= 65536 for message in messages)
+                    text = re.sub(r'\x1b\[[0-9;]*m','', '\n'.join(messages))
+                    places = re.findall(re.escape(path.removeprefix('client/')) + r':([1-9][0-9]{0,5}):([1-9][0-9]{0,5})',text)
+                    assert places; line,column = map(int,places[0]); assert 1 <= line <= len(lines) and 1 <= column <= len(lines[line-1]) + 1
+                    matcher = re.search(r'\.(to[A-Z][A-Za-z]+)\(', lines[line-1])
+                    error_class = next((name for name in ['AssertionError','TypeError','ReferenceError','RangeError','SyntaxError'] if re.search(r'^' + name + ':',text,re.M)),None)
+                    timeout = re.search(r'(?:Test|Hook) timed out in ([1-9][0-9]{0,6})ms',text)
+                    comparison = re.search(r'^AssertionError: expected (true|false|-?[0-9]{1,6}) to (be|equal|be less than|be greater than) (true|false|-?[0-9]{1,6})(?: // Object\.is equality)?$',text,re.M)
+                    values = None
+                    if comparison:
+                        left,right = comparison[1],comparison[3]
+                        values = {'operator':comparison[2], 'received':json.loads(left), 'expected':json.loads(right)}
+                    entry = {'name':' > '.join([*case['ancestorTitles'],case['title']]), 'path':path,'line':line,'column':column,
+                        'matcher':matcher[1] if matcher else None,'error_class':error_class,'comparison':values,
+                        'timeout_ms':int(timeout[1]) if timeout and int(timeout[1]) <= 1500000 else None,'message_count':len(messages),
+                        'dynamic_values_withheld':comparison is None}
+                    summary['failed_assertions'].append(entry)
+                    if len(summary['diagnostic_projection']['diagnostics']) < 3:
+                        summary['diagnostic_projection']['diagnostics'].append({'level':'error','code':error_class,
+                            'location':{'path':path,'line':line,'column':column}})
+                        summary['diagnostic_projection']['codes_withheld'] += int(error_class is None)
+            assert len(summary['failed_assertions']) == counts['failed']
+            summary['failure_output_retained'] = True
+            if counts['failed']: summary['diagnostic_projection']['status'] = 'matched-static-portions'
     except Exception as error:
         summary['error'] = 'adapter-report-unavailable'
         summary['diagnostic_projection'] = helper_exception(error)
+        summary['all_selected_tests_passed'] = False
     code = result.returncode if result is not None else 1
     if code == 0 and not summary['all_selected_tests_passed']:
         code = 1
