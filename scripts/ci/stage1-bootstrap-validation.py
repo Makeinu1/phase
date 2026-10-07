@@ -350,6 +350,7 @@ def package():
             raw = json.loads((root / (feature + '-raw-descriptor.json')).read_text())
             assert raw['kind'] == 'raw' and raw['feature'] == feature and raw['product'] == {'sha':source['source_sha'],'tree':source['source_tree']}
             assert raw['tools'] == tools and raw['recipe'] == recipe('raw',feature)
+        staging = temp / ('bootstrap-public-' + feature + '-' + kind)
         files = {}
         for name,item in paths.items():
             info = item.lstat()
@@ -358,14 +359,34 @@ def package():
                     'st_nlink':info.st_nlink,'st_size':info.st_size,'failures':[reason for invalid,reason in [
                         (not stat.S_ISREG(info.st_mode),'not-regular'),(info.st_nlink != 1,'link-count-not-one'),
                         (info.st_size <= 0,'non-positive-size')] if invalid]}}),flush=True)
+                # Cargo's source may be hardlinked; the publication gate checks the independent copy.
+                assert stat.S_ISREG(info.st_mode) and info.st_size > 0
+                original = info; staging.mkdir(); destination = staging / name
+                with os.fdopen(os.open(item,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK),'rb') as stream:
+                    assert os.fstat(stream.fileno()) == original
+                    with destination.open('xb') as copied: shutil.copyfileobj(stream,copied)
+                    stream.seek(0); source_hash = hashlib.file_digest(stream,'sha256').hexdigest()
+                    after = os.fstat(stream.fileno())
+                source_after = item.lstat()
+                assert all(getattr(after,field) == getattr(original,field) == getattr(source_after,field)
+                    for field in ['st_dev','st_ino','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns'])
+                item = destination; paths[name] = item; info = item.lstat()
+                print(json.dumps({'raw_copy_stat_observation':{'is_regular':stat.S_ISREG(info.st_mode),
+                    'st_nlink':info.st_nlink,'st_size':info.st_size,'failures':[reason for invalid,reason in [
+                        (not stat.S_ISREG(info.st_mode),'not-regular'),(info.st_nlink != 1,'link-count-not-one'),
+                        (info.st_size <= 0,'non-positive-size')] if invalid]}}),flush=True)
             assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size > 0
+            if kind == 'raw':
+                assert info.st_uid == os.geteuid() and (info.st_dev,info.st_ino) != (original.st_dev,original.st_ino)
+                assert info.st_size == original.st_size and digest(item) == source_hash
             files[name] = {'size':info.st_size,'sha256':digest(item)}
         descriptor = {'schema_version':1,'product':{'sha':source['source_sha'],'tree':source['source_tree']},'producer':producer,
             'feature':feature,'kind':kind,'inputs':inputs,'tools':tools,'recipe':recipe(kind,feature),'files':files,'receipts':records,'raw':raw}
-        staging = temp / ('bootstrap-public-' + feature + '-' + kind); staging.mkdir()
-        for name,item in paths.items():
-            destination = staging / name; destination.parent.mkdir(parents=True,exist_ok=True)
-            shutil.copyfile(item,destination); assert digest(destination) == files[name]['sha256']
+        if kind != 'raw':
+            staging.mkdir()
+            for name,item in paths.items():
+                destination = staging / name; destination.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copyfile(item,destination); assert digest(destination) == files[name]['sha256']
         (staging / 'runtime-provenance.json').write_text(json.dumps(descriptor,sort_keys=True,indent=2) + '\n')
         (root / (feature + '-' + kind + '-descriptor.json')).write_text(json.dumps(descriptor) + '\n')
         with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
@@ -709,31 +730,36 @@ def diagnostic_projection(raw, label, tracked, cwd):
                 'profile-mismatch required-key-missing target-override text-decode-failed tool-output-empty toolchain-mismatch '
                 'unexpected-error value-parse-failed value-type-invalid version-date-mismatch version-format-invalid version-mismatch').split())
             upload_observations = 0
-            raw_stat_observations = 0
+            raw_stat_observations = set()
             for line in text.splitlines():
-                if label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and '"raw_input_stat_observation"' in line:
+                raw_stat_marker = any('"' + marker + '"' in line for marker in ['raw_input_stat_observation','raw_copy_stat_observation'])
+                if label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and raw_stat_marker:
                     assert line.startswith('{') and len(line) <= 65536
                 if not line.startswith('{') or len(line) > 65536: continue
                 try: item = json.loads(line)
                 except ValueError:
-                    assert label not in ['stage1-off-raw-package','stage1-enabled-raw-package'] or '"raw_input_stat_observation"' not in line
+                    assert label not in ['stage1-off-raw-package','stage1-enabled-raw-package'] or not raw_stat_marker
                     continue
                 if not isinstance(item,dict): continue
-                if 'raw_input_stat_observation' in item:
-                    assert label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and set(item) == {'raw_input_stat_observation'}
-                    observation = item['raw_input_stat_observation']
+                if 'raw_input_stat_observation' in item or 'raw_copy_stat_observation' in item:
+                    marker = 'raw_input_stat_observation' if 'raw_input_stat_observation' in item else 'raw_copy_stat_observation'
+                    assert label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and set(item) == {marker}
+                    observation = item[marker]
                     assert isinstance(observation,dict) and set(observation) == {'is_regular','st_nlink','st_size','failures'}
                     pairs = json.loads(line,object_pairs_hook=list)
                     assert len(pairs) == 1 and len(pairs[0][1]) == 4
-                    raw_stat_observations += 1; assert raw_stat_observations == 1
+                    assert marker not in raw_stat_observations; raw_stat_observations.add(marker)
                     assert type(observation['is_regular']) is bool
                     assert all(type(observation[field]) is int and 0 <= observation[field] <= 2**63 - 1 for field in ['st_nlink','st_size'])
                     failures = [reason for invalid,reason in [(not observation['is_regular'],'not-regular'),
                         (observation['st_nlink'] != 1,'link-count-not-one'),(observation['st_size'] <= 0,'non-positive-size')] if invalid]
                     assert type(observation['failures']) is list and observation['failures'] == failures
+                    prefix = 'raw-stat-' if marker == 'raw_input_stat_observation' else 'raw-copy-stat-'
+                    value['diagnostics'].append({'level':'note','code':prefix + 'role:' +
+                        ('source' if marker == 'raw_input_stat_observation' else 'published-copy'),'location':None})
                     for field in ['is_regular','st_nlink','st_size']:
-                        value['diagnostics'].append({'level':'note','code':'raw-stat-' + field.replace('_','-') + ':' + str(observation[field]).lower(),'location':None})
-                    value['diagnostics'].extend({'level':'note','code':'raw-stat-failure:' + reason,'location':None} for reason in failures or ['none'])
+                        value['diagnostics'].append({'level':'note','code':prefix + field.replace('_','-') + ':' + str(observation[field]).lower(),'location':None})
+                    value['diagnostics'].extend({'level':'note','code':prefix + 'failure:' + reason,'location':None} for reason in failures or ['none'])
                     assert len(value['diagnostics']) <= 64
                 if label in ['stage1-off-native-pins','stage1-enabled-native-pins','stage1-enabled-checks-pins',
                         'stage1-off-raw-pins','stage1-off-full-pins','stage1-enabled-raw-pins','stage1-enabled-full-pins'] and 'upload_metadata_observation' in item:
