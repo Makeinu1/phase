@@ -33,7 +33,8 @@ env:
   BOOTSTRAP_RUNTIME_ZIP_SIZE: '23323649'
   BOOTSTRAP_PROVENANCE_SHA256: '4b6bbd36a78d3a3055d3b159d130962b609a3ac5c8120bff1b3eade7fd79f0cd'
   BOOTSTRAP_RUNTIME_FILES: '{"engine_wasm.d.ts":{"sha256":"8bc1cc21a04d46529e415df480db3a129baa4f535c21de6b4535c652bac54bab","size":39992},"engine_wasm.js":{"sha256":"4627c04238353d0e2a427b78b802fe1a9437aee87ef27361ff971bc57e85ae9b","size":70262},"engine_wasm_bg.wasm":{"sha256":"ebd72d24d302ec93b471fe84a7e536f3cbce74268d784d33b11b35391d133050","size":129410984},"engine_wasm_bg.wasm.d.ts":{"sha256":"5f945f48384458a2bbd2ea5f1de6037f05f049598444ad851d365e633704bf3b","size":6112}}'
-  STAGE1_GUARD_SHA256: efd477e5cdfc4cdc645546287de00649922f9458f33151d7aafaee4640b62aee
+  STAGE1_GUARD_SHA256: 5c299ebede0517de57842c2495ad16aeb1f6b2221df66bb43cbcf4359280ec33
+  STAGE1_DIAGNOSTIC_CHECKPOINT: fixture-only
   STAGE1_NATIVE_OFF_REF: ''
   STAGE1_NATIVE_ENABLED_REF: ''
   STAGE1_WASM_OFF_REF: ''
@@ -2899,7 +2900,15 @@ jobs:
     - name: Admit clean immutable Stage1 sources
       working-directory: candidate-source
       run: |
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source 2>/dev/null
+        mkdir -p "$MANUAL_EVIDENCE"
+        set +e
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source > "$MANUAL_EVIDENCE/stage1-source-admission.control.log" 2>&1
+        command_code=$?
+        printf '{"label":"stage1-source-admission","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-source-admission.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
       id: source-admission
     - name: Capture Stage1 resource preflight
       working-directory: candidate-source
@@ -2907,10 +2916,28 @@ jobs:
         export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-native-target"
         printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true > "$MANUAL_EVIDENCE/stage1-source-before.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before >> "$MANUAL_EVIDENCE/stage1-source-before.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-source-before","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-source-before.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$projection_code"
+    - name: Capture intentional Stage1 public diagnostic failure
+      working-directory: candidate-source
+      if: env.STAGE1_DIAGNOSTIC_CHECKPOINT == 'fixture-only'
+      run: |
+        set +e
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-diagnostic-fixture python3 -c 'import os; os.write(1,b"STAGE1_PUBLIC_FIXTURE_STDOUT\n"); os.write(2,b"STAGE1_PUBLIC_FIXTURE_STDERR unparsed archive diagnostic\n"); raise SystemExit(37)' > "$MANUAL_EVIDENCE/stage1-diagnostic-fixture.control.log" 2>&1
+        command_code=$?
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-diagnostic-fixture >> "$MANUAL_EVIDENCE/stage1-diagnostic-fixture.control.log" 2>&1
+        projection_code=$?
+        printf '{"label":"stage1-diagnostic-fixture","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-diagnostic-fixture.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -2918,10 +2945,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select > "$MANUAL_EVIDENCE/stage1-selection.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection >> "$MANUAL_EVIDENCE/stage1-selection.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-selection","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-selection.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -2929,15 +2959,25 @@ jobs:
     - name: Create external native archive directory
       working-directory: candidate-source
       run: |
-        mkdir "$RUNNER_TEMP/bootstrap-native-archives"
+        set +e
+        mkdir "$RUNNER_TEMP/bootstrap-native-archives" > "$MANUAL_EVIDENCE/stage1-output-directory.control.log" 2>&1
+        command_code=$?
+        printf '{"label":"stage1-output-directory","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-output-directory.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
     - name: Admit retained off native archive
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-off-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-off-admission >> "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-native-off-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -2951,10 +2991,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-native-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission >> "$MANUAL_EVIDENCE/stage1-native-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-native-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-native-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -2982,10 +3025,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tools 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tools > "$MANUAL_EVIDENCE/stage1-rust-tools.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools >> "$MANUAL_EVIDENCE/stage1-rust-tools.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-rust-tools","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-rust-tools.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -2994,10 +3040,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-off-archive bash -euo pipefail -c 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config '"'"'profile.test.codegen-backend="cranelift"'"'"' -p engine-wasm --lib --no-default-features --archive-file "$RUNNER_TEMP/bootstrap-native-archives/off.tar.zst" >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-off-archive bash -euo pipefail -c 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config '"'"'profile.test.codegen-backend="cranelift"'"'"' -p engine-wasm --lib --no-default-features --archive-file "$RUNNER_TEMP/bootstrap-native-archives/off.tar.zst"' > "$MANUAL_EVIDENCE/candidate-native-off-archive.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-off-archive 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-off-archive >> "$MANUAL_EVIDENCE/candidate-native-off-archive.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-native-off-archive","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-native-off-archive.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3006,10 +3055,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-off-archive-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-off-archive-source-after true > "$MANUAL_EVIDENCE/native-off-archive-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-off-archive-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-off-archive-source-after >> "$MANUAL_EVIDENCE/native-off-archive-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"native-off-archive-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/native-off-archive-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3018,10 +3070,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-native-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-native-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package > "$MANUAL_EVIDENCE/stage1-off-native-package.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-native-package 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-native-package >> "$MANUAL_EVIDENCE/stage1-off-native-package.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-native-package","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-native-package.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3044,10 +3099,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-native-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-native-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins > "$MANUAL_EVIDENCE/stage1-off-native-pins.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-native-pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-native-pins >> "$MANUAL_EVIDENCE/stage1-off-native-pins.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-native-pins","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-native-pins.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3076,10 +3134,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-enabled-archive bash -euo pipefail -c 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config '"'"'profile.test.codegen-backend="cranelift"'"'"' -p engine-wasm --lib --no-default-features --features manual_resolution_local_bootstrap --archive-file "$RUNNER_TEMP/bootstrap-native-archives/enabled.tar.zst" >/dev/null 2>&1' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-enabled-archive bash -euo pipefail -c 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config '"'"'profile.test.codegen-backend="cranelift"'"'"' -p engine-wasm --lib --no-default-features --features manual_resolution_local_bootstrap --archive-file "$RUNNER_TEMP/bootstrap-native-archives/enabled.tar.zst"' > "$MANUAL_EVIDENCE/candidate-native-enabled-archive.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-enabled-archive 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-enabled-archive >> "$MANUAL_EVIDENCE/candidate-native-enabled-archive.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-native-enabled-archive","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-native-enabled-archive.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3088,10 +3149,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-archive-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-archive-source-after true > "$MANUAL_EVIDENCE/native-archive-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-archive-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-archive-source-after >> "$MANUAL_EVIDENCE/native-archive-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"native-archive-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/native-archive-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3100,10 +3164,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-native-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-native-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package > "$MANUAL_EVIDENCE/stage1-enabled-native-package.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-native-package 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-native-package >> "$MANUAL_EVIDENCE/stage1-enabled-native-package.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-native-package","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-native-package.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3126,10 +3193,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-native-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-native-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins > "$MANUAL_EVIDENCE/stage1-enabled-native-pins.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-native-pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-native-pins >> "$MANUAL_EVIDENCE/stage1-enabled-native-pins.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-native-pins","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-native-pins.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3158,10 +3228,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs crates/engine/src/game/effects/life.rs' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-format bash -euo pipefail -c 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs crates/engine/src/game/effects/life.rs' > "$MANUAL_EVIDENCE/candidate-format.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-format 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-format >> "$MANUAL_EVIDENCE/candidate-format.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-format","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-format.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3170,10 +3243,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-clippy bash -euo pipefail -c 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\"cranelift\"" --message-format=json -- -D warnings' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-clippy bash -euo pipefail -c 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\"cranelift\"" --message-format=json -- -D warnings' > "$MANUAL_EVIDENCE/candidate-clippy.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-clippy 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-clippy >> "$MANUAL_EVIDENCE/candidate-clippy.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-clippy","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-clippy.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3182,10 +3258,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-checks-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py native-checks-source-after true > "$MANUAL_EVIDENCE/native-checks-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-checks-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" native-checks-source-after >> "$MANUAL_EVIDENCE/native-checks-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"native-checks-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/native-checks-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3194,10 +3273,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-checks-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-checks-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package > "$MANUAL_EVIDENCE/stage1-enabled-checks-package.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-checks-package 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-checks-package >> "$MANUAL_EVIDENCE/stage1-enabled-checks-package.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-checks-package","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-checks-package.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3220,10 +3302,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-checks-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-checks-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins > "$MANUAL_EVIDENCE/stage1-enabled-checks-pins.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-checks-pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-checks-pins >> "$MANUAL_EVIDENCE/stage1-enabled-checks-pins.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-checks-pins","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-checks-pins.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3252,10 +3337,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true > "$MANUAL_EVIDENCE/stage1-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after >> "$MANUAL_EVIDENCE/stage1-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3263,7 +3351,8 @@ jobs:
     - name: Expose admitted native reference
       working-directory: candidate-source
       run: |
-        python3 - 2>/dev/null <<'STAGE1_REFERENCES'
+        set +e
+        python3 - > "$MANUAL_EVIDENCE/stage1-reference-output.control.log" 2>&1 <<'STAGE1_REFERENCES'
         import json, os
         from pathlib import Path
         try:
@@ -3280,6 +3369,12 @@ jobs:
             print('{"error":"stage1-complete-reference-missing"}')
             raise SystemExit(1)
         STAGE1_REFERENCES
+        command_code=$?
+        printf '{"label":"stage1-reference-output","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-reference-output.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
       id: references
     - name: Retain exact safe Stage1 evidence
       id: evidence-upload
@@ -3335,6 +3430,36 @@ jobs:
           bootstrap-stage1-native-producer-evidence/stage1-enabled-checks-pins-result.json
           bootstrap-stage1-native-producer-evidence/stage1-source-after.json
           bootstrap-stage1-native-producer-evidence/stage1-source-after-result.json
+          bootstrap-stage1-native-producer-evidence/stage1-source-before.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-diagnostic-fixture.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-selection.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-native-off-admission.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-native-admission.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-rust-tools.control.log
+          bootstrap-stage1-native-producer-evidence/candidate-native-off-archive.control.log
+          bootstrap-stage1-native-producer-evidence/native-off-archive-source-after.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-off-native-package.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-off-native-pins.control.log
+          bootstrap-stage1-native-producer-evidence/candidate-native-enabled-archive.control.log
+          bootstrap-stage1-native-producer-evidence/native-archive-source-after.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-native-package.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-native-pins.control.log
+          bootstrap-stage1-native-producer-evidence/candidate-format.control.log
+          bootstrap-stage1-native-producer-evidence/candidate-clippy.control.log
+          bootstrap-stage1-native-producer-evidence/native-checks-source-after.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-checks-package.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-enabled-checks-pins.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-source-after.control.log
+          bootstrap-stage1-native-producer-evidence/candidate-native-off-archive.log
+          bootstrap-stage1-native-producer-evidence/candidate-native-enabled-archive.log
+          bootstrap-stage1-native-producer-evidence/candidate-format.log
+          bootstrap-stage1-native-producer-evidence/candidate-clippy.log
+          bootstrap-stage1-native-producer-evidence/stage1-diagnostic-fixture.log
+          bootstrap-stage1-native-producer-evidence/stage1-source-admission.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-output-directory.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-reference-output.control.log
+          bootstrap-stage1-native-producer-evidence/stage1-diagnostic-fixture.json
+          bootstrap-stage1-native-producer-evidence/stage1-diagnostic-fixture-result.json
         if-no-files-found: error
         retention-days: 7
         overwrite: false
@@ -3368,7 +3493,15 @@ jobs:
     - name: Admit clean immutable Stage1 sources
       working-directory: candidate-source
       run: |
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source 2>/dev/null
+        mkdir -p "$MANUAL_EVIDENCE"
+        set +e
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source > "$MANUAL_EVIDENCE/stage1-source-admission.control.log" 2>&1
+        command_code=$?
+        printf '{"label":"stage1-source-admission","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-source-admission.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
       id: source-admission
     - name: Capture Stage1 resource preflight
       working-directory: candidate-source
@@ -3376,10 +3509,13 @@ jobs:
         export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-wasm-target"
         printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true > "$MANUAL_EVIDENCE/stage1-source-before.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before >> "$MANUAL_EVIDENCE/stage1-source-before.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-source-before","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-source-before.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3387,10 +3523,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select > "$MANUAL_EVIDENCE/stage1-selection.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection >> "$MANUAL_EVIDENCE/stage1-selection.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-selection","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-selection.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3398,15 +3537,25 @@ jobs:
     - name: Create external native admission directory
       working-directory: candidate-source
       run: |
-        mkdir "$RUNNER_TEMP/bootstrap-native-archives"
+        set +e
+        mkdir "$RUNNER_TEMP/bootstrap-native-archives" > "$MANUAL_EVIDENCE/stage1-output-directory.control.log" 2>&1
+        command_code=$?
+        printf '{"label":"stage1-output-directory","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-output-directory.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
     - name: Admit chained off native archive
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-off-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-off-admission >> "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-native-off-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3419,10 +3568,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-native-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission >> "$MANUAL_EVIDENCE/stage1-native-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-native-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-native-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3435,10 +3587,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-off-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-admission >> "$MANUAL_EVIDENCE/stage1-off-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3452,10 +3607,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-enabled-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-admission >> "$MANUAL_EVIDENCE/stage1-enabled-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3484,10 +3642,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py wasm-tools 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py wasm-tools > "$MANUAL_EVIDENCE/stage1-rust-tools.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools >> "$MANUAL_EVIDENCE/stage1-rust-tools.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-rust-tools","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-rust-tools.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3496,10 +3657,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-input python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py raw-input 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-input python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py raw-input > "$MANUAL_EVIDENCE/stage1-off-raw-input.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-input 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-input >> "$MANUAL_EVIDENCE/stage1-off-raw-input.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-raw-input","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-raw-input.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3510,10 +3674,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --message-format=json' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --message-format=json' > "$MANUAL_EVIDENCE/candidate-wasm-off-build.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-build 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-build >> "$MANUAL_EVIDENCE/candidate-wasm-off-build.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-wasm-off-build","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-wasm-off-build.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3522,10 +3689,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-off-raw-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-off-raw-source-after true > "$MANUAL_EVIDENCE/wasm-off-raw-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-off-raw-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-off-raw-source-after >> "$MANUAL_EVIDENCE/wasm-off-raw-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"wasm-off-raw-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/wasm-off-raw-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3534,10 +3704,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package > "$MANUAL_EVIDENCE/stage1-off-raw-package.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-package 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-package >> "$MANUAL_EVIDENCE/stage1-off-raw-package.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-raw-package","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-raw-package.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3560,10 +3733,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-raw-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins > "$MANUAL_EVIDENCE/stage1-off-raw-pins.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-raw-pins >> "$MANUAL_EVIDENCE/stage1-off-raw-pins.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-raw-pins","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-raw-pins.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3592,10 +3768,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-off" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-off-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-off" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"' > "$MANUAL_EVIDENCE/candidate-wasm-off-bindgen.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-bindgen 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-off-bindgen >> "$MANUAL_EVIDENCE/candidate-wasm-off-bindgen.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-wasm-off-bindgen","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-wasm-off-bindgen.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3604,10 +3783,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-off-full-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-off-full-source-after true > "$MANUAL_EVIDENCE/wasm-off-full-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-off-full-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-off-full-source-after >> "$MANUAL_EVIDENCE/wasm-off-full-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"wasm-off-full-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/wasm-off-full-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3616,10 +3798,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-full-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-full-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package > "$MANUAL_EVIDENCE/stage1-off-full-package.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-full-package 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-full-package >> "$MANUAL_EVIDENCE/stage1-off-full-package.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-full-package","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-full-package.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3642,10 +3827,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-full-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-full-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins > "$MANUAL_EVIDENCE/stage1-off-full-pins.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-full-pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-full-pins >> "$MANUAL_EVIDENCE/stage1-off-full-pins.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-full-pins","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-full-pins.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3674,10 +3862,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-input python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py raw-input 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-input python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py raw-input > "$MANUAL_EVIDENCE/stage1-enabled-raw-input.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-input 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-input >> "$MANUAL_EVIDENCE/stage1-enabled-raw-input.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-raw-input","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-raw-input.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3688,10 +3879,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --features manual_resolution_local_bootstrap --message-format=json' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-build bash -euo pipefail -c 'cargo build --locked -p engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --no-default-features --features manual_resolution_local_bootstrap --message-format=json' > "$MANUAL_EVIDENCE/candidate-wasm-enabled-build.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-build 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-build >> "$MANUAL_EVIDENCE/candidate-wasm-enabled-build.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-wasm-enabled-build","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-wasm-enabled-build.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3700,10 +3894,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-enabled-raw-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-enabled-raw-source-after true > "$MANUAL_EVIDENCE/wasm-enabled-raw-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-enabled-raw-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-enabled-raw-source-after >> "$MANUAL_EVIDENCE/wasm-enabled-raw-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"wasm-enabled-raw-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/wasm-enabled-raw-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3712,10 +3909,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package > "$MANUAL_EVIDENCE/stage1-enabled-raw-package.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-package 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-package >> "$MANUAL_EVIDENCE/stage1-enabled-raw-package.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-raw-package","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-raw-package.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3738,10 +3938,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-raw-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins > "$MANUAL_EVIDENCE/stage1-enabled-raw-pins.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-raw-pins >> "$MANUAL_EVIDENCE/stage1-enabled-raw-pins.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-raw-pins","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-raw-pins.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3770,10 +3973,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-enabled" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-wasm-enabled-bindgen bash -euo pipefail -c 'wasm-bindgen --target web --out-name engine_wasm --out-dir "$RUNNER_TEMP/bootstrap-bindgen-enabled" "$CARGO_TARGET_DIR/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm"' > "$MANUAL_EVIDENCE/candidate-wasm-enabled-bindgen.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-bindgen 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-wasm-enabled-bindgen >> "$MANUAL_EVIDENCE/candidate-wasm-enabled-bindgen.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-wasm-enabled-bindgen","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-wasm-enabled-bindgen.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3782,10 +3988,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-enabled-full-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py wasm-enabled-full-source-after true > "$MANUAL_EVIDENCE/wasm-enabled-full-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-enabled-full-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" wasm-enabled-full-source-after >> "$MANUAL_EVIDENCE/wasm-enabled-full-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"wasm-enabled-full-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/wasm-enabled-full-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3794,10 +4003,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-full-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-full-package python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py package > "$MANUAL_EVIDENCE/stage1-enabled-full-package.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-full-package 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-full-package >> "$MANUAL_EVIDENCE/stage1-enabled-full-package.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-full-package","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-full-package.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3820,10 +4032,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-full-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-full-pins python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py pins > "$MANUAL_EVIDENCE/stage1-enabled-full-pins.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-full-pins 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-full-pins >> "$MANUAL_EVIDENCE/stage1-enabled-full-pins.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-full-pins","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-full-pins.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3852,10 +4067,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true > "$MANUAL_EVIDENCE/stage1-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after >> "$MANUAL_EVIDENCE/stage1-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -3863,7 +4081,8 @@ jobs:
     - name: Expose admitted two full WASM references
       working-directory: candidate-source
       run: |
-        python3 - 2>/dev/null <<'STAGE1_REFERENCES'
+        set +e
+        python3 - > "$MANUAL_EVIDENCE/stage1-reference-output.control.log" 2>&1 <<'STAGE1_REFERENCES'
         import json, os
         from pathlib import Path
         try:
@@ -3880,6 +4099,12 @@ jobs:
             print('{"error":"stage1-complete-reference-missing"}')
             raise SystemExit(1)
         STAGE1_REFERENCES
+        command_code=$?
+        printf '{"label":"stage1-reference-output","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-reference-output.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
       id: references
     - name: Retain exact safe Stage1 evidence
       id: evidence-upload
@@ -3955,6 +4180,40 @@ jobs:
           bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-package-result.json
           bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-pins.json
           bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-pins-result.json
+          bootstrap-stage1-wasm-producer-evidence/stage1-source-before.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-selection.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-native-off-admission.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-native-admission.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-admission.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-admission.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-rust-tools.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-input.control.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-build.control.log
+          bootstrap-stage1-wasm-producer-evidence/wasm-off-raw-source-after.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-package.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-raw-pins.control.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-bindgen.control.log
+          bootstrap-stage1-wasm-producer-evidence/wasm-off-full-source-after.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-full-package.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-off-full-pins.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-input.control.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-build.control.log
+          bootstrap-stage1-wasm-producer-evidence/wasm-enabled-raw-source-after.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-package.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-raw-pins.control.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-bindgen.control.log
+          bootstrap-stage1-wasm-producer-evidence/wasm-enabled-full-source-after.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-package.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-enabled-full-pins.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-source-after.control.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-build.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-build.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-off-bindgen.log
+          bootstrap-stage1-wasm-producer-evidence/candidate-wasm-enabled-bindgen.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-rust-tools.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-source-admission.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-output-directory.control.log
+          bootstrap-stage1-wasm-producer-evidence/stage1-reference-output.control.log
         if-no-files-found: error
         retention-days: 7
         overwrite: false
@@ -3996,7 +4255,15 @@ jobs:
     - name: Admit clean immutable Stage1 sources
       working-directory: candidate-source
       run: |
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source 2>/dev/null
+        mkdir -p "$MANUAL_EVIDENCE"
+        set +e
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py source > "$MANUAL_EVIDENCE/stage1-source-admission.control.log" 2>&1
+        command_code=$?
+        printf '{"label":"stage1-source-admission","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-source-admission.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
       id: source-admission
     - name: Capture Stage1 resource preflight
       working-directory: candidate-source
@@ -4004,10 +4271,13 @@ jobs:
         export CARGO_TARGET_DIR="$RUNNER_TEMP/bootstrap-native-target"
         printf 'CARGO_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-before true > "$MANUAL_EVIDENCE/stage1-source-before.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-before >> "$MANUAL_EVIDENCE/stage1-source-before.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-source-before","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-source-before.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4015,10 +4285,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-selection python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py select > "$MANUAL_EVIDENCE/stage1-selection.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-selection >> "$MANUAL_EVIDENCE/stage1-selection.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-selection","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-selection.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4027,10 +4300,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-baseline-identity python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py baseline-identity 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-baseline-identity python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py baseline-identity > "$MANUAL_EVIDENCE/stage1-baseline-identity.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-baseline-identity 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-baseline-identity >> "$MANUAL_EVIDENCE/stage1-baseline-identity.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-baseline-identity","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-baseline-identity.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4040,25 +4316,38 @@ jobs:
         cd ../baseline-source
         export MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA"
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-source-before true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-source-before true > "$MANUAL_EVIDENCE/baseline-source-before.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-source-before 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-source-before >> "$MANUAL_EVIDENCE/baseline-source-before.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"baseline-source-before","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/baseline-source-before.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
     - name: Create external native admission directory
       working-directory: candidate-source
       run: |
-        mkdir "$RUNNER_TEMP/bootstrap-native-archives"
+        set +e
+        mkdir "$RUNNER_TEMP/bootstrap-native-archives" > "$MANUAL_EVIDENCE/stage1-output-directory.control.log" 2>&1
+        command_code=$?
+        printf '{"label":"stage1-output-directory","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-output-directory.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
     - name: Admit chained off native archive
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-off-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-off-admission >> "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-native-off-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-native-off-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4071,10 +4360,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-native-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-native-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-native-admission >> "$MANUAL_EVIDENCE/stage1-native-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-native-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-native-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4087,10 +4379,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-off-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-off-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-off-admission >> "$MANUAL_EVIDENCE/stage1-off-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-off-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-off-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4103,10 +4398,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-enabled-admission python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py admit > "$MANUAL_EVIDENCE/stage1-enabled-admission.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-admission 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-enabled-admission >> "$MANUAL_EVIDENCE/stage1-enabled-admission.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-enabled-admission","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-enabled-admission.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4131,10 +4429,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tools 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-rust-tools python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tools > "$MANUAL_EVIDENCE/stage1-rust-tools.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-rust-tools >> "$MANUAL_EVIDENCE/stage1-rust-tools.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-rust-tools","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-rust-tools.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4142,10 +4443,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-current-tools-match python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py tools-match 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-current-tools-match python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py tools-match > "$MANUAL_EVIDENCE/stage1-current-tools-match.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-current-tools-match 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-current-tools-match >> "$MANUAL_EVIDENCE/stage1-current-tools-match.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-current-tools-match","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-current-tools-match.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4153,10 +4457,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-off-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tests 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-off-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tests > "$MANUAL_EVIDENCE/candidate-native-off-tests.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-off-tests 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-off-tests >> "$MANUAL_EVIDENCE/candidate-native-off-tests.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-native-off-tests","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-native-off-tests.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4167,10 +4474,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-enabled-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tests 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-native-enabled-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py native-tests > "$MANUAL_EVIDENCE/candidate-native-enabled-tests.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-enabled-tests 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-native-enabled-tests >> "$MANUAL_EVIDENCE/candidate-native-enabled-tests.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-native-enabled-tests","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-native-enabled-tests.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4181,10 +4491,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-declarations python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py declarations 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py candidate-declarations python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py declarations > "$MANUAL_EVIDENCE/candidate-declarations.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-declarations 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-declarations >> "$MANUAL_EVIDENCE/candidate-declarations.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-declarations","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-declarations.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4200,8 +4513,7 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py hosted-tools bash -euo pipefail 2>/dev/null <<'STAGE1_HOSTED_TOOLS'
-        exec 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py hosted-tools bash -euo pipefail > "$MANUAL_EVIDENCE/hosted-tools.control.log" 2>&1 <<'STAGE1_HOSTED_TOOLS'
         command -v google-chrome curl jq >/dev/null
         driver_binary=$(command -v chromedriver || true)
         if [ -z "$driver_binary" ] && [ -n "${CHROMEWEBDRIVER:-}" ]; then
@@ -4219,8 +4531,11 @@ jobs:
         printf '{"hosted_tools_verified":true}\n'
         STAGE1_HOSTED_TOOLS
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" hosted-tools 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" hosted-tools >> "$MANUAL_EVIDENCE/hosted-tools.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"hosted-tools","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/hosted-tools.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4228,10 +4543,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-dependencies bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-dependencies bash -euo pipefail -c 'pnpm --dir client install --frozen-lockfile' > "$MANUAL_EVIDENCE/client-dependencies.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-dependencies 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-dependencies >> "$MANUAL_EVIDENCE/client-dependencies.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"client-dependencies","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/client-dependencies.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4239,10 +4557,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-types bash -euo pipefail -c 'pnpm --dir client run type-check' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-types bash -euo pipefail -c 'pnpm --dir client run type-check' > "$MANUAL_EVIDENCE/client-types.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-types 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-types >> "$MANUAL_EVIDENCE/client-types.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"client-types","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/client-types.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4250,10 +4571,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-lint bash -euo pipefail -c 'pnpm --dir client run lint --format json' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-lint bash -euo pipefail -c 'pnpm --dir client run lint --format json' > "$MANUAL_EVIDENCE/client-lint.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-lint 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-lint >> "$MANUAL_EVIDENCE/client-lint.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"client-lint","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/client-lint.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4261,10 +4585,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-protocol bash -euo pipefail -c 'pnpm --dir client run protocol:check' 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-protocol bash -euo pipefail -c 'pnpm --dir client run protocol:check' > "$MANUAL_EVIDENCE/client-protocol.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-protocol 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-protocol >> "$MANUAL_EVIDENCE/client-protocol.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"client-protocol","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/client-protocol.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4272,10 +4599,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-runtime-copy python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py copy-runtime 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-runtime-copy python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py copy-runtime > "$MANUAL_EVIDENCE/baseline-runtime-copy.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-runtime-copy 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-runtime-copy >> "$MANUAL_EVIDENCE/baseline-runtime-copy.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"baseline-runtime-copy","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/baseline-runtime-copy.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4283,44 +4613,51 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-adapter-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py adapter-tests 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py client-adapter-tests python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py adapter-tests > "$MANUAL_EVIDENCE/client-adapter-tests.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-adapter-tests 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" client-adapter-tests >> "$MANUAL_EVIDENCE/client-adapter-tests.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"client-adapter-tests","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/client-adapter-tests.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
     - name: Run actual complete candidate enabled page
       working-directory: candidate-source
       run: |
-        exec 2>/dev/null
         export BOOTSTRAP_CANDIDATE_ARTIFACT=enabled
         # Existing hosted browser/driver inventory and direct documented W3C API:
         # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
         # https://developer.chrome.com/docs/chromedriver/get-started
         # https://www.w3.org/TR/webdriver2/#execute-async-script
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail ../validation-source/scripts/ci/stage1-bootstrap-browser.sh
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail ../validation-source/scripts/ci/stage1-bootstrap-browser.sh > "$MANUAL_EVIDENCE/candidate-enabled-browser.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-enabled-browser 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-enabled-browser >> "$MANUAL_EVIDENCE/candidate-enabled-browser.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-enabled-browser","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-enabled-browser.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
     - name: Run actual complete candidate off page
       working-directory: candidate-source
       run: |
-        exec 2>/dev/null
         export BOOTSTRAP_CANDIDATE_ARTIFACT=off
         # Existing hosted browser/driver inventory and direct documented W3C API:
         # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#browsers-and-drivers
         # https://developer.chrome.com/docs/chromedriver/get-started
         # https://www.w3.org/TR/webdriver2/#execute-async-script
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail ../validation-source/scripts/ci/stage1-bootstrap-browser.sh
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" bash -euo pipefail ../validation-source/scripts/ci/stage1-bootstrap-browser.sh > "$MANUAL_EVIDENCE/candidate-off-browser.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-off-browser 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" candidate-off-browser >> "$MANUAL_EVIDENCE/candidate-off-browser.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"candidate-off-browser","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/candidate-off-browser.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4328,10 +4665,13 @@ jobs:
       working-directory: candidate-source
       run: |
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py stage1-source-after true > "$MANUAL_EVIDENCE/stage1-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" stage1-source-after >> "$MANUAL_EVIDENCE/stage1-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"stage1-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/stage1-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4342,10 +4682,13 @@ jobs:
         cd ../baseline-source
         export MANUAL_EXPECTED_SOURCE_SHA="$BOOTSTRAP_BASE_SHA"
         set +e
-        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-source-after true 2>/dev/null
+        python3 ../validation-source/scripts/ci/manual-integration-guard.py baseline-source-after true > "$MANUAL_EVIDENCE/baseline-source-after.control.log" 2>&1
         command_code=$?
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-source-after 2>/dev/null
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$command_code" baseline-source-after >> "$MANUAL_EVIDENCE/baseline-source-after.control.log" 2>&1
         projection_code=$?
+        printf '{"label":"baseline-source-after","command_exit_code":%s,"projection_exit_code":%s}\n' "$command_code" "$projection_code" >> "$MANUAL_EVIDENCE/baseline-source-after.control.log"
+        control_code=$?
+        if [ "$projection_code" -eq 0 ] && [ "$control_code" -ne 0 ]; then projection_code=$control_code; fi
         set -e
         if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
         exit "$projection_code"
@@ -4353,7 +4696,14 @@ jobs:
     - name: Independently adjudicate complete Stage1 candidate GREEN
       working-directory: candidate-source
       run: |
-        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py green 2>/dev/null
+        set +e
+        python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py green > "$MANUAL_EVIDENCE/stage1-green.control.log" 2>&1
+        command_code=$?
+        printf '{"label":"stage1-green","command_exit_code":%s}\n' "$command_code" >> "$MANUAL_EVIDENCE/stage1-green.control.log"
+        control_code=$?
+        set -e
+        if [ "$command_code" -ne 0 ]; then exit "$command_code"; fi
+        exit "$control_code"
       if: always() && steps.source-admission.outcome == 'success'
     - name: Retain exact safe Stage1 evidence
       id: evidence-upload
@@ -4435,6 +4785,40 @@ jobs:
           bootstrap-stage1-validation-green-evidence/stage1-source-after-result.json
           bootstrap-stage1-validation-green-evidence/baseline-source-after.json
           bootstrap-stage1-validation-green-evidence/baseline-source-after-result.json
+          bootstrap-stage1-validation-green-evidence/stage1-source-before.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-selection.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-baseline-identity.control.log
+          bootstrap-stage1-validation-green-evidence/baseline-source-before.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-native-off-admission.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-native-admission.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-off-admission.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-enabled-admission.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-rust-tools.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-current-tools-match.control.log
+          bootstrap-stage1-validation-green-evidence/candidate-native-off-tests.control.log
+          bootstrap-stage1-validation-green-evidence/candidate-native-enabled-tests.control.log
+          bootstrap-stage1-validation-green-evidence/candidate-declarations.control.log
+          bootstrap-stage1-validation-green-evidence/hosted-tools.control.log
+          bootstrap-stage1-validation-green-evidence/client-dependencies.control.log
+          bootstrap-stage1-validation-green-evidence/client-types.control.log
+          bootstrap-stage1-validation-green-evidence/client-lint.control.log
+          bootstrap-stage1-validation-green-evidence/client-protocol.control.log
+          bootstrap-stage1-validation-green-evidence/baseline-runtime-copy.control.log
+          bootstrap-stage1-validation-green-evidence/client-adapter-tests.control.log
+          bootstrap-stage1-validation-green-evidence/candidate-enabled-browser.control.log
+          bootstrap-stage1-validation-green-evidence/candidate-off-browser.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-source-after.control.log
+          bootstrap-stage1-validation-green-evidence/baseline-source-after.control.log
+          bootstrap-stage1-validation-green-evidence/client-types.log
+          bootstrap-stage1-validation-green-evidence/client-lint.log
+          bootstrap-stage1-validation-green-evidence/client-protocol.log
+          bootstrap-stage1-validation-green-evidence/hosted-tools.log
+          bootstrap-stage1-validation-green-evidence/candidate-enabled-browser.log
+          bootstrap-stage1-validation-green-evidence/candidate-off-browser.log
+          bootstrap-stage1-validation-green-evidence/stage1-baseline-identity.log
+          bootstrap-stage1-validation-green-evidence/stage1-source-admission.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-output-directory.control.log
+          bootstrap-stage1-validation-green-evidence/stage1-green.control.log
         if-no-files-found: error
         retention-days: 7
         overwrite: false

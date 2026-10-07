@@ -162,14 +162,34 @@ finally:
     effective_exit = code if code is not None and 0 <= code <= 255 and not reason else 1
     record.update(finished_at=now(), exit_code=code, effective_exit=effective_exit,
                   stop_reason=reason, source_unchanged=source_unchanged)
-    for suffix in [".log", ".jsonl"]:
-        p = evidence / (label + suffix)
-        if p.is_file():
-            record[suffix + "_sha256"] = hashlib.sha256(p.read_bytes()).hexdigest()
-    (evidence / (label + ".json")).write_text(json.dumps(record, indent=2) + "\n")
-    if os.environ.get("GITHUB_OUTPUT"):
-        with Path(os.environ["GITHUB_OUTPUT"]).open("a") as outputs:
-            outputs.write("guard_stopped=" + ("true" if reason else "false") + "\n")
+    latched_exit = effective_exit
+    save_stage = "log-hash"
+    try:
+        for suffix in [".log", ".jsonl"]:
+            p = evidence / (label + suffix)
+            if p.is_file():
+                record[suffix + "_sha256"] = hashlib.sha256(p.read_bytes()).hexdigest()
+        save_stage = "github-output"
+        if os.environ.get("GITHUB_OUTPUT"):
+            with Path(os.environ["GITHUB_OUTPUT"]).open("a") as outputs:
+                outputs.write("guard_stopped=" + ("true" if reason else "false") + "\n")
+        save_stage = "receipt"
+        (evidence / (label + ".json")).write_text(json.dumps(record, indent=2) + "\n")
+    except Exception as error:
+        effective_exit = latched_exit or 1
+        record["effective_exit"] = effective_exit
+        print(json.dumps({"error": "guard-save-failed", "label": label,
+                          "exit_code": code, "effective_exit": effective_exit,
+                          "save_stage": save_stage, "exception_type": type(error).__name__
+                          if type(error).__name__ in {"OSError", "PermissionError", "FileNotFoundError",
+                              "IsADirectoryError", "NotADirectoryError", "ValueError", "TypeError"} else "unknown"}))
+        if save_stage == "github-output":
+            try:
+                (evidence / (label + ".json")).write_text(json.dumps(record, indent=2) + "\n")
+            except Exception:
+                print(json.dumps({"error": "guard-save-failed", "label": label,
+                                  "exit_code": code, "effective_exit": effective_exit,
+                                  "save_stage": "receipt", "exception_type": "unknown"}))
 print(json.dumps({"label": label, "argv": argv, "exit_code": code,
                   "effective_exit": effective_exit, "stop_reason": reason}))
 if effective_exit != 0:

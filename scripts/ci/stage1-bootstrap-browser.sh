@@ -2,6 +2,7 @@
 set -euo pipefail
 # Raw W3C replies and session IDs stay in shell memory. Neither server
 # output nor browser/performance/driver logs are recorded, even on failure.
+exec 3>&1
 exec 2>/dev/null
 session_id=''
 vite_pid=''
@@ -20,16 +21,16 @@ finish() {
   cleanup
   set +e
   python3 ../validation-source/scripts/ci/stage1-bootstrap-validation.py safe-result "$browser_code" \
-    "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" "$browser_stage"
+    "candidate-$BOOTSTRAP_CANDIDATE_ARTIFACT-browser" "$browser_stage" 2>&3
   projection_code=$?
   if [ "$browser_code" -ne 0 ]; then exit "$browser_code"; fi
   exit "$projection_code"
 }
 trap finish EXIT
 trap 'printf "{\"error\":\"browser-command-failed\"}\n"' ERR
-cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js
-cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm
-if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/; fi
+cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm.js" client/src/wasm/engine_wasm.js 2>&3
+cp "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/engine_wasm_bg.wasm" client/src/wasm/engine_wasm_bg.wasm 2>&3
+if [ -d "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" ]; then cp -R "$RUNNER_TEMP/bootstrap-bindgen-$BOOTSTRAP_CANDIDATE_ARTIFACT/snippets" client/src/wasm/ 2>&3; fi
 browser_stage='server-start'
 TELEMETRY_URL='' pnpm --dir client dev --host 127.0.0.1 --port 5173 --strictPort \
   >/dev/null 2>&1 &
@@ -40,22 +41,22 @@ driver_pid=$!
 # One bounded startup interval and one preflight request; no polling or retry.
 sleep 5
 browser_stage='server-ready'
-kill -0 "$vite_pid" "$driver_pid"
+kill -0 "$vite_pid" "$driver_pid" 2>&3
 driver_status=$(curl --fail --silent --max-time 10 http://127.0.0.1:9515/status)
 printf '%s' "$driver_status" | jq -e '.value.ready == true' >/dev/null
 browser_stage='served-identity'
 served_glue_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm.js \
-  | sha256sum | cut -d ' ' -f 1)
+  | sha256sum 2>&3 | cut -d ' ' -f 1 2>&3)
 served_wasm_hash=$(curl --fail --silent --max-time 30 http://127.0.0.1:5173/src/wasm/engine_wasm_bg.wasm \
-  | sha256sum | cut -d ' ' -f 1)
-wasm_hash=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | cut -d ' ' -f 1)
-glue_hash=$(sha256sum client/src/wasm/engine_wasm.js | cut -d ' ' -f 1)
+  | sha256sum 2>&3 | cut -d ' ' -f 1 2>&3)
+wasm_hash=$(sha256sum client/src/wasm/engine_wasm_bg.wasm 2>&3 | cut -d ' ' -f 1 2>&3)
+glue_hash=$(sha256sum client/src/wasm/engine_wasm.js 2>&3 | cut -d ' ' -f 1 2>&3)
 test "$served_wasm_hash" = "$wasm_hash"
 printf '%s  served-engine-glue\n%s  served-engine-wasm\n' "$served_glue_hash" "$served_wasm_hash" \
-  > "$MANUAL_EVIDENCE/served-artifacts.sha256"
+  > "$MANUAL_EVIDENCE/served-artifacts.sha256" 2>&3
 browser_stage='source-identity'
-baseline_tree=$(git -C ../baseline-source rev-parse HEAD^{tree})
-candidate_tree=$(git rev-parse HEAD^{tree})
+baseline_tree=$(git -C ../baseline-source rev-parse HEAD^{tree} 2>&3)
+candidate_tree=$(git rev-parse HEAD^{tree} 2>&3)
 url="http://127.0.0.1:5173/manual-resolution-wasm-worker.html?artifact=$BOOTSTRAP_CANDIDATE_ARTIFACT&baseline_sha=$BOOTSTRAP_BASE_SHA&candidate_sha=$MANUAL_EXPECTED_SOURCE_SHA&baseline_tree=$baseline_tree&candidate_tree=$candidate_tree&wasm_sha256=$wasm_hash&glue_sha256=$glue_hash&served_glue_sha256=$served_glue_hash"
 browser_stage='session-create'
 session_response=$(jq -n --arg binary "$(command -v google-chrome)" \
@@ -136,9 +137,9 @@ printf '%s' "$terminal_response" | jq -c '
       else (.evidence // {}) | with_entries(select(.key | IN("explicitAdmission","ordinaryNeverAdmits","oldResidentPreserved","verifierReadOnly","adapterStrict","rawWorkerStrict","wasmBoundaryStrict","priorOwnerPreserved","failedRestorePreserved","checkedRestoreRevoked","ordinaryRevoked","postureRevoked","hostRefused","resetRevoked","privateWireClean","manualMutationClosed","laterExportsAbsent","mainThreadRefused","fallbackOrdinaryAction","fallbackExperimentalRefused","refusalPreserved","verifierNull","ordinaryWorkerLoaded"))) | map_values(boolean) end)}]}' > "$MANUAL_EVIDENCE/product-terminal.json"
 jq -c '{status,reason,error,caseId,stage,rows:[.rows[] | {name,status,error,caseId,stage,controls:
   (if (.evidence | type) == "array" then (.evidence | length) else null end)}]}' \
-  "$MANUAL_EVIDENCE/product-terminal.json"
+  "$MANUAL_EVIDENCE/product-terminal.json" 2>&3
 browser_stage='terminal-save'
-python3 - <<'SAVE'
+python3 - 2>&3 <<'SAVE'
 import json, os
 from pathlib import Path
 root = Path(os.environ['MANUAL_EVIDENCE']); path = root / 'baseline-terminal.json'
@@ -147,4 +148,4 @@ value[os.environ['BOOTSTRAP_CANDIDATE_ARTIFACT']] = json.loads((root / 'product-
 path.write_text(json.dumps(value) + '\n')
 SAVE
 browser_stage='terminal-gate'
-jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null
+jq -e '.status == "pass" and .reason == "candidate-green" and ([.rows[] | select(.status != "pass")] | length == 0)' "$MANUAL_EVIDENCE/product-terminal.json" >/dev/null 2>&3

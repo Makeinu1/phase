@@ -58,8 +58,8 @@ def receipt_valid(item, label, producer, native, inputs):
         actual = item['argv'][4].strip()
         feature = 'enabled' if '-enabled-' in label else 'off'
         commands = {
-            'candidate-native-off-archive': 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config \'profile.test.codegen-backend="cranelift"\' -p engine-wasm --lib --no-default-features --archive-file "$RUNNER_TEMP/bootstrap-native-archives/off.tar.zst" >/dev/null 2>&1',
-            'candidate-native-enabled-archive': 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config \'profile.test.codegen-backend="cranelift"\' -p engine-wasm --lib --no-default-features --features manual_resolution_local_bootstrap --archive-file "$RUNNER_TEMP/bootstrap-native-archives/enabled.tar.zst" >/dev/null 2>&1',
+            'candidate-native-off-archive': 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config \'profile.test.codegen-backend="cranelift"\' -p engine-wasm --lib --no-default-features --archive-file "$RUNNER_TEMP/bootstrap-native-archives/off.tar.zst"',
+            'candidate-native-enabled-archive': 'cargo nextest archive --locked --profile ci --config profile.test.debug=0 --config profile.test.incremental=false --config \'profile.test.codegen-backend="cranelift"\' -p engine-wasm --lib --no-default-features --features manual_resolution_local_bootstrap --archive-file "$RUNNER_TEMP/bootstrap-native-archives/enabled.tar.zst"',
             'candidate-format': 'rustfmt --edition 2021 --check crates/engine-wasm/src/lib.rs crates/engine/src/game/effects/life.rs',
             'candidate-clippy': 'cargo clippy --locked -p engine-wasm --all-targets --profile test --no-default-features --features manual_resolution_local_bootstrap --config profile.test.debug=0 --config profile.test.incremental=false --config "profile.test.codegen-backend=\\"cranelift\\"" --message-format=json -- -D warnings',
         }
@@ -73,12 +73,34 @@ def receipt_valid(item, label, producer, native, inputs):
         assert actual == expected
 
 
+def helper_exception(error):
+    """Retain finite exception codes and this helper's coordinates, never messages."""
+    import traceback
+    from pathlib import Path
+    names = {'AssertionError','AttributeError','KeyError','IndexError','ValueError','TypeError',
+        'OverflowError','RuntimeError','OSError','PermissionError','FileNotFoundError',
+        'IsADirectoryError','NotADirectoryError','UnicodeError','UnicodeDecodeError',
+        'UnicodeEncodeError','JSONDecodeError','TOMLDecodeError','CalledProcessError',
+        'TimeoutExpired','HTTPError','URLError'}
+    code = type(error).__name__ if type(error).__name__ in names else None
+    frames = [frame for frame in traceback.extract_tb(error.__traceback__, limit=8)
+        if Path(frame.filename).resolve() == Path(__file__).resolve() and 1 <= frame.lineno <= 1000000]
+    place = {'path':'scripts/ci/stage1-bootstrap-validation.py','line':frames[-1].lineno,'column':1} if frames else None
+    diagnostics = [{'level':'error','code':code,'location':place}]
+    for field, prefix, lower, upper in [('errno','errno:',1,4095),('returncode','child-exit:',-255,255)]:
+        number = getattr(error, field, None)
+        if type(number) is int and lower <= number <= upper:
+            diagnostics.append({'level':'error','code':prefix + str(number),'location':place})
+    return {'status':'helper-exception','diagnostics':diagnostics,'codes_withheld':int(code is None),'locations_withheld':0}
+
+
 def source():
     import ast, hashlib, json, os, re, subprocess
     from pathlib import Path
     try:
+        assert os.environ.get('STAGE1_DIAGNOSTIC_CHECKPOINT') in ['fixture-only','resume']
         def git(source, *args):
-            return subprocess.check_output(['git', '-C', str(source), *args], stderr=subprocess.DEVNULL, text=True).strip()
+            return subprocess.check_output(['git', '-C', str(source), *args], text=True).strip()
         source = Path('.'); validation = Path('../validation-source')
         workflow_path = '.github/workflows/wasm-local-bootstrap-validation.yml'
         event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
@@ -131,8 +153,8 @@ def source():
             'product_equal': True, 'input_sha256': pins, 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': 1}
         (root / 'source-manifest.json').write_text(json.dumps(value) + '\n')
         print('{"stage1_sources_admitted":true,"product_equal":true}')
-    except Exception:
-        print('{"error":"stage1-source-refused"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-source-refused','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -155,8 +177,8 @@ def select():
         with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
             for key, state in states.items(): output.write(key + '=' + state + '\n')
         print(json.dumps({'retained_states': states, 'product_green': False}))
-    except Exception:
-        print('{"error":"stage1-retained-ref-invalid"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-retained-ref-invalid','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -250,7 +272,7 @@ def wasm_tools():
                 'CARGO_INCREMENTAL', 'CARGO_TARGET_DIR', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTDOCFLAGS',
             } for name in environment)
         def read(argv):
-            return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True).strip()
+            return subprocess.check_output(argv, text=True).strip()
         active = read(['rustup', 'show', 'active-toolchain']).split()[0]
         assert active == 'nightly-2026-04-19-x86_64-unknown-linux-gnu'
         verbose = read(['rustc', '-Vv'])
@@ -271,8 +293,8 @@ def wasm_tools():
         value = {'toolchain':'nightly-2026-04-19','rustc':fields,'cargo':cargo,'bindgen':'wasm-bindgen 0.2.121','wasm_target_installed':True}
         (Path(os.environ['MANUAL_EVIDENCE']) / 'tool-manifest.json').write_text(json.dumps(value) + '\n')
         print('{"producer_tools_verified":true}')
-    except Exception:
-        print('{"error":"runtime-provenance-mismatch"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'runtime-provenance-mismatch','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -344,8 +366,8 @@ def package():
         with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
             output.write('paths<<PUBLIC_PATHS\n' + '\n'.join(str(staging / name) for name in [*sorted(paths),'runtime-provenance.json']) + '\nPUBLIC_PATHS\n')
         print(json.dumps({'public_package_verified':True,'feature':feature,'kind':kind}))
-    except Exception:
-        print('{"error":"stage1-public-package-refused"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-public-package-refused','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -391,8 +413,8 @@ def pins():
         reference_path.write_text(json.dumps(reference,separators=(',',':')) + '\n')
         with Path(os.environ['GITHUB_OUTPUT']).open('a') as output: output.write('reference=' + json.dumps(reference,separators=(',',':')) + '\n')
         print(json.dumps({'public_output_uploaded':True,'feature':feature,'kind':kind,'artifact_id':metadata['id']}))
-    except Exception:
-        print('{"error":"stage1-upload-metadata-refused"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-upload-metadata-refused','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -564,8 +586,8 @@ def admit():
         (root / (feature + '-admission.json')).write_text(json.dumps({'feature':feature,'admitted':True,'full':reference['checks' if native else 'full'] is not None,
             'producer_jobs_completed':os.environ['STAGE1_REQUIRE_FULL'] == 'true','current_compile_executed':False,'product_green':False}) + '\n')
         print(json.dumps({'retained_feature_admitted':feature,'current_compile_executed':False}))
-    except Exception:
-        print('{"error":"stage1-retained-output-refused"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-retained-output-refused','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -638,6 +660,55 @@ def diagnostic_projection(raw, label, tracked, cwd):
                         assert type(message['severity']) is int and message['severity'] in [1,2]
                         add('error' if message['severity'] == 2 else 'warning',message.get('ruleId'),
                             location(file.get('filePath'),message.get('line'),message.get('column')),eslint_ids)
+        else:
+            exception_codes = {'AssertionError','AttributeError','KeyError','IndexError','ValueError','TypeError',
+                'OverflowError','RuntimeError','OSError','PermissionError','FileNotFoundError',
+                'IsADirectoryError','NotADirectoryError','UnicodeError','UnicodeDecodeError',
+                'UnicodeEncodeError','JSONDecodeError','TOMLDecodeError','CalledProcessError',
+                'TimeoutExpired','HTTPError','URLError','path-missing','permission-denied','not-a-directory'}
+            tool_stages = set(('active-toolchain build-jobs cargo-format cargo-home-path cargo-identity cargo-version '
+                'compiler-environment config-build-overrides config-build-type config-env-overrides config-env-type '
+                'config-sections cranelift-component fixed-config-presence incremental loaded-config-file loaded-config-parse '
+                'loaded-config-path nextest-version profile-environment rustc-binary rustc-commit rustc-date rustc-fields '
+                'rustc-host rustc-identity rustc-llvm rustc-parse rustc-release rustc-version source-config-path '
+                'source-legacy-config stack target-directory target-environment tool-manifest-write').split())
+            tool_classes = set(('command-missing command-nonzero command-os-error command-permission-denied compiler-override '
+                'component-missing-or-host-mismatch config-not-file config-override config-parse-failed config-shadow '
+                'config-type-invalid filesystem-error fixed-config-missing host-mismatch path-missing path-permission-denied '
+                'profile-mismatch required-key-missing target-override text-decode-failed tool-output-empty toolchain-mismatch '
+                'unexpected-error value-parse-failed value-type-invalid version-date-mismatch version-format-invalid version-mismatch').split())
+            for line in text.splitlines():
+                if not line.startswith('{') or len(line) > 65536: continue
+                try: item = json.loads(line)
+                except ValueError: continue
+                if not isinstance(item,dict): continue
+                projected = item.get('diagnostic_projection')
+                if isinstance(projected,dict):
+                    assert set(projected) == {'status','diagnostics','codes_withheld','locations_withheld'}
+                    assert projected['status'] in ['helper-exception','matched-static-portions','unknown','output-over-bound']
+                    assert all(type(projected[key]) is int and 0 <= projected[key] <= 64 for key in ['codes_withheld','locations_withheld'])
+                    assert isinstance(projected['diagnostics'],list) and len(projected['diagnostics']) <= 3
+                    for diagnostic in projected['diagnostics']:
+                        assert set(diagnostic) == {'level','code','location'} and diagnostic['level'] == 'error'
+                        code = diagnostic['code']; place = diagnostic['location']
+                        if code is not None and code not in exception_codes:
+                            assert isinstance(code,str)
+                            if code.startswith('errno:'): assert re.fullmatch(r'errno:[1-9][0-9]{0,3}',code) and int(code[6:]) <= 4095
+                            else: assert re.fullmatch(r'child-exit:-?(?:0|[1-9][0-9]{0,2})',code) and -255 <= int(code[11:]) <= 255
+                        if place is not None:
+                            assert set(place) == {'path','line','column'} and place['path'] == 'scripts/ci/stage1-bootstrap-validation.py'
+                            assert type(place['line']) is int and 1 <= place['line'] <= len(Path(__file__).read_text().splitlines()) and type(place['column']) is int and place['column'] == 1
+                        assert len(value['diagnostics']) < 64
+                        value['diagnostics'].append({'level':'error','code':code,'location':place})
+                    value['codes_withheld'] += projected['codes_withheld']; value['locations_withheld'] += projected['locations_withheld']
+                if label == 'stage1-rust-tools' and item.get('error') == 'native-off-tools-refused':
+                    assert item.get('stage') in tool_stages and item.get('classification') in tool_classes
+                    value['diagnostics'].extend({'level':'error','code':code,'location':None} for code in [
+                        'native-tools-stage:' + item['stage'],'native-tools-class:' + item['classification']])
+                    query = item['nextest_query']; number = query['exit_code']
+                    assert number is None or type(number) is int and -255 <= number <= 255
+                    if number is not None: value['diagnostics'].append({'level':'error','code':'child-exit:' + str(number),'location':None})
+                    assert len(value['diagnostics']) <= 64
         value['status'] = 'matched' if value['diagnostics'] else 'no-diagnostics'
     except Exception:
         # Do not export a partial projection after a malformed/unbounded structure.
@@ -678,15 +749,18 @@ def safe_result():
         fixed_errors = {'stage1-source-refused','stage1-retained-ref-invalid','runtime-provenance-mismatch',
             'stage1-public-package-refused','stage1-upload-metadata-refused','stage1-retained-output-refused',
             'stage1-raw-input-refused','stage1-baseline-source-refused','stage1-producer-current-tool-mismatch','adapter-report-unavailable',
-            'adapter-summary-save-failed','native-off-reuse-observation-save-failed'}
+            'adapter-summary-save-failed','native-off-reuse-observation-save-failed','native-off-tools-refused','stage1-helper-failed'}
         value['static_causes'] = []
+        native_tools_failure = None
         if len(raw) <= 4*1024**2:
             for literal,category in [(b'No such file or directory (os error 2)','path-missing'),
                 (b'Permission denied (os error 13)','permission-denied'),(b'Not a directory (os error 20)','not-a-directory')]:
                 if literal in raw: value['static_causes'].append(category)
             for line in raw.splitlines():
                 if line.startswith(b'{') and len(line) <= 1024:
-                    try: error = json.loads(line).get('error')
+                    try:
+                        item = json.loads(line); error = item.get('error')
+                        if label == 'stage1-rust-tools' and error == 'native-off-tools-refused': native_tools_failure = item
                     except Exception: continue
                     if isinstance(error,str) and error in fixed_errors: value['static_causes'].append(error)
             value['static_causes'] = sorted(set(value['static_causes']))
@@ -708,12 +782,24 @@ def safe_result():
                         if item['observation_saved'] is not True: value['projection_exit_code'] = 1
                 except Exception: continue
         compiler = label in ['candidate-clippy','candidate-wasm-off-build','candidate-wasm-enabled-build','client-types','client-lint']
-        if compiler:
-            tracked = set(subprocess.check_output(['git','ls-files','-z'],stderr=subprocess.DEVNULL).decode().split('\0')) - {''}
-            value['diagnostic_projection'] = diagnostic_projection(raw,label,tracked,str(Path.cwd()))
-            if value['diagnostic_projection']['status'] not in ['matched','no-diagnostics']: value['projection_exit_code'] = 1
-    except Exception:
+        tracked = set(subprocess.check_output(['git','ls-files','-z']).decode().split('\0')) - {''} if compiler else set()
+        value['diagnostic_projection'] = diagnostic_projection(raw,label,tracked,str(Path.cwd()))
+        if value['diagnostic_projection']['status'] not in ['matched','no-diagnostics']: value['projection_exit_code'] = 1
+        if native_tools_failure is not None:
+            item = native_tools_failure
+            assert value['diagnostic_projection']['status'] == 'matched'
+            assert item['native_off_tools_admitted'] is False and type(item['tool_manifest_saved']) is bool
+            assert item['persistence_classification'] in [None,'path-permission-denied','path-missing','filesystem-error','persistence-failed']
+            query = item['nextest_query']; assert set(query) == {'exit_code','public_version'}
+            version = query['public_version']
+            if version is not None:
+                assert isinstance(version,str) and len(version) <= 256
+                parsed = re.fullmatch(r'cargo-nextest 0\.9\.146 \((?P<short>[a-f0-9]{7,40}) (?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\)\nrelease: 0\.9\.146\ncommit-hash: (?P<commit>[a-f0-9]{40})\ncommit-date: (?P=date)\nhost: x86_64-unknown-linux-gnu\n?',version)
+                assert parsed and parsed['commit'].startswith(parsed['short']); datetime.date.fromisoformat(parsed['date'])
+            value['native_tools_failure'] = {key:item[key] for key in ['stage','classification','nextest_query','tool_manifest_saved','persistence_classification']}
+    except Exception as error:
         value['projection_exit_code'] = 1
+        value['diagnostic_projection'] = helper_exception(error)
         value['diagnostic_projection']['status'] = 'receipt-or-collector-unavailable'
     if label in ['candidate-enabled-browser','candidate-off-browser']:
         stages = ['runtime-copy','server-start','server-ready','served-identity','source-identity','session-create',
@@ -725,13 +811,15 @@ def safe_result():
             # Inside the browser EXIT trap the guard has not finished its receipt.
             if len(sys.argv) == 5 and not (root / (label + '.json')).exists():
                 value['projection_exit_code'] = 0; value['diagnostic_projection']['status'] = 'awaiting-guard-receipt'
-        except Exception:
+        except Exception as error:
             value['browser_stage'] = None; value['projection_exit_code'] = 1
+            value['diagnostic_projection'] = helper_exception(error)
+    print(json.dumps(value))
     try:
         (root / (label + '-result.json')).write_text(json.dumps(value) + '\n')
-        print(json.dumps(value))
-    except Exception:
-        print('{"error":"stage1-safe-result-save-failed"}')
+    except Exception as error:
+        print(json.dumps({'error':'stage1-safe-result-save-failed','save_stage':'result',
+            'diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
     raise SystemExit(value['projection_exit_code'])
 
@@ -753,8 +841,8 @@ def raw_input():
         shutil.copyfile(source,destination)
         with destination.open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest() == expected['sha256']
         print('{"retained_raw_at_existing_bindgen_input":true,"current_compile_executed":false}')
-    except Exception:
-        print('{"error":"stage1-raw-input-refused"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-raw-input-refused','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -762,15 +850,15 @@ def baseline_identity():
     import os, subprocess
     from pathlib import Path
     try:
-        def git(*args): return subprocess.check_output(['git','-C','../baseline-source',*args],stderr=subprocess.DEVNULL,text=True).strip()
+        def git(*args): return subprocess.check_output(['git','-C','../baseline-source',*args],text=True).strip()
         assert git('rev-parse','HEAD') == os.environ['BOOTSTRAP_BASE_SHA'] == '8fcd0f33451058f55b110e707d50497545763615'
         assert git('rev-parse','HEAD^{tree}') == os.environ['BOOTSTRAP_BASE_TREE'] == '85f6682f6a2db68e5a67e23719f2126e3d241133'
         assert git('status','--porcelain') == ''
         root = Path(os.environ['MANUAL_EVIDENCE'])
         (root / 'baseline-source.txt').write_text(git('rev-parse','HEAD','HEAD^{tree}') + '\n')
         print('{"baseline_identity_admitted":true,"baseline_build_executed":false}')
-    except Exception:
-        print('{"error":"stage1-baseline-source-refused"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-baseline-source-refused','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -788,8 +876,8 @@ def tools_match():
             descriptor = json.loads((root / (feature + '-full-descriptor.json')).read_text())
             assert all(descriptor['tools'][name] == actual[name] for name in ['toolchain','rustc','cargo'])
         print('{"producer_and_current_tools_match":true}')
-    except Exception:
-        print('{"error":"stage1-producer-current-tool-mismatch"}')
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-producer-current-tool-mismatch','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
 
@@ -897,14 +985,17 @@ def native_tests():
     except FileNotFoundError: diagnostic['launch_classification'] = 'path-or-command-missing'
     except PermissionError: diagnostic['launch_classification'] = 'path-or-command-permission-denied'
     except UnicodeError: diagnostic['launch_classification'] = 'text-decode-failed'
-    except Exception: diagnostic['launch_classification'] = 'observer-or-collector-refused'
+    except Exception as error:
+        diagnostic['launch_classification'] = 'observer-or-collector-refused'
+        print(json.dumps({'diagnostic_projection':helper_exception(error)}))
     finally:
         subprocess.run = original_run
         try:
             (Path(os.environ['MANUAL_EVIDENCE']) / ('runner-' + artifact + '-error.json')).write_text(json.dumps(diagnostic) + '\n')
             saved = True
-        except Exception:
-            print('{"error":"native-off-reuse-observation-save-failed"}')
+        except Exception as error:
+            print(json.dumps({'error':'native-off-reuse-observation-save-failed',
+                'diagnostic_projection':helper_exception(error)}))
         print(json.dumps({'native_off_reuse_observation': diagnostic, 'observation_saved': saved}))
     raise SystemExit(0 if saved and diagnostic['collector_exit_code'] == 0 and diagnostic['launch_classification'] is None else 1)
 
@@ -938,9 +1029,17 @@ def adapter_tests():
             'src/adapter/__tests__/engine-worker.test.ts',
             'src/adapter/__tests__/engine-worker-client.test.ts',
             'src/adapter/__tests__/wasm-adapter.test.ts',
-        ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, encoding='utf-8', errors='replace',
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace',
             env={**os.environ, 'NO_COLOR': '1', 'FORCE_COLOR': '0'})
         summary['runner_exit_code'] = result.returncode
+        summary['diagnostic_projection'] = {'status':'unknown','diagnostics':[], 'codes_withheld':0,'locations_withheld':0}
+        if len(result.stderr) <= 65536:
+            for literal, code in [('No such file or directory (os error 2)','path-missing'),
+                ('Permission denied (os error 13)','permission-denied'),('Not a directory (os error 20)','not-a-directory')]:
+                if literal in result.stderr:
+                    summary['diagnostic_projection']['diagnostics'].append({'level':'error','code':code,'location':None})
+            if summary['diagnostic_projection']['diagnostics']: summary['diagnostic_projection']['status'] = 'matched-static-portions'
+        else: summary['diagnostic_projection']['status'] = 'output-over-bound'
         report = json.loads(result.stdout)
         statuses = [case['status'] for file in report['testResults'] for case in file['assertionResults']]
         counts = {status: statuses.count(status) for status in ['passed', 'failed', 'skipped', 'pending', 'todo', 'disabled']}
@@ -954,15 +1053,17 @@ def adapter_tests():
                            tests_skipped=counts['skipped'], tests_pending=counts['pending'],
                            tests_todo=counts['todo'], tests_disabled=counts['disabled'],
                            all_selected_tests_passed=result.returncode == 0 and counts['passed'] == len(statuses))
-    except Exception:
+    except Exception as error:
         summary['error'] = 'adapter-report-unavailable'
+        summary['diagnostic_projection'] = helper_exception(error)
     code = result.returncode if result is not None else 1
     if code == 0 and not summary['all_selected_tests_passed']:
         code = 1
     try:
         Path(os.environ['MANUAL_EVIDENCE'], 'adapter-assertions.json').write_text(json.dumps(summary) + '\n')
-    except Exception:
+    except Exception as error:
         summary['error'] = 'adapter-summary-save-failed'
+        summary['diagnostic_projection'] = helper_exception(error)
         if code == 0: code = 1
     print(json.dumps(summary))
     raise SystemExit(code if code >= 0 else 128 - code)
@@ -1118,21 +1219,25 @@ def green():
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         raise SystemExit(1)
-    match sys.argv[1]:
-        case 'source': source()
-        case 'select': select()
-        case 'native-tools': native_tools()
-        case 'wasm-tools': wasm_tools()
-        case 'package': package()
-        case 'pins': pins()
-        case 'admit': admit()
-        case 'safe-result': safe_result()
-        case 'raw-input': raw_input()
-        case 'baseline-identity': baseline_identity()
-        case 'tools-match': tools_match()
-        case 'native-tests': native_tests()
-        case 'declarations': declarations()
-        case 'adapter-tests': adapter_tests()
-        case 'copy-runtime': copy_runtime()
-        case 'green': green()
-        case _: raise SystemExit(1)
+    try:
+        match sys.argv[1]:
+            case 'source': source()
+            case 'select': select()
+            case 'native-tools': native_tools()
+            case 'wasm-tools': wasm_tools()
+            case 'package': package()
+            case 'pins': pins()
+            case 'admit': admit()
+            case 'safe-result': safe_result()
+            case 'raw-input': raw_input()
+            case 'baseline-identity': baseline_identity()
+            case 'tools-match': tools_match()
+            case 'native-tests': native_tests()
+            case 'declarations': declarations()
+            case 'adapter-tests': adapter_tests()
+            case 'copy-runtime': copy_runtime()
+            case 'green': green()
+            case _: raise SystemExit(1)
+    except Exception as error:
+        print(__import__('json').dumps({'error':'stage1-helper-failed','diagnostic_projection':helper_exception(error)}))
+        raise SystemExit(1)
