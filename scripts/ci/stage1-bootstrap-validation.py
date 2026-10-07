@@ -18,6 +18,9 @@ CONSUMER_SOURCE = {'sha':'ca0055c7c7136fe312db3a9dd8bef934fc88b7c7','tree':'1347
     'test_fixtures': {
         'client/src/adapter/__tests__/engine-worker.test.ts': {'size':4911,'sha256':'cea1f68fba28d1a27e71a56ab54143236b1c6e84f251ce9af534c8289cc15a0b'},
         'client/src/adapter/__tests__/wasm-adapter.test.ts': {'size':69687,'sha256':'7535669a778de40774b5a8f5af2cdf50a2cd53b86f4427b6f43d0230bb0657c1'}}}
+BROWSER_LABELS = ['candidate-enabled-browser','candidate-off-browser']
+BROWSER_STAGES = ['runtime-copy','server-start','server-ready','served-identity','source-identity','session-create',
+    'session-timeouts','navigation','page-completion','terminal-projection','terminal-save','terminal-gate']
 
 def digest(path):
     with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -914,7 +917,7 @@ def diagnostic_projection(raw, label, tracked, cwd):
                 'unexpected-error value-parse-failed value-type-invalid version-date-mismatch version-format-invalid version-mismatch').split())
             upload_observations = 0
             raw_stat_observations = set()
-            bindgen_observations = set(); bindgen_refusals = 0
+            bindgen_observations = set(); bindgen_refusals = 0; browser_pending = 0
             for line in text.splitlines():
                 raw_stat_marker = any('"' + marker + '"' in line for marker in ['raw_input_stat_observation','raw_copy_stat_observation'])
                 bindgen_marker = any('"' + marker + '"' in line for marker in ['bindgen_admission_observation','bindgen_admission_refusal'])
@@ -989,7 +992,22 @@ def diagnostic_projection(raw, label, tracked, cwd):
                 projected = item.get('diagnostic_projection')
                 if isinstance(projected,dict):
                     assert set(projected) == {'status','diagnostics','codes_withheld','locations_withheld'}
-                    assert projected['status'] in ['helper-exception','matched-static-portions','unknown','output-over-bound']
+                    pending = projected['status'] == 'awaiting-guard-receipt'
+                    if pending:
+                        assert label in BROWSER_LABELS and item.get('label') == label
+                        assert set(item) == {'label','command_exit_code','process_exit_code','collector_exit_code',
+                            'projection_exit_code','classification','known_files','diagnostic_projection','browser_stage'}
+                        assert type(item['command_exit_code']) is int and 0 <= item['command_exit_code'] <= 255
+                        assert type(item['collector_exit_code']) is int and item['collector_exit_code'] == item['command_exit_code']
+                        assert type(item['projection_exit_code']) is int and item['projection_exit_code'] == 0
+                        assert item['process_exit_code'] is None and item['known_files'] == {} and item['browser_stage'] in BROWSER_STAGES
+                        assert item['classification'] == 'awaiting-guard-receipt'
+                        assert projected['codes_withheld'] == projected['locations_withheld'] == 0
+                        assert projected['diagnostics'] == []
+                        browser_pending += 1; assert browser_pending == 1
+                    else:
+                        assert projected['status'] in (['helper-exception','matched-static-portions'] if label in BROWSER_LABELS
+                            else ['helper-exception','matched-static-portions','unknown','output-over-bound'])
                     assert all(type(projected[key]) is int and 0 <= projected[key] <= 64 for key in ['codes_withheld','locations_withheld'])
                     assert isinstance(projected['diagnostics'],list) and len(projected['diagnostics']) <= 3
                     for diagnostic in projected['diagnostics']:
@@ -1008,8 +1026,9 @@ def diagnostic_projection(raw, label, tracked, cwd):
                             else:
                                 assert place['path'] == 'scripts/ci/stage1-bootstrap-validation.py'
                                 assert type(place['line']) is int and 1 <= place['line'] <= len(Path(__file__).read_text().splitlines()) and type(place['column']) is int and place['column'] == 1
-                        assert len(value['diagnostics']) < 64
-                        value['diagnostics'].append({'level':'error','code':code,'location':place})
+                        if not pending:
+                            assert len(value['diagnostics']) < 64
+                            value['diagnostics'].append({'level':'error','code':code,'location':place})
                     value['codes_withheld'] += projected['codes_withheld']; value['locations_withheld'] += projected['locations_withheld']
                 if label == 'stage1-rust-tools' and item.get('error') == 'native-off-tools-refused':
                     assert item.get('stage') in tool_stages and item.get('classification') in tool_classes
@@ -1019,6 +1038,7 @@ def diagnostic_projection(raw, label, tracked, cwd):
                     assert number is None or type(number) is int and -255 <= number <= 255
                     if number is not None: value['diagnostics'].append({'level':'error','code':'child-exit:' + str(number),'location':None})
                     assert len(value['diagnostics']) <= 64
+            if label in BROWSER_LABELS: assert browser_pending == 1
         value['status'] = 'matched' if value['diagnostics'] else 'no-diagnostics'
     except Exception:
         # Do not export a partial projection after a malformed/unbounded structure.
@@ -1046,14 +1066,43 @@ def safe_result():
         'known_files':{},'diagnostic_projection':{'status':'not-applicable','diagnostics':[], 'codes_withheld':0,'locations_withheld':0}}
     if label in ['client-adapter-tests','candidate-native-off-tests','candidate-native-enabled-tests']:
         value['runner_exit_code'] = None
+    browser = label in BROWSER_LABELS
+    inner = browser and len(sys.argv) == 5
+    receipt_missing = False
     try:
         value['known_files'] = {name:(Path(os.environ['RUNNER_TEMP']) / name).is_file() for name in paths}
-        receipt = json.loads((root / (label + '.json')).read_text())
+        if browser:
+            with (root / (label + '.json')).open('rb') as stream: receipt_raw = stream.read(65537)
+            assert len(receipt_raw) <= 65536
+            receipt = json.loads(receipt_raw)
+        else: receipt = json.loads((root / (label + '.json')).read_text())
         assert receipt['label'] == label and receipt['effective_exit'] == code
         actual = receipt['exit_code']; assert actual is None or type(actual) is int and -255 <= actual <= 255
         value['process_exit_code'] = actual
         if type(actual) is int and actual < 0: value['classification'] = 'process-signalled'
+        if browser:
+            assert not inner and len(sys.argv) == 4
+            assert set(receipt) == {'label','started_at','source_sha','event_sha','source_tree','argv','input_sha256','environment','guard','preflight',
+                'finished_at','exit_code','effective_exit','stop_reason','source_unchanged','.log_sha256','.jsonl_sha256'}
+            assert receipt['source_sha'] == os.environ['MANUAL_EXPECTED_SOURCE_SHA'] == CONSUMER_SOURCE['sha'] and receipt['source_tree'] == CONSUMER_SOURCE['tree']
+            assert receipt['event_sha'] == os.environ['GITHUB_SHA'] and receipt['argv'] == ['bash','-euo','pipefail','../validation-source/scripts/ci/stage1-bootstrap-browser.sh']
+            assert type(receipt['effective_exit']) is int and type(actual) is int
+            assert actual == code == 0 and receipt['stop_reason'] is None and receipt['source_unchanged'] is True
+            assert all(isinstance(receipt[key],str) for key in ['started_at','finished_at'])
+            started = datetime.datetime.fromisoformat(receipt['started_at']); finished = datetime.datetime.fromisoformat(receipt['finished_at'])
+            assert started.tzinfo is not None and finished.tzinfo is not None and finished >= started
+            assert receipt['input_sha256'] == {key:digest(Path(key)) for key in ['Cargo.lock','client/pnpm-lock.yaml','rust-toolchain.toml']}
+            assert receipt['environment'] == {'CARGO_TARGET_DIR':os.environ['CARGO_TARGET_DIR'],'CARGO_BUILD_JOBS':'1',
+                'RUST_MIN_STACK':'16777216','CARGO_INCREMENTAL':'0','CARGO_PROFILE_DEV_DEBUG':'0'}
+            assert receipt['guard'] == {'working_set_bytes':13*1024**3,'disk_free_min_bytes':4*1024**3,'sample_interval_seconds':1,'timeout_seconds':1500}
+            reading = receipt['preflight']
+            assert all(type(reading[key]) is int for key in ['cap_bytes','working_set_bytes','workspace_free_bytes','temp_free_bytes'])
+            assert reading['cap_bytes'] >= 13*1024**3 and 0 <= reading['working_set_bytes'] <= 13*1024**3
+            assert min(reading['workspace_free_bytes'],reading['temp_free_bytes']) >= 4*1024**3
+            assert all(isinstance(receipt[key],str) and re.fullmatch('[a-f0-9]{64}',receipt[key]) for key in ['.log_sha256','.jsonl_sha256'])
+            value['guard_receipt_sha256'] = hashlib.sha256(receipt_raw).hexdigest()
         with (root / (label + '.log')).open('rb') as stream: raw = stream.read(4*1024**2 + 1)
+        if browser: assert len(raw) <= 4*1024**2 and hashlib.sha256(raw).hexdigest() == receipt['.log_sha256']
         # Reuse fixed native OS causes and the shared helpers' fixed refusal codes.
         # Nothing from a raw line or arbitrary JSON value is copied to the result.
         fixed_errors = {'stage1-source-refused','stage1-retained-ref-invalid','runtime-provenance-mismatch',
@@ -1108,22 +1157,33 @@ def safe_result():
                 assert parsed and parsed['commit'].startswith(parsed['short']); datetime.date.fromisoformat(parsed['date'])
             value['native_tools_failure'] = {key:item[key] for key in ['stage','classification','nextest_query','tool_manifest_saved','persistence_classification']}
     except Exception as error:
+        receipt_missing = type(error) is FileNotFoundError and error.filename == str(root / (label + '.json'))
         value['projection_exit_code'] = 1
         value['diagnostic_projection'] = helper_exception(error)
         value['diagnostic_projection']['status'] = 'receipt-or-collector-unavailable'
-    if label in ['candidate-enabled-browser','candidate-off-browser']:
-        stages = ['runtime-copy','server-start','server-ready','served-identity','source-identity','session-create',
-            'session-timeouts','navigation','page-completion','terminal-projection','terminal-save','terminal-gate']
+    if browser:
         try:
-            stage = sys.argv[4] if len(sys.argv) == 5 else json.loads((root / (label + '-result.json')).read_text())['browser_stage']
-            assert stage in stages
-            value['browser_stage'] = stage
-            # Inside the browser EXIT trap the guard has not finished its receipt.
-            if len(sys.argv) == 5 and not (root / (label + '.json')).exists():
-                value['projection_exit_code'] = 0; value['diagnostic_projection']['status'] = 'awaiting-guard-receipt'
+            if inner:
+                assert receipt_missing and not (root / (label + '.json')).exists() and sys.argv[4] in BROWSER_STAGES
+                # A successful write here stages the original EXIT only; the guard is still running.
+                value.update(browser_stage=sys.argv[4],classification='awaiting-guard-receipt',projection_exit_code=0,
+                    diagnostic_projection={'status':'awaiting-guard-receipt','diagnostics':[],'codes_withheld':0,'locations_withheld':0})
+            else:
+                with (root / (label + '-result.json')).open('rb') as stream: pending_raw = stream.read(65537)
+                assert len(pending_raw) <= 65536
+                pending = json.loads(pending_raw)
+                assert pending['diagnostic_projection']['status'] == 'awaiting-guard-receipt'
+                assert diagnostic_projection(pending_raw,label,set(),str(Path.cwd()))['status'] == 'no-diagnostics'
+                value['browser_stage'] = pending['browser_stage']; value['browser_exit_code'] = pending['command_exit_code']
+                value['collector_exit_code'] = pending['collector_exit_code']
+                assert value['projection_exit_code'] == 0
+                assert any(json.loads(line) == pending for line in raw.splitlines() if line.startswith(b'{') and len(line) <= 65536)
+                assert value['browser_exit_code'] == 0 and value['browser_stage'] == 'terminal-gate'
+                assert value['diagnostic_projection'] == {'status':'no-diagnostics','diagnostics':[],'codes_withheld':0,'locations_withheld':0}
         except Exception as error:
-            value['browser_stage'] = None; value['projection_exit_code'] = 1
+            value.setdefault('browser_stage',None); value['projection_exit_code'] = 1
             value['diagnostic_projection'] = helper_exception(error)
+        if value['projection_exit_code'] != 0 and value['classification'] == 'passed': value['classification'] = 'projection-failed'
     print(json.dumps(value))
     try:
         (root / (label + '-result.json')).write_text(json.dumps(value) + '\n')
@@ -1567,6 +1627,23 @@ def green():
             and record.get('environment', {}).get('CARGO_BUILD_JOBS') == '1' and record.get('environment', {}).get('CARGO_INCREMENTAL') == '0'
             and record.get('environment', {}).get('RUST_MIN_STACK') == '16777216'
             and record.get('guard') == {'working_set_bytes':13*1024**3,'disk_free_min_bytes':4*1024**3,'sample_interval_seconds':1,'timeout_seconds':1500})
+        if label in BROWSER_LABELS:
+            try:
+                with (root / (label + '-result.json')).open('rb') as stream: result_raw = stream.read(65537)
+                assert len(result_raw) <= 65536
+                result = json.loads(result_raw)
+                assert set(result) == {'label','command_exit_code','process_exit_code','collector_exit_code','projection_exit_code',
+                    'classification','known_files','diagnostic_projection','static_causes','browser_stage','browser_exit_code','guard_receipt_sha256'}
+                assert result['label'] == label and result['classification'] == 'passed' and result['browser_stage'] == 'terminal-gate'
+                assert all(type(result[key]) is int and result[key] == 0 for key in ['command_exit_code','process_exit_code',
+                    'collector_exit_code','projection_exit_code','browser_exit_code'])
+                assert type(record['exit_code']) is int and type(record['effective_exit']) is int and result['process_exit_code'] == record['exit_code'] == record['effective_exit']
+                assert result['known_files'] == {} and result['static_causes'] == []
+                assert result['diagnostic_projection'] == {'status':'no-diagnostics','diagnostics':[],'codes_withheld':0,'locations_withheld':0}
+                assert result['guard_receipt_sha256'] == digest(root / (label + '.json'))
+                started = datetime.datetime.fromisoformat(record['started_at']); finished = datetime.datetime.fromisoformat(record['finished_at'])
+                assert started.tzinfo is not None and finished.tzinfo is not None and finished >= started
+            except Exception: complete = False
     for artifact in ['enabled','off']:
         terminal = terminals.get(artifact, {}); rows = terminal.get('rows', [])
         extra = ['experimental_local_admission','experimental_strict_requests','experimental_lifecycle','experimental_privacy_closed','experimental_realm_fallback'] if artifact == 'enabled' else ['feature_off_refusal','experimental_realm_fallback']
