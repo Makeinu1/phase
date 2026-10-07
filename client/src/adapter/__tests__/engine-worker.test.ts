@@ -79,7 +79,9 @@ describe("experimental Local worker boundary", () => {
   it("retains the existing typed initialization refusal", async () => {
     bootstrap.mockReturnValue({ error: true, engine_occupied: true, reasons: ["occupied"] });
     await send({ type: "initializeExperimentalLocalGame", id: 6 });
-    expect(fakeSelf.postMessage).toHaveBeenLastCalledWith({ type: "error", id: 6, message: "occupied", engineOccupied: true });
+    expect(bootstrap).toHaveBeenCalledOnce();
+    expect(fakeSelf.postMessage).toHaveBeenLastCalledWith({ type: "error", id: 6, message: "Finish or leave your current game before starting a new one.", engineOccupied: true });
+    expect(fakeSelf.postMessage.mock.lastCall?.[0].message).not.toContain("occupied");
   });
   it("loads an off namespace and refuses bootstrap while verification is null", async () => {
     vi.resetModules();

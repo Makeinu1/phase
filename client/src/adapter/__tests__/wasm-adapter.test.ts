@@ -1374,7 +1374,7 @@ describe("WasmAdapter.previewInteraction", () => {
 /** Every `type` literal `EngineWorkerClient` posts through `request()`, typed or untyped. */
 function postedMessageTypes(source: string): string[] {
   return Array.from(
-    source.matchAll(/this\.request\b[^(]*\(\s*\{\s*type:\s*"([A-Za-z0-9_]+)"/g),
+    source.matchAll(/this\.request\b[^(]*\(\s*\{\s*(?:\.\.\.\s*[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)?type:\s*"([A-Za-z0-9_]+)"/g),
     (m) => m[1],
   );
 }
@@ -1438,6 +1438,8 @@ describe("worker message lockstep", () => {
     expect(verdict.walkedAll).toBe(true);
     expect(verdict.reach).toEqual(["previewInteraction", "submitInteraction"]);
     expect(verdict.missing).toEqual([]);
+    expect(postedMessageTypes(clientSource)).toContain("initializeExperimentalLocalGame");
+    expect(handledMessageTypes(workerSource)).toContain("initializeExperimentalLocalGame");
   });
 
   const handledFirst = handledMessageTypes(workerSource)[0];
@@ -1455,30 +1457,43 @@ describe("worker message lockstep", () => {
   it.each([
     [
       "a worker case misspelled relative to the posted literal",
-      () => ({
-        client: clientSource,
-        worker: workerSource.replace(`case "${handledFirst}":`, `case "${handledFirst}Xx":`),
-      }),
+      () => {
+        expect(postedMessageTypes(clientSource)).toContain("initializeExperimentalLocalGame");
+        expect(handledMessageTypes(workerSource)).toContain("initializeExperimentalLocalGame");
+        return {
+          client: clientSource,
+          worker: workerSource.replace('case "initializeExperimentalLocalGame":', 'case "initializeExperimentalLocalGameXx":'),
+          walkedAll: true,
+          missing: ["initializeExperimentalLocalGame"],
+        };
+      },
     ],
     [
       "an untyped post with no worker case",
       () => ({
         client: `${clientSource}\nvoid this.request({ type: "ghostUntypedMessage" });\n`,
         worker: workerSource,
+        walkedAll: true,
+        missing: ["ghostUntypedMessage"],
       }),
     ],
     [
       "a posted type equal to a case in an unrelated switch",
-      () => ({
-        client: `${clientSource}\nvoid this.request<void>({ type: "${outsideDispatch}" });\n`,
-        worker: workerSource,
-      }),
+      () => {
+        expect(outsideDispatch).toBeDefined();
+        expect(handledMessageTypes(workerSource)).not.toContain(outsideDispatch);
+        return {
+          client: `${clientSource}\nvoid this.request<void>({ type: "${outsideDispatch}" });\n`,
+          worker: workerSource,
+          walkedAll: true,
+          missing: [outsideDispatch],
+        };
+      },
     ],
     [
       "a case reachable only inside a nested switch",
-      () => ({
-        client: `${clientSource}\nvoid this.request<void>({ type: "nestedGhost" });\n`,
-        worker: insertIntoDispatchBody(
+      () => {
+        const worker = insertIntoDispatchBody(
           workerSource,
           [
             "",
@@ -1491,33 +1506,62 @@ describe("worker message lockstep", () => {
             "        break;",
             "      }",
           ].join("\n"),
-        ),
-      }),
+        );
+        expect(handledMessageTypes(worker)).toContain("nestedGhostOuter");
+        expect(handledMessageTypes(worker)).not.toContain("nestedGhost");
+        return {
+          client: `${clientSource}\nvoid this.request<void>({ type: "nestedGhost" });\n`,
+          worker,
+          walkedAll: true,
+          missing: ["nestedGhost"],
+        };
+      },
     ],
     [
       "a request call site the extractor cannot read",
-      () => ({
-        client: `${clientSource}\nvoid this.request<void>(unreadableMessage);\n`,
-        worker: workerSource,
-      }),
+      () => {
+        const client = `${clientSource}\nvoid this.request<void>(unreadableMessage);\n`;
+        expect(postedMessageTypes(client)).toEqual(postedMessageTypes(clientSource));
+        expect(requestCallSites(client)).toBe(requestCallSites(clientSource) + 1);
+        const singleSpread = `${clientSource}\nvoid this.request<void>({ ...payload, type: "previewInteraction" });\n`;
+        expect(lockstepVerdict(singleSpread, workerSource)).toEqual({
+          walkedAll: true, reach: ["previewInteraction", "submitInteraction"], missing: [],
+        });
+        const multipleSpreads = `${clientSource}\nvoid this.request<void>({ ...payload, ...extra, type: "previewInteraction" });\n`;
+        expect(postedMessageTypes(multipleSpreads)).toEqual(postedMessageTypes(clientSource));
+        expect(requestCallSites(multipleSpreads)).toBe(requestCallSites(clientSource) + 1);
+        const multipleVerdict = lockstepVerdict(multipleSpreads, workerSource);
+        expect(multipleVerdict).toEqual({
+          walkedAll: false, reach: ["previewInteraction", "submitInteraction"], missing: [],
+        });
+        expect(isGreen(multipleVerdict)).toBe(false);
+        return { client, worker: workerSource, walkedAll: false, missing: [] };
+      },
     ],
     [
       "a request-prefixed identifier paired with an unreadable call site",
-      () => ({
-        client:
+      () => {
+        const client =
           `${clientSource}\n` +
           `this.requestQueue.push({ type: "${handledFirst}" });\n` +
-          `void this.request<void>(hiddenMessage);\n`,
-        worker: workerSource,
-      }),
+          `void this.request<void>(hiddenMessage);\n`;
+        expect(postedMessageTypes(client)).toEqual(postedMessageTypes(clientSource));
+        expect(requestCallSites(client)).toBe(requestCallSites(clientSource) + 1);
+        return { client, worker: workerSource, walkedAll: false, missing: [] };
+      },
     ],
   ])("refuses %s", (_name, mutate) => {
-    const { client, worker } = mutate();
+    const { client, worker, walkedAll, missing } = mutate();
 
     // A mutation that changed nothing would pass as a silent no-op, so the control asserts it
     // landed before it asserts what it produced.
     expect(client !== clientSource || worker !== workerSource).toBe(true);
-    expect(isGreen(lockstepVerdict(client, worker))).toBe(false);
+    const verdict = lockstepVerdict(client, worker);
+    expect(verdict.reach).toEqual(["previewInteraction", "submitInteraction"]);
+    expect(verdict.walkedAll).toBe(walkedAll);
+    expect(verdict.missing).toEqual(missing);
+    for (const type of missing) expect(postedMessageTypes(client)).toContain(type);
+    expect(isGreen(verdict)).toBe(false);
   });
 });
 
