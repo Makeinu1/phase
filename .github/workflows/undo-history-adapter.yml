@@ -109,22 +109,35 @@ jobs:
         if: ${{ !cancelled() && steps.browser.outcome == 'success' && steps.pnpm.outcome == 'success' }}
         working-directory: control/client
         run: pnpm install --frozen-lockfile
-      - name: Exact candidate client regression checks (no Rust build)
-        id: regression
+      - name: Exact candidate targeted client regression (no Rust build)
+        id: targeted_regression
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         working-directory: source
         run: |
-          F_EVIDENCE="$GITHUB_WORKSPACE/adapter-evidence/regression-guard" \
-            python3 ../control/scripts/ci/undo-history-runtime-guard.py candidate-client-regression \
+          mkdir -p "$GITHUB_WORKSPACE/adapter-evidence/regression-reports"
+          F_EVIDENCE="$GITHUB_WORKSPACE/adapter-evidence/targeted-regression-guard" \
+            python3 ../control/scripts/ci/undo-history-runtime-guard.py candidate-client-targeted \
             bash -eu -c '
               cd "$GITHUB_WORKSPACE/control/client"
               pnpm exec tsc -b --pretty false
               pnpm exec eslint src/game/localHistorySession.ts src/hooks/useLocalSeat.ts src/hooks/useGameDispatch.ts
-              pnpm exec vitest run --coverage.enabled=false
+              pnpm exec vitest run --coverage.enabled=false \
+                --reporter=default --reporter=json \
+                --outputFile.json="$GITHUB_WORKSPACE/adapter-evidence/regression-reports/targeted.json" \
+                src/game/__tests__/localHistorySession.test.tsx \
+                src/hooks/__tests__/useGameplayPreferencesSync.test.tsx \
+                src/hooks/__tests__/useGameDispatch.test.ts \
+                src/hooks/__tests__/useKeyboardShortcuts.test.tsx \
+                src/components/board/__tests__/ActionButton.test.tsx \
+                src/components/board/__tests__/AttachmentFan.test.tsx \
+                src/components/zone/__tests__/ZoneViewer.test.tsx \
+                src/components/controls/__tests__/PhaseStopBar.test.tsx \
+                src/components/hand/__tests__/useHandScrubPreview.test.tsx \
+                src/components/settings/__tests__/PreferencesModal.priorityPassing.test.tsx
             '
       - name: QA module dependency selfcheck before engine campaign
         id: module
-        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.regression.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.targeted_regression.outcome == 'success' }}
         working-directory: source
         run: |
           python3 ../control/scripts/ci/undo-history-preflight-guard.py QA-module-load \
@@ -133,6 +146,7 @@ jobs:
             "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
             "$GITHUB_WORKSPACE/adapter-evidence/module-selfcheck" --module-selfcheck-only
       - name: Explicit Local seat handoff, land Undo and real UI reexecution
+        id: local_ui
         if: ${{ !cancelled() && steps.module.outcome == 'success' }}
         working-directory: source
         run: |
@@ -142,6 +156,51 @@ jobs:
             "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/wasm-payload" \
             "$GITHUB_WORKSPACE/adapter-evidence/browser"
           test "$(git -C ../control status --porcelain --untracked-files=no)" = ""
+      - name: Full candidate client regression in three bounded shards
+        id: full_regression
+        if: ${{ !cancelled() && steps.targeted_regression.outcome == 'success' }}
+        working-directory: source
+        run: |
+          F_EVIDENCE="$GITHUB_WORKSPACE/adapter-evidence/test-inventory-guard" \
+            python3 ../control/scripts/ci/undo-history-runtime-guard.py candidate-client-test-inventory \
+            bash -eu -c '
+              cd "$GITHUB_WORKSPACE/control/client"
+              pnpm exec vitest list --coverage.enabled=false --filesOnly \
+                --json="$GITHUB_WORKSPACE/adapter-evidence/regression-reports/eligible-files.json"
+            '
+          for shard in 1 2 3; do
+            F_TEST_SHARD="$shard" \
+              F_EVIDENCE="$GITHUB_WORKSPACE/adapter-evidence/full-regression-shard-$shard-guard" \
+              python3 ../control/scripts/ci/undo-history-runtime-guard.py "candidate-client-shard$shard" \
+              bash -eu -c '
+                cd "$GITHUB_WORKSPACE/control/client"
+                pnpm exec vitest run --coverage.enabled=false --shard="$F_TEST_SHARD/3" \
+                  --reporter=default --reporter=json \
+                  --outputFile.json="$GITHUB_WORKSPACE/adapter-evidence/regression-reports/shard-$F_TEST_SHARD.json"
+              '
+          done
+          python3 - <<'PY'
+          import json, os, pathlib
+          evidence = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'adapter-evidence/regression-reports'
+          client = pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'control/client'
+          relative = lambda name: str(pathlib.Path(name).resolve().relative_to(client))
+          inventory = json.loads((evidence / 'eligible-files.json').read_text())
+          eligible = [relative(row['file']) for row in inventory]
+          assert eligible and len(eligible) == len(set(eligible)), 'eligible inventory must contain unique files'
+          observed, shards = [], []
+          for index in [1, 2, 3]:
+              report = json.loads((evidence / f'shard-{index}.json').read_text())
+              assert report['success'] and report['numFailedTests'] == report['numFailedTestSuites'] == 0, 'shard failed'
+              files = [relative(row['name']) for row in report['testResults']]
+              assert files and all(row['status'] in ['passed', 'pending'] for row in report['testResults']), 'file failed'
+              observed.extend(files)
+              shards.append({'index': index, 'files': files, **{key: report[key] for key in ['numTotalTests', 'numPassedTests', 'numPendingTests', 'numTodoTests']}})
+          assert len(observed) == len(set(observed)), 'duplicate files across shards'
+          assert set(observed) == set(eligible), 'shards must cover the exact eligible file inventory'
+          summary = {'pass': True, 'candidateSha': os.environ['GITHUB_SHA'], 'eligibleFileCount': len(eligible), 'reportedFileCount': len(observed), 'fullFileSetEqual': True, 'noDuplicateFiles': True, 'shards': shards}
+          (evidence / 'full-regression-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+          print(json.dumps({key: value for key, value in summary.items() if key != 'shards'}))
+          PY
       - name: Preserve checkout identity after every outcome
         if: always()
         run: |
