@@ -336,12 +336,19 @@ def package():
                 for item in (output / 'snippets').rglob('*'):
                     info = item.lstat(); assert stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)
                     if item.is_file(): snippet_files.append(item.relative_to(output).as_posix())
-            imports = re.findall(r"import\s*\{\s*is_experimental_local_worker_realm\s*\}\s*from\s*['\"]([^'\"]+)['\"]", (output / 'engine_wasm.js').read_text())
+            glue = (output / 'engine_wasm.js').read_text()
+            imports = re.findall(r"^import[ \t]+\*[ \t]+as[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]+from[ \t]+['\"]([^'\"\r\n]+)['\"][ \t]*;?[ \t]*$", glue, re.M)
+            assert len(re.findall(r'^[ \t]*import\b', glue, re.M)) == len(imports)
             if feature == 'enabled':
-                assert len(imports) == 1 and imports[0].startswith('./snippets/')
-                relative = imports[0][2:]
+                assert len(imports) == 1 and imports[0][1].startswith('./snippets/')
+                namespace, module = imports[0]; relative = module[2:]
                 assert relative.endswith('/src/experimental-local-worker-realm.js')
                 assert all(re.fullmatch('[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*', part) and part not in ['.','..'] for part in relative.split('/'))
+                functions = re.findall(r'^function __wbg_get_imports\(\) \{\n(.*?)^\}', glue, re.M | re.S); assert len(functions) == 1
+                returned = re.findall(r'^    return \{\n([^{}]*)^    \};[ \t]*$', functions[0], re.M); assert len(returned) == 1
+                bindings = re.findall(r"['\"]([^'\"\r\n]+)['\"]:[ \t]*([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*,", returned[0])
+                assert len(re.findall(r"['\"]" + re.escape(module) + r"['\"]\s*:", returned[0])) == 1
+                assert [binding for binding in bindings if binding[0] == module or binding[1] == namespace] == [(module, namespace)]
                 assert snippet_files == [relative]
                 assert (output / relative).read_bytes() == Path('crates/engine-wasm/src/experimental-local-worker-realm.js').read_bytes()
                 paths[relative] = output / relative
@@ -604,13 +611,22 @@ def admit():
                 else: assert tools['bindgen'] == 'wasm-bindgen 0.2.121' and tools['wasm_target_installed'] is True
                 required = {selected_feature + '.tar.zst'} if kind == 'native' else set() if kind == 'checks' else {'engine_wasm.wasm'} if kind == 'raw' else {'engine_wasm.js','engine_wasm_bg.wasm','engine_wasm.d.ts','engine_wasm_bg.wasm.d.ts'}
                 snippets = set(record['files']) - required
-                if kind == 'full' and selected_feature == 'enabled':
-                    assert len(snippets) == 1
-                    snippet = next(iter(snippets)); assert snippet.startswith('snippets/') and snippet.endswith('/src/experimental-local-worker-realm.js')
+                if kind == 'full':
                     glue = archive.read('engine_wasm.js').decode()
-                    imports = re.findall(r"import\s*\{\s*is_experimental_local_worker_realm\s*\}\s*from\s*['\"]([^'\"]+)['\"]",glue)
-                    assert imports == ['./' + snippet]
-                    assert archive.read(snippet) == Path('crates/engine-wasm/src/experimental-local-worker-realm.js').read_bytes()
+                    imports = re.findall(r"^import[ \t]+\*[ \t]+as[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]+from[ \t]+['\"]([^'\"\r\n]+)['\"][ \t]*;?[ \t]*$", glue, re.M)
+                    assert len(re.findall(r'^[ \t]*import\b', glue, re.M)) == len(imports)
+                    if selected_feature == 'enabled':
+                        assert len(snippets) == 1
+                        snippet = next(iter(snippets)); assert snippet.startswith('snippets/') and snippet.endswith('/src/experimental-local-worker-realm.js')
+                        assert len(imports) == 1 and imports[0][1] == './' + snippet
+                        namespace, module = imports[0]
+                        functions = re.findall(r'^function __wbg_get_imports\(\) \{\n(.*?)^\}', glue, re.M | re.S); assert len(functions) == 1
+                        returned = re.findall(r'^    return \{\n([^{}]*)^    \};[ \t]*$', functions[0], re.M); assert len(returned) == 1
+                        bindings = re.findall(r"['\"]([^'\"\r\n]+)['\"]:[ \t]*([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*,", returned[0])
+                        assert len(re.findall(r"['\"]" + re.escape(module) + r"['\"]\s*:", returned[0])) == 1
+                        assert [binding for binding in bindings if binding[0] == module or binding[1] == namespace] == [(module, namespace)]
+                        assert archive.read(snippet) == Path('crates/engine-wasm/src/experimental-local-worker-realm.js').read_bytes()
+                    else: assert imports == [] and snippets == set()
                 else: assert snippets == set()
                 assert required <= set(record['files'])
                 if kind == 'full': assert descriptor['raw'] == descriptors['raw'] and descriptor['raw']['tools'] == tools
