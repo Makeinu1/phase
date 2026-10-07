@@ -1,0 +1,109 @@
+# P1 validation handoff
+
+This branch changes validation only. Product Rust and client logic remain owned
+by the integration writer. No P1 product build or UI PASS is implied by the
+preparation preflight. R0 is `3dae2913f0ccc40e5ea392648e7ff18c6c4bd27a`, C′ is
+`ca0055c7c7136fe312db3a9dd8bef934fc88b7c7`, and V0 is
+`02932352ed7e792b2482c7495b9612d7d9ce79c3`.
+
+## Execution
+
+Use separate clean product and validation checkouts, and an evidence directory
+outside both. Activate the existing toolchain, then add the local bindgen:
+
+```bash
+source /workspace/.phase-tools/activate.sh
+export PATH=/workspace/p1-tools/bin:$PATH
+python3 /workspace/p1-validation/scripts/ci/p1-wasm-validation.py preflight \
+  --source /workspace/p1-preflight-source \
+  --candidate-sha ca0055c7c7136fe312db3a9dd8bef934fc88b7c7 \
+  --evidence /workspace/p1-validation-evidence/committed-preflight
+```
+
+After receiving the final reviewed product SHA, create its detached checkout.
+Run `build` once with that SHA and a **fresh** evidence directory. It performs
+the source/resource preflight, one enabled WASM build, and bindgen. There is no
+old artifact fallback. Preserve `target` until the run is finished; never delete
+another environment or target. A recorded command may not be retried in place.
+The unmodified V0 guard still requires its exact lock/toolchain pins, 13GiB
+memory capacity, and 4GiB free in workspace and temp. Changed pins are a blocker
+to review, not an invitation to silently bypass admission.
+
+Then run `install-runtime` with the same arguments. This verifies the producer
+manifest, all WASM/glue/snippet hashes, and the consumer SHA before installing
+only ignored generated artifacts. Consumer replay does not rebuild Rust.
+
+The fork workflow runs **preflight only** on pushes to this validation branch.
+Its `P1_PUSH_CANDIDATE_SHA` and `P1_PUSH_MODE` literals can be changed to the final
+reviewed SHA and `build` for a single CI build. This push path works for a newly
+added workflow without putting it on the default branch. Dispatch is an optional
+path when GitHub exposes that workflow; do not assume it does. Existing V0 jobs
+and permissions are unchanged.
+
+## Minimal fixture I/O still required
+
+The parent and product writer supply:
+
+1. The reviewed product SHA and the existing canonical fixture entrance that
+   reaches `/game/:id`, including fixture id/query and any prerequisite input.
+   The writer's received direction is: start a normal Local game, checked-restore
+   a trusted checkpoint produced by the existing GameScenario, then drive the
+   real game through authenticated Local continuation using the existing
+   `submit_interaction_js`. Concrete envelope I/O and family/variant names await
+   the D1 boundary review. This is a direction, not a fixed API schema. The
+   browser wrapper takes the existing application entrance; the finite scenario
+   performs those real setup steps once their contract is available. Do not
+   invent a seeding API or use the Stage1 HTML page.
+2. Existing user-visible controls/selectors and the real action sequence for
+   prepayment, same source, life 20→19→18, Finish/child, and the next paid play to
+   21. Validation authors the finite scenario only after that contract arrives.
+3. The existing read-only way to observe the fixture's public state. The capture
+   helper takes a reviewed read-only JS script; it defines no product API.
+   Keep source/occurrence, life, waiting/child/closed state and original-request
+   outcomes needed by the fixed acceptance cases. Never emit actor capabilities,
+   session IDs, tokens, hidden player data, or private authorization wire fields.
+4. Real restore inputs at K0–K3 (K4 auxiliary) and the existing ACK fault controls
+   for life and Finish: applied/rejected/unknown/inflight. A mock result is not a
+   substitute for authenticated product execution.
+
+The fixed contract lives in the P1 plan and test Pages; these input requirements
+do not change its assertions or adopt a speculative schema.
+
+## Browser evidence
+
+After runtime installation, install the consumer's frozen pnpm dependencies
+using the same V0 guard and retain its original log/receipt. Supply a reviewed
+fixture-specific Python scenario under this validation checkout's `scripts`.
+Then use the local tools (no system package or security setting was changed):
+
+```bash
+export BOOTSTRAP_CHROMEDRIVER=/workspace/p1-tools/chromium154/usr/bin/chromedriver
+export P1_CHROME_BINARY=/workspace/p1-tools/chromium154/usr/lib/chromium/chromium
+```
+
+Run `p1-product-browser.py --source PRODUCT --evidence EVIDENCE
+--entry-route ACTUAL_APPLICATION_ENTRANCE --scenario ACTUAL_VALIDATION_SCENARIO`.
+It starts Vite on 127.0.0.1:5173 and ChromeDriver on 9515, creates a new isolated
+browser session after installation, navigates the application entrance, and invokes
+that finite scenario. The session ID stays in the child environment, never in
+saved logs. A boot receipt binds source, manifest, Vite process and session hash;
+the original scenario log and exit are saved even on failure. This is a local
+consumer path; the workflow currently runs the producer only. Connect its
+consumer step after receiving the fixture contract, retaining the same explicit
+artifact allowlist already prepared there.
+
+At each expected state, the scenario calls `p1-product-capture.py --evidence
+EVIDENCE --step NAME --state-script READ_ONLY_SCRIPT`. Allowed steps are
+`prepayment`, `same-source`, `life19`, `life18`, `finish`, `child`, `paidplay21`,
+`restore-k0`–`restore-k4`, and `ack-life-*` / `ack-finish-*` with the four variants
+above. It verifies source/installed runtime before and after capture, verifies
+fresh-session/Vite provenance and served WASM identity, records served transformed
+glue separately (as V0 does), and saves PNG + state JSON hashes in `step-index.json`.
+Failure class and exit are saved separately; raw W3C transport stays unrecorded,
+following V0's privacy boundary.
+
+Snapshots are observations, not acceptance assertions. The reviewed finite
+scenario must compare the actual states with the fixed contract and return a
+nonzero exit on failure. The browser tools' synthetic navigation preflight is
+also not a P1 UI test. No scenario exists yet because its actual fixture input
+has not been received.

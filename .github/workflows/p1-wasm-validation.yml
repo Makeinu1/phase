@@ -1,0 +1,100 @@
+name: P1 immutable candidate WASM validation
+
+on:
+  push:
+    branches: [experiment/manual-p1-validation-20261008]
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full reviewed product commit SHA (runtime and consumer)
+        required: true
+        type: string
+      preflight_only:
+        description: Inspect only; do not compile product Rust
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+# A newly added fork workflow need not exist on default to run this push route.
+# Change these two literals only after receiving the reviewed product SHA.
+env:
+  P1_PUSH_CANDIDATE_SHA: ca0055c7c7136fe312db3a9dd8bef934fc88b7c7
+  P1_PUSH_MODE: preflight
+
+jobs:
+  candidate-runtime:
+    if: github.repository == 'Makeinu1/phase'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: validation-source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
+          path: product-source
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: nightly-2026-04-19
+          target: wasm32-unknown-unknown
+          cache: false
+          rustflags: ''
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.preflight_only) || (github.event_name == 'push' && env.P1_PUSH_MODE == 'build') }}
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9.15.9
+          run_install: false
+      - name: Guarded preflight or one fresh candidate build
+        env:
+          P1_CANDIDATE_SHA: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
+          P1_PREFLIGHT_ONLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.preflight_only) || (github.event_name == 'push' && env.P1_PUSH_MODE != 'build') }}
+        run: |
+          mode=preflight
+          if [ "$P1_PREFLIGHT_ONLY" = false ]; then mode=build; fi
+          python3 validation-source/scripts/ci/p1-wasm-validation.py "$mode" \
+            --source "$GITHUB_WORKSPACE/product-source" --candidate-sha "$P1_CANDIDATE_SHA" \
+            --evidence "$RUNNER_TEMP/p1-evidence"
+      - name: Retain candidate output and evidence (explicit allowlist)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: p1-candidate-runtime-evidence
+          path: |
+            ${{ runner.temp }}/p1-evidence/manifest.json
+            ${{ runner.temp }}/p1-evidence/p1-source-preflight.json
+            ${{ runner.temp }}/p1-evidence/p1-source-preflight.log
+            ${{ runner.temp }}/p1-evidence/p1-source-preflight.jsonl
+            ${{ runner.temp }}/p1-evidence/p1-source-preflight.control.log
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-build.json
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-build.log
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-build.jsonl
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-build.control.log
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-bindgen.json
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-bindgen.log
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-bindgen.jsonl
+            ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-bindgen.control.log
+            ${{ runner.temp }}/p1-evidence/runtime/engine_wasm.js
+            ${{ runner.temp }}/p1-evidence/runtime/engine_wasm.d.ts
+            ${{ runner.temp }}/p1-evidence/runtime/engine_wasm_bg.wasm
+            ${{ runner.temp }}/p1-evidence/runtime/engine_wasm_bg.wasm.d.ts
+            ${{ runner.temp }}/p1-evidence/runtime/snippets/**/*.js
+            ${{ runner.temp }}/p1-evidence/consumer-install.json
+            ${{ runner.temp }}/p1-evidence/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/product-scenario.log
+            ${{ runner.temp }}/p1-evidence/capture-failure-*.json
+            ${{ runner.temp }}/p1-evidence/step-index.json
+            ${{ runner.temp }}/p1-evidence/screenshots/*.png
+            ${{ runner.temp }}/p1-evidence/states/*.json
+          if-no-files-found: error
+          retention-days: 7
