@@ -515,6 +515,7 @@ def pins():
 def admit():
     import base64, datetime, hashlib, io, json, os, re, shutil, stat, urllib.error, urllib.parse, urllib.request, zipfile
     from pathlib import Path
+    bindgen_refusal = None
     try:
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, status, message, headers, newurl): return None
@@ -609,13 +610,16 @@ def admit():
                         'run_id':37576823336,'run_attempt':1,'ref':'refs/heads/experiment/manual-wasm-stage1-validation',
                         'job_name':'stage1-wasm-producer','job_id':112647733564}
                     assert os.environ['GITHUB_RUN_ATTEMPT'] == '1' and os.environ['GITHUB_SHA'] == source['validation_sha']
-                    current_id = int(os.environ['GITHUB_RUN_ID']); assert current_id != producer['run_id']
+                    known_id = 37605596799
+                    current_id = int(os.environ['GITHUB_RUN_ID']); assert current_id not in [producer['run_id'],known_id]
+                    bindgen_refusal = 'current-run-api'
                     current = api('actions/runs/' + str(current_id) + '/attempts/1')
+                    bindgen_refusal = 'run-population'
                     population = api('actions/runs?branch=experiment%2Fmanual-wasm-stage1-validation&event=push&per_page=100')
                     assert type(population['total_count']) is int and population['total_count'] == len(population['workflow_runs']) <= 100
                     ids = [item['id'] for item in population['workflow_runs']]
                     assert all(type(number) is int and number > 0 for number in ids) and len(ids) == len(set(ids))
-                    assert producer['run_id'] in ids and current_id in ids
+                    assert producer['run_id'] in ids and known_id in ids and current_id in ids
                     later = []
                     assert re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',run['created_at'])
                     original_time = datetime.datetime.fromisoformat(run['created_at'].replace('Z','+00:00'))
@@ -629,16 +633,73 @@ def admit():
                             assert item['head_sha'] == source['validation_sha'] and item['head_commit']['tree_id'] == source['validation_tree']
                             assert type(item['run_attempt']) is int and item['run_attempt'] == 1 and item['created_at'] == current['created_at']
                         if item is not current and datetime.datetime.fromisoformat(item['created_at'].replace('Z','+00:00')) > original_time: later.append(item['id'])
-                    assert current['id'] == current_id and later == [current_id]
+                    bindgen_refusal = 'later-run-population'
+                    assert current['id'] == current_id and len(later) == 2 and set(later) == {known_id,current_id}
+                    bindgen_refusal = 'known-run-api'
+                    known = api('actions/runs/' + str(known_id) + '/attempts/1')
+                    bindgen_refusal = 'known-run-identity'
+                    assert known['id'] == known_id and type(known['run_attempt']) is int and known['run_attempt'] == 1
+                    assert known['head_sha'] == 'b6336df92696bc01a6d5dfb0be3c22f7050aaa3b' and known['head_commit']['tree_id'] == '3cd646f389410192345858fff7d6b976d642d0c6'
+                    assert known['repository']['id'] == known['head_repository']['id'] == 1377698441
+                    assert known['repository']['full_name'] == known['head_repository']['full_name'] == 'Makeinu1/phase'
+                    assert known['path'] == producer['workflow_path'] and known['event'] == 'push' and known['head_branch'] == run['head_branch']
+                    assert known['status'] == 'completed' and known['conclusion'] == 'failure' and known['created_at'] == '2026-10-07T10:10:11Z'
+                    retained = next(item for item in population['workflow_runs'] if item['id'] == known_id)
+                    assert all(retained[field] == known[field] for field in ['head_sha','head_commit','run_attempt','status','conclusion','created_at'])
+                    assert datetime.datetime.fromisoformat(current['created_at'].replace('Z','+00:00')) > datetime.datetime.fromisoformat(known['created_at'].replace('Z','+00:00'))
+                    bindgen_refusal = 'known-jobs-api'
+                    known_jobs = api('actions/runs/' + str(known_id) + '/attempts/1/jobs?per_page=100')
+                    bindgen_refusal = 'known-job-boundary'
+                    assert type(known_jobs['total_count']) is int and known_jobs['total_count'] == len(known_jobs['jobs']) <= 100
+                    known_matches = [item for item in known_jobs['jobs'] if item['name'] == 'stage1-wasm-producer']
+                    assert len(known_matches) == 1 and known_matches[0]['id'] == 112740639667
+                    assert type(known_matches[0]['run_attempt']) is int and known_matches[0]['run_attempt'] == 1
+                    assert known_matches[0]['status'] == 'completed' and known_matches[0]['conclusion'] == 'failure'
+                    known_steps = known_matches[0]['steps']
+                    bindgen_refusal = 'current-jobs-api'
                     current_jobs = api('actions/runs/' + str(current_id) + '/attempts/1/jobs?per_page=100')
+                    bindgen_refusal = 'current-job-boundary'
                     assert type(current_jobs['total_count']) is int and current_jobs['total_count'] == len(current_jobs['jobs']) <= 100
                     matches = [item for item in current_jobs['jobs'] if item['name'] == 'stage1-wasm-producer']
-                    assert len(matches) == 1 and matches[0]['run_attempt'] == 1 and matches[0]['status'] == 'in_progress'
+                    assert len(matches) == 1 and type(matches[0]['run_attempt']) is int and matches[0]['run_attempt'] == 1 and matches[0]['status'] == 'in_progress'
                     assert type(matches[0]['id']) is int and matches[0]['id'] > 0
                     current_steps = matches[0]['steps']
-                    assert len({item['name'] for item in current_steps}) == len(current_steps)
-                    assert not any(item['name'] == 'Bind the remaining enabled WASM' and
-                        (item.get('started_at') is not None or item['status'] != 'queued' or item.get('conclusion') is not None) for item in current_steps)
+                    for role, observed_steps in [('known-pre-bindgen-run',known_steps),('current',current_steps)]:
+                        bindgen_refusal = 'known-bindgen-state' if role == 'known-pre-bindgen-run' else 'current-bindgen-state'
+                        bindings = [item for item in observed_steps if item['name'] == 'Bind the remaining enabled WASM']
+                        observed = bindings[0] if len(bindings) == 1 else {}
+                        print(json.dumps({'bindgen_admission_observation':{'role':role,'matches':min(len(bindings),1000),
+                            'status':('absent' if not bindings else observed.get('status') if observed.get('status') in ['pending','queued','in_progress','completed'] else 'unknown'),
+                            'conclusion':observed.get('conclusion') if observed.get('conclusion') in [None,'success','failure','cancelled','timed_out','skipped','action_required','neutral','stale'] else 'unknown',
+                            'started_at_present':observed.get('started_at') is not None,'completed_at_present':observed.get('completed_at') is not None}}))
+                        bindgen_refusal = 'known-step-duplicate' if role == 'known-pre-bindgen-run' else 'current-step-duplicate'
+                        assert len({item['name'] for item in observed_steps}) == len(observed_steps)
+                        bindgen_refusal = 'known-bindgen-state' if role == 'known-pre-bindgen-run' else 'current-bindgen-state'
+                        if role == 'known-pre-bindgen-run':
+                            # GitHub timestamps a skipped transition; it is not a command start.
+                            assert len(bindings) == 1 and observed['number'] == 35 and observed['status'] == 'completed' and observed['conclusion'] == 'skipped'
+                            assert observed['started_at'] == observed['completed_at'] == '2026-10-07T10:13:06Z'
+                        else:
+                            assert len(bindings) <= 1 and (not bindings or {'status','conclusion','started_at','completed_at'} <= set(observed)
+                                and observed['status'] in ['pending','queued'] and observed['conclusion'] is None
+                                and observed['started_at'] is observed['completed_at'] is None)
+                    bindgen_refusal = 'known-job-boundary'
+                    for number,name,conclusion in [(10,'Admit retained off raw or full output','success'),(11,'Admit retained enabled raw or full output','failure'),
+                            (28,'Stage admitted enabled RAW at the existing bindgen input','skipped'),(37,'Package enabled full public output','skipped'),
+                            (38,'Retain enabled full public output','skipped'),(43,'Retain exact safe Stage1 evidence','success')]:
+                        boundary = [item for item in known_steps if item['name'] == name]
+                        assert len(boundary) == 1 and boundary[0]['number'] == number and boundary[0]['status'] == 'completed' and boundary[0]['conclusion'] == conclusion
+                    bindgen_refusal = 'known-artifacts-api'
+                    known_artifacts = api('actions/runs/' + str(known_id) + '/artifacts?per_page=100')
+                    bindgen_refusal = 'known-artifact-boundary'
+                    assert type(known_artifacts['total_count']) is int and known_artifacts['total_count'] == len(known_artifacts['artifacts']) == 2
+                    assert {item['name'] for item in known_artifacts['artifacts']} == {'local-worker-bootstrap-stage1-native-producer-evidence','local-worker-bootstrap-stage1-wasm-producer-evidence'}
+                    evidence = next(item for item in known_artifacts['artifacts'] if item['name'] == 'local-worker-bootstrap-stage1-wasm-producer-evidence')
+                    # This immutable, inspected ZIP contains no enabled execution receipt or FULL output.
+                    assert evidence['id'] == 11474652334 and evidence['size_in_bytes'] == 26841 and evidence['digest'] == 'sha256:379345065d1bd9213e254a4ef840555859e6a79cd5c066bd518155cccccff2f5' and evidence['expired'] is False
+                    assert evidence['workflow_run']['id'] == known_id and evidence['workflow_run']['head_sha'] == known['head_sha']
+                    assert datetime.datetime.fromisoformat(evidence['expires_at'].replace('Z','+00:00')) > datetime.datetime.now(datetime.timezone.utc)
+                    bindgen_refusal = None
             for name,size_key in [(producer['workflow_path'],'workflow_sha256'),('scripts/ci/manual-integration-guard.py','guard_sha256')]:
                 content = api('contents/' + name + '?ref=' + producer['sha'])
                 assert content['encoding'] == 'base64'
@@ -741,6 +802,7 @@ def admit():
             'producer_jobs_completed':os.environ['STAGE1_REQUIRE_FULL'] == 'true','current_compile_executed':False,'product_green':False}) + '\n')
         print(json.dumps({'retained_feature_admitted':feature,'current_compile_executed':False}))
     except Exception as error:
+        if bindgen_refusal is not None: print(__import__('json').dumps({'bindgen_admission_refusal':bindgen_refusal}))
         print(__import__('json').dumps({'error':'stage1-retained-output-refused','diagnostic_projection':helper_exception(error)}))
         raise SystemExit(1)
 
@@ -833,16 +895,41 @@ def diagnostic_projection(raw, label, tracked, cwd):
                 'unexpected-error value-parse-failed value-type-invalid version-date-mismatch version-format-invalid version-mismatch').split())
             upload_observations = 0
             raw_stat_observations = set()
+            bindgen_observations = set(); bindgen_refusals = 0
             for line in text.splitlines():
                 raw_stat_marker = any('"' + marker + '"' in line for marker in ['raw_input_stat_observation','raw_copy_stat_observation'])
+                bindgen_marker = any('"' + marker + '"' in line for marker in ['bindgen_admission_observation','bindgen_admission_refusal'])
+                if bindgen_marker: assert label == 'stage1-enabled-admission' and line.startswith('{') and len(line) <= 65536
                 if label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and raw_stat_marker:
                     assert line.startswith('{') and len(line) <= 65536
                 if not line.startswith('{') or len(line) > 65536: continue
                 try: item = json.loads(line)
                 except ValueError:
+                    assert not bindgen_marker
                     assert label not in ['stage1-off-raw-package','stage1-enabled-raw-package'] or not raw_stat_marker
                     continue
                 if not isinstance(item,dict): continue
+                if 'bindgen_admission_observation' in item or 'bindgen_admission_refusal' in item:
+                    assert label == 'stage1-enabled-admission' and len(item) == 1
+                    pairs = json.loads(line,object_pairs_hook=list); assert len(pairs) == 1
+                    if 'bindgen_admission_observation' in item:
+                        observation = item['bindgen_admission_observation']
+                        assert isinstance(observation,dict) and set(observation) == {'role','matches','status','conclusion','started_at_present','completed_at_present'} and len(pairs[0][1]) == 6
+                        assert observation['role'] in ['current','known-pre-bindgen-run'] and observation['role'] not in bindgen_observations
+                        bindgen_observations.add(observation['role'])
+                        assert type(observation['matches']) is int and 0 <= observation['matches'] <= 1000
+                        assert observation['status'] in ['absent','pending','queued','in_progress','completed','unknown']
+                        assert observation['conclusion'] in [None,'success','failure','cancelled','timed_out','skipped','action_required','neutral','stale','unknown']
+                        assert type(observation['started_at_present']) is bool and type(observation['completed_at_present']) is bool
+                        value['diagnostics'].extend({'level':'note','code':'bindgen-' + field.replace('_','-') + ':' +
+                            ('absent' if observation[field] is None else str(observation[field]).lower()),'location':None} for field in ['role','matches','status','conclusion','started_at_present','completed_at_present'])
+                    else:
+                        reason = item['bindgen_admission_refusal']; bindgen_refusals += 1
+                        assert bindgen_refusals == 1 and reason in ['current-run-api','run-population','later-run-population','known-run-api','known-run-identity',
+                            'known-jobs-api','known-job-boundary','current-jobs-api','current-job-boundary','known-step-duplicate','current-step-duplicate',
+                            'known-bindgen-state','current-bindgen-state','known-artifacts-api','known-artifact-boundary']
+                        value['diagnostics'].append({'level':'error','code':'bindgen-refusal:' + reason,'location':None})
+                    assert len(value['diagnostics']) <= 64
                 if 'raw_input_stat_observation' in item or 'raw_copy_stat_observation' in item:
                     marker = 'raw_input_stat_observation' if 'raw_input_stat_observation' in item else 'raw_copy_stat_observation'
                     assert label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and set(item) == {marker}
