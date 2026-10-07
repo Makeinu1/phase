@@ -353,6 +353,11 @@ def package():
         files = {}
         for name,item in paths.items():
             info = item.lstat()
+            if kind == 'raw' and name == 'engine_wasm.wasm':
+                print(json.dumps({'raw_input_stat_observation':{'is_regular':stat.S_ISREG(info.st_mode),
+                    'st_nlink':info.st_nlink,'st_size':info.st_size,'failures':[reason for invalid,reason in [
+                        (not stat.S_ISREG(info.st_mode),'not-regular'),(info.st_nlink != 1,'link-count-not-one'),
+                        (info.st_size <= 0,'non-positive-size')] if invalid]}}),flush=True)
             assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size > 0
             files[name] = {'size':info.st_size,'sha256':digest(item)}
         descriptor = {'schema_version':1,'product':{'sha':source['source_sha'],'tree':source['source_tree']},'producer':producer,
@@ -704,11 +709,32 @@ def diagnostic_projection(raw, label, tracked, cwd):
                 'profile-mismatch required-key-missing target-override text-decode-failed tool-output-empty toolchain-mismatch '
                 'unexpected-error value-parse-failed value-type-invalid version-date-mismatch version-format-invalid version-mismatch').split())
             upload_observations = 0
+            raw_stat_observations = 0
             for line in text.splitlines():
+                if label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and '"raw_input_stat_observation"' in line:
+                    assert line.startswith('{') and len(line) <= 65536
                 if not line.startswith('{') or len(line) > 65536: continue
                 try: item = json.loads(line)
-                except ValueError: continue
+                except ValueError:
+                    assert label not in ['stage1-off-raw-package','stage1-enabled-raw-package'] or '"raw_input_stat_observation"' not in line
+                    continue
                 if not isinstance(item,dict): continue
+                if 'raw_input_stat_observation' in item:
+                    assert label in ['stage1-off-raw-package','stage1-enabled-raw-package'] and set(item) == {'raw_input_stat_observation'}
+                    observation = item['raw_input_stat_observation']
+                    assert isinstance(observation,dict) and set(observation) == {'is_regular','st_nlink','st_size','failures'}
+                    pairs = json.loads(line,object_pairs_hook=list)
+                    assert len(pairs) == 1 and len(pairs[0][1]) == 4
+                    raw_stat_observations += 1; assert raw_stat_observations == 1
+                    assert type(observation['is_regular']) is bool
+                    assert all(type(observation[field]) is int and 0 <= observation[field] <= 2**63 - 1 for field in ['st_nlink','st_size'])
+                    failures = [reason for invalid,reason in [(not observation['is_regular'],'not-regular'),
+                        (observation['st_nlink'] != 1,'link-count-not-one'),(observation['st_size'] <= 0,'non-positive-size')] if invalid]
+                    assert type(observation['failures']) is list and observation['failures'] == failures
+                    for field in ['is_regular','st_nlink','st_size']:
+                        value['diagnostics'].append({'level':'note','code':'raw-stat-' + field.replace('_','-') + ':' + str(observation[field]).lower(),'location':None})
+                    value['diagnostics'].extend({'level':'note','code':'raw-stat-failure:' + reason,'location':None} for reason in failures or ['none'])
+                    assert len(value['diagnostics']) <= 64
                 if label in ['stage1-off-native-pins','stage1-enabled-native-pins','stage1-enabled-checks-pins',
                         'stage1-off-raw-pins','stage1-off-full-pins','stage1-enabled-raw-pins','stage1-enabled-full-pins'] and 'upload_metadata_observation' in item:
                     assert set(item) == {'upload_metadata_observation'}
