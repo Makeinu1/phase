@@ -20,8 +20,8 @@ permissions:
 # A newly added fork workflow need not exist on default to run this push route.
 # Change these two literals only after receiving the reviewed product SHA.
 env:
-  P1_PUSH_CANDIDATE_SHA: ca0055c7c7136fe312db3a9dd8bef934fc88b7c7
-  P1_PUSH_MODE: preflight
+  P1_PUSH_CANDIDATE_SHA: 9168c3cb8fcb733ac08962507d5d2dc15e467441
+  P1_PUSH_MODE: build
 
 jobs:
   candidate-runtime:
