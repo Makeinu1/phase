@@ -297,6 +297,16 @@ fn choose_action_with_session_inner(
     durable_pact_routes: bool,
     diagnostics: bool,
 ) -> AiDecisionSelection {
+    // Manual resolution is a human-owned interaction. Do not ask the AI to
+    // score or choose even the engine-issued Finish action for this wait.
+    #[cfg(feature = "manual_resolution_prototype")]
+    if matches!(state.waiting_for, WaitingFor::ManualResolution { .. }) {
+        return AiDecisionSelection {
+            action: None,
+            receipt: None,
+        };
+    }
+
     let contract = AiDecisionContract::issue(state, ai_player);
     let direct = |action: Option<GameAction>| AiDecisionSelection {
         receipt: diagnostics
@@ -1228,6 +1238,12 @@ pub fn fallback_action(
     config: &AiConfig,
     contract: &AiDecisionContract,
 ) -> Option<GameAction> {
+    // Callers outside `choose_action` must preserve the same human-only rule.
+    #[cfg(feature = "manual_resolution_prototype")]
+    if matches!(state.waiting_for, WaitingFor::ManualResolution { .. }) {
+        return None;
+    }
+
     let gate = |action: Option<GameAction>| {
         action.filter(|action| contract.contains_action(state, action))
     };
@@ -1308,6 +1324,9 @@ pub fn fallback_action(
     let action = match &state.waiting_for {
         // Terminal — no action possible.
         WaitingFor::GameOver { .. } => None,
+        // Manual resolution remains with the human interaction path.
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution { .. } => None,
 
         // A local player explicitly proposed this shortcut. AI seats accept the
         // engine-issued consent so the authoritative Ready consumer can
@@ -6221,6 +6240,25 @@ mod tests {
             &create_config(AiDifficulty::VeryHard, Platform::Native),
             &test_contract(state),
         )
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    #[test]
+    fn ai_does_not_auto_choose_a_manual_resolution_response() {
+        let mut runner = GameScenario::new().build();
+        runner.state_mut().waiting_for = WaitingFor::ManualResolution {
+            player: P0,
+            stack_entry_id: ObjectId(99),
+        };
+
+        let action = choose_action(
+            runner.state(),
+            P0,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+            &mut SmallRng::seed_from_u64(1),
+        );
+
+        assert_eq!(action, None);
     }
 
     #[test]

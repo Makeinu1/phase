@@ -988,6 +988,7 @@ const PARTITION_FIXTURES: Record<
   DeclareAttackers: NO_TARGET_REF_LEGAL_SET,
   DeclareBlockers: NO_TARGET_REF_LEGAL_SET,
   Priority: NO_TARGET_REF_LEGAL_SET,
+  ManualResolution: NO_TARGET_REF_LEGAL_SET,
   ResolveAllConsent: NO_TARGET_REF_LEGAL_SET,
   ResolveAllReady: NO_TARGET_REF_LEGAL_SET,
   MeldPairChoice: NO_TARGET_REF_LEGAL_SET,

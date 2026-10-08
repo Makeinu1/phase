@@ -42,11 +42,11 @@ const SCANNABLE_EXTENSIONS = [".ts", ".tsx"];
  * enum switch on a mapped value, or a constructed string). Each entry MUST cite
  * the concrete dispatch site (file:line) proving the UI is real.
  *
- * Intentionally EMPTY: re-verified against current main, every handled variant
- * has a string-literal dispatch site in the scanned dirs.
+ * ManualResolution is rendered from the authenticated derived-view
+ * continuation instead of a WaitingFor string switch (GamePage.tsx:1721).
  */
 const STRING_LITERAL_HEURISTIC_BLIND_SPOTS: ReadonlySet<WaitingFor["type"]> =
-  new Set<WaitingFor["type"]>([]);
+  new Set<WaitingFor["type"]>(["ManualResolution"]);
 
 function collectSourceFiles(dir: string, acc: string[]): void {
   for (const entry of readdirSync(dir)) {

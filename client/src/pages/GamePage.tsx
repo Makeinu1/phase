@@ -22,12 +22,16 @@ import type {
   ObjectId,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
+  LocalContinuationCapability,
 } from "../adapter/types";
 import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
   ViewerInteraction,
+  InteractionId,
+  InteractionSubmission,
+  ManualCastAvailability,
 } from "../adapter/generated/interaction";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
@@ -57,6 +61,8 @@ import { BlockRequirementBadges } from "../components/combat/BlockRequirementBad
 import { AttackRequirementBadges } from "../components/combat/AttackRequirementBadges.tsx";
 import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
+import { ManualResolutionSandbox, type ManualResolutionSandboxTarget } from "../components/sandbox/ManualResolutionSandbox.tsx";
+import { useEngineCardData } from "../hooks/useEngineCardData.ts";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
@@ -70,7 +76,7 @@ import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { HandBadge } from "../components/hand/HandBadge.tsx";
-import { PlayerHand } from "../components/hand/PlayerHand.tsx";
+import { PlayerHand, type ManualHandCastController } from "../components/hand/PlayerHand.tsx";
 import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
 import { ReportCardNudge } from "../components/help/ReportCardNudge.tsx";
 import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
@@ -178,7 +184,8 @@ import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
-import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
+import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
+import { dispatchInteraction } from "../game/dispatch.ts";
 import { ABILITY_BLOCK_REASON_KEY } from "../viewmodel/abilityBlockReason.ts";
 import {
   abilityChoiceLabel,
@@ -274,6 +281,8 @@ export function GamePage() {
   const firstParam = searchParams.get("first");
   const roomNameParam = searchParams.get("roomName");
   const sourceParam = searchParams.get("source") ?? undefined;
+  const manualFixture = searchParams.get("manual") === "1"
+    ? searchParams.get("p1Fixture") : searchParams.has("p1Fixture") ? null : undefined;
   const draftIdParam = searchParams.get("draftId") ?? undefined;
   // The lobby authority this join/spectate was launched from. Produced by
   // our own navigation from a canonical `LobbySource.url`; a hand-edited
@@ -776,6 +785,7 @@ export function GamePage() {
       useBroker={useBroker}
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
+      manualFixture={manualFixture}
       draftId={draftIdParam}
       serverUrl={serverParam}
       onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
@@ -1022,6 +1032,128 @@ function GamePageContent({
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
+  const localContext = useGameStore((s) => s.localContinuationContext);
+  const manualView = gameState?.derived?.manual_resolution ?? null;
+  const manualCard = useEngineCardData(manualView?.source.name ?? null);
+  const continuation = adapter?.localContinuation?.() ?? null;
+  const viewerInteraction = useGameStore((s) => s.viewerInteraction);
+  const [manualCastAttempt, setManualCastAttempt] = useState<ManualHandCastController["attempt"]>(null);
+  const manualCastAttemptRef = useRef<ManualHandCastController["attempt"]>(null);
+  const manualCastOriginalRef = useRef<{ submission: InteractionSubmission; continuation: LocalContinuationCapability } | null>(null);
+  const [manualCastMessage, setManualCastMessage] = useState<string | null>(null);
+  const [manualLookupBusy, setManualLookupBusy] = useState(false);
+  const manualLookupBusyRef = useRef(false);
+  const manualOfferFor = useCallback((objectId: number): { interactionId: InteractionId; availability: ManualCastAvailability } | null => {
+    if (!continuation || perspectivePlayerId !== getPlayerId() || !viewerInteraction?.canSubmit) return null;
+    for (const opportunity of viewerInteraction.opportunities) {
+      if (opportunity.response.type !== "exactChoices") continue;
+      for (const choice of opportunity.response.data.choices) {
+        if (choice.status.type !== "available" || !choice.surfaces.some((surface) =>
+          surface.type === "action" && surface.data.code === "castSpell")) continue;
+        // Native object surfaces map the selected display card; choice IDs stay opaque.
+        if (!choice.surfaces.some((surface) => surface.type === "object"
+          && surface.data.reference === String(objectId))) continue;
+        const surface = choice.surfaces.find((candidate) => candidate.type === "manualCast");
+        if (surface?.type === "manualCast") return { interactionId: opportunity.interactionId, availability: surface.data.availability };
+      }
+    }
+    return null;
+  }, [continuation, perspectivePlayerId, viewerInteraction]);
+  const castManually = async (objectId: number) => {
+    const offer = manualOfferFor(objectId);
+    if (!continuation || !offer || offer.availability.type !== "supported" || manualCastAttemptRef.current) return;
+    const { source, choiceId } = offer.availability.data;
+    const submission: InteractionSubmission = { interactionId: offer.interactionId,
+      response: { type: "choose", data: { choiceId } } };
+    const attempt = { objectId: source.sourceId, cardName: source.name, status: "submitting" as const };
+    manualCastOriginalRef.current = { submission, continuation };
+    manualCastAttemptRef.current = attempt;
+    setManualCastAttempt(attempt);
+    setManualCastMessage(null);
+    try {
+      const publication = await dispatchInteraction(submission, getPlayerId(), source);
+      const status = publication?.receipt?.status;
+      const next = status === "completed" || status === "not-applied" ? null
+        : { ...attempt, status: status === "pending" ? "pending" as const : "indeterminate" as const };
+      manualCastAttemptRef.current = next;
+      if (!next) manualCastOriginalRef.current = null;
+      setManualCastAttempt(next);
+      if (status === "not-applied") setManualCastMessage(t("manualResolution.notAppliedRetry"));
+    } catch (error) {
+      // Missing terminal evidence keeps the adapter's captured original intact.
+      const next = { ...attempt, status: "indeterminate" as const };
+      manualCastAttemptRef.current = next;
+      setManualCastAttempt(next);
+      setManualCastMessage(error instanceof Error ? error.message : t("manualResolution.deliveryUnknown"));
+    }
+  };
+  const checkManualCast = async () => {
+    const attempt = manualCastAttemptRef.current;
+    const original = manualCastOriginalRef.current;
+    if (!original || manualLookupBusyRef.current || !attempt || attempt.status === "submitting") return;
+    manualLookupBusyRef.current = true;
+    setManualLookupBusy(true);
+    try {
+      const publication = await original.continuation.lookupInteraction(original.submission);
+      const status = publication.receipt?.status;
+      const next = status === "completed" || status === "not-applied" ? null
+        : { ...attempt, status: status === "pending" ? "pending" as const : "indeterminate" as const };
+      manualCastAttemptRef.current = next;
+      if (!next) manualCastOriginalRef.current = null;
+      setManualCastAttempt(next);
+      setManualCastMessage(status === "not-applied" ? t("manualResolution.notAppliedRetry") : null);
+    } catch (error) {
+      setManualCastMessage(error instanceof Error ? error.message : t("manualResolution.deliveryUnknown"));
+    } finally {
+      manualLookupBusyRef.current = false;
+      setManualLookupBusy(false);
+    }
+  };
+  const manualHandCast: ManualHandCastController | null = continuation && perspectivePlayerId === getPlayerId() ? {
+    availabilityFor: (objectId) => manualOfferFor(objectId)?.availability ?? null,
+    submit: castManually,
+    attempt: manualCastAttempt,
+    message: manualCastMessage,
+    lookupBusy: manualLookupBusy,
+    checkStatus: checkManualCast,
+  } : null;
+  const [manualTarget, setManualTarget] = useState<ManualResolutionSandboxTarget | null>(null);
+  const [manualAmount, setManualAmount] = useState("");
+  const manualReturnFocusRef = useRef<HTMLElement | null>(null);
+  const manualIdentity = manualView && localContext
+    ? JSON.stringify([localContext.restoreEpoch, localContext.adapterGeneration, manualView.source]) : null;
+  const previousManualIdentity = useRef(manualIdentity);
+  const lastManualBinding = useRef<{ identity: string; interactionId: InteractionId; minimum: number; maximum: number | null } | null>(null);
+  if (manualIdentity && manualView?.interactionId && manualView.minLifeLoss !== null) {
+    lastManualBinding.current = { identity: manualIdentity, interactionId: manualView.interactionId,
+      minimum: manualView.minLifeLoss, maximum: manualView.maxLifeLoss };
+  }
+  useEffect(() => {
+    if (previousManualIdentity.current === manualIdentity) return;
+    previousManualIdentity.current = manualIdentity;
+    setManualTarget(null);
+    setManualAmount("");
+  }, [manualIdentity]);
+  const manualInteractionId = manualView?.interactionId
+    ?? (lastManualBinding.current?.identity === manualIdentity ? lastManualBinding.current?.interactionId : null);
+  const manualAmountBounds = manualView?.minLifeLoss != null
+    ? { minimum: manualView.minLifeLoss, maximum: manualView.maxLifeLoss }
+    : lastManualBinding.current?.identity === manualIdentity ? {
+      minimum: lastManualBinding.current.minimum, maximum: lastManualBinding.current.maximum,
+    } : null;
+  const manualOwnedView = manualView?.source.actor === playerId && perspectivePlayerId === playerId;
+  const manualStackEntryId = manualView?.source.stackEntryId;
+  const manualSourceObjectId = manualView?.source.sourceId;
+  const localAdapterGeneration = localContext?.adapterGeneration;
+  const localRestoreEpoch = localContext?.restoreEpoch;
+  const manualPort = useMemo(() => {
+    if (!continuation || localAdapterGeneration == null || localRestoreEpoch == null || !manualOwnedView || manualStackEntryId == null || manualSourceObjectId == null) return null;
+    return continuation.commandPortFactory({
+      stackEntryId: manualStackEntryId as ObjectId,
+      sourceObjectId: manualSourceObjectId as ObjectId,
+      adapterGeneration: localAdapterGeneration,
+    });
+  }, [continuation, localAdapterGeneration, localRestoreEpoch, manualOwnedView, manualStackEntryId, manualSourceObjectId]);
   const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
   const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
   const [aiDecisionReceipt, setAiDecisionReceipt] = useState<AiDecisionDiagnosticReceipt | null>(null);
@@ -1570,6 +1702,13 @@ function GamePageContent({
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
           <GameBoard
+            manualPlayerAreaSelection={manualOwnedView && manualView && manualPort ? {
+              playerId,
+              playerName: getPlayerDisplayName(playerId),
+              selected: manualTarget?.playerId === playerId,
+              onSelect: () => { if (manualView.phase === "open") setManualTarget({ playerId, name: getPlayerDisplayName(playerId) }); },
+              returnFocusRef: manualReturnFocusRef,
+            } : null}
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
@@ -1577,6 +1716,33 @@ function GamePageContent({
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
+          {manualView && localContext && manualStackEntryId != null && (
+            <div className="absolute bottom-2 right-2 z-50 max-h-[70vh] w-[min(30rem,calc(100vw-1rem))] overflow-auto">
+              {manualInteractionId && manualAmountBounds ? <ManualResolutionSandbox
+                source={{ episodeId: manualIdentity!, stackEntryId: manualStackEntryId as ObjectId,
+                  sourceObjectId: manualView.source.sourceId as ObjectId, cardName: manualView.source.name,
+                  oracleText: manualCard?.oracle_text ?? "" }}
+                viewerPlayerId={manualOwnedView ? playerId : null}
+                selectedTarget={manualTarget}
+                onSelectedTargetChange={setManualTarget}
+                amountText={manualAmount}
+                onAmountTextChange={setManualAmount}
+                onPreviewSource={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}
+                operationAvailability={{ available: manualView.phase === "open" && manualView.minLifeLoss !== null,
+                  amountBounds: manualAmountBounds }}
+                canFinish={manualView.phase === "open"}
+                resolutionPhase={manualView.phase}
+                commandBinding={{ interactionId: manualInteractionId, adapterGeneration: localContext.adapterGeneration }}
+                confirmedRestoreEpoch={localContext.restoreEpoch}
+                commandPort={manualOwnedView ? manualPort : null}
+                returnFocusRef={manualReturnFocusRef}
+              /> : <section className="rounded-lg bg-slate-950 p-4 text-slate-100" aria-label={t("manualResolution.title")}>
+                <h2>{manualView.source.name}</h2><p className="whitespace-pre-wrap">{manualCard?.oracle_text ?? ""}</p>
+                <button type="button" onClick={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}>{t("manualResolution.readSource")}</button>
+                <p>{t(manualView.phase === "armed" ? "manualResolution.armed" : "manualResolution.displayOnly")}</p>
+              </section>}
+            </div>
+          )}
         </div>
 
         {/* Row 3: Player hand + zones. The hand is top-anchored in this row, so
@@ -1601,7 +1767,7 @@ function GamePageContent({
                 PlayerHand's own fan (see ZoneFanCard), so the row is just the hand.
                 The `playerHandRow` flex-zone hook drives the mobile hand-lift
                 transform in index.css. */}
-            <PlayerHand interactionDisabled={boardChoiceLayerActive} />
+            <PlayerHand interactionDisabled={boardChoiceLayerActive} manualCast={manualHandCast} />
           </div>
           <DraggableWidget
             target={{ kind: "widget", key: "playerPiles" }}
@@ -1710,7 +1876,7 @@ function GamePageContent({
         </div>
       </DraggableWidget>
 
-      <MobileHandDrawer interactionDisabled={boardChoiceLayerActive} />
+      <MobileHandDrawer interactionDisabled={boardChoiceLayerActive} manualCast={manualHandCast} />
       <FlexEditOverlay />
 
       {/* Game menu — top-left hamburger */}

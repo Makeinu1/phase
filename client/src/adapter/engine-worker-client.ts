@@ -21,6 +21,9 @@ import type {
   SubmitResult,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
+  LocalCapture,
+  LocalContinuationEnvelope,
+  LocalContinuationResult,
 } from "./types";
 import {
   actionRejectionError,
@@ -170,9 +173,10 @@ export class EngineWorkerClient {
    *
    * `timeoutMs` arms a watchdog. The default `notify` behavior keeps a slow
    * gameplay request alive and informs the UI, allowing a late reply to resolve
-   * normally. The initialization-only `reject` behavior removes and rejects a
-   * stalled request so the adapter can fall back. Bulk setup calls (card-DB
-   * load, game init, batch resolve, restore) deliberately have no timeout.
+   * normally. The `reject` behavior removes and rejects a stalled disposable
+   * RPC; Local callers reconcile their original, while initialization may fall
+   * back. Bulk setup calls (card-DB load, game init, batch resolve, ordinary
+   * restore) deliberately have no timeout.
    */
   private request<T>(
     message: Record<string, unknown>,
@@ -262,6 +266,24 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "canonicalCardNames", names });
   }
 
+  async initializeExperimentalLocalGame(request: {
+    deckData?: unknown; seed?: number; formatConfig?: unknown; matchConfig?: unknown;
+    playerCount?: number; firstPlayer?: number; trustedCheckpoint?: string;
+  }): Promise<SubmitResult & { localContinuationContext?: LocalCapture }> {
+    if (request === null || typeof request !== "object" || Array.isArray(request)
+      || (Object.getPrototypeOf(request) !== null && Object.getPrototypeOf(request) !== Object.prototype)
+      || Reflect.ownKeys(request).some((key) => typeof key !== "string"
+        || !["deckData", "seed", "formatConfig", "matchConfig", "playerCount", "firstPlayer", "trustedCheckpoint"].includes(key))) {
+      throw new Error("Invalid experimental Local request");
+    }
+    return this.request<SubmitResult & { localContinuationContext?: LocalCapture }>({ ...request, type: "initializeExperimentalLocalGame" });
+  }
+
+  async experimentalLocalActor(): Promise<0 | null> {
+    const actor = await this.request<unknown>({ type: "experimentalLocalActor" });
+    return actor === 0 ? 0 : null;
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,
@@ -332,6 +354,22 @@ export class EngineWorkerClient {
     );
   }
 
+  async submitLocalContinuation(actor: number, submission: LocalContinuationEnvelope): Promise<LocalContinuationResult> {
+    return this.request<LocalContinuationResult>(
+      { type: "submitInteraction", actor, submission },
+      ENGINE_REQUEST_TIMEOUT_MS,
+      "reject",
+    );
+  }
+
+  async readLocalCurrent(): Promise<LocalContinuationResult> {
+    return this.request<LocalContinuationResult>(
+      { type: "getViewerSnapshot", viewerId: 0, localContinuation: true },
+      ENGINE_REQUEST_TIMEOUT_MS,
+      "reject",
+    );
+  }
+
   async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
     return this.request<number[]>(
       { type: "previewManaPayment", actor, action },
@@ -373,8 +411,8 @@ export class EngineWorkerClient {
    * Same timeout class as `getState`. The caller (`WasmAdapter.getSnapshot`)
    * stamps the `seq` on arrival.
    */
-  async getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
-    return this.request<{ state: GameState; legalResult: LegalActionsResult }>(
+  async getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult; frameSequence?: number }> {
+    return this.request<{ state: GameState; legalResult: LegalActionsResult; frameSequence?: number }>(
       { type: "getSnapshot" },
       ENGINE_REQUEST_TIMEOUT_MS,
     );

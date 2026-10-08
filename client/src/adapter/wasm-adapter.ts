@@ -24,12 +24,20 @@ import type {
   SubmitResult,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
+  LocalCapture,
+  LocalOriginalAttempt,
+  LocalContinuationResult,
+  LocalContinuationPublication,
+  LocalContinuationCapability,
 } from "./types";
 import type {
   InteractionPreview,
   InteractionPreviewRequest,
   InteractionSubmission,
+  ManualResolutionSource,
 } from "./generated/interaction";
+import { createManualResolutionReceiptSession, type ManualResolutionAtomicBoundary } from "./experimental/manual-resolution-receipts";
+import type { ManualResolutionRequest, ManualResolutionResult, ManualResolutionReconciliation } from "../components/sandbox/manual-resolution-ui-contract";
 import {
   actionRejectionError,
   AdapterError,
@@ -249,6 +257,192 @@ function describeCardDbError(err: unknown): string {
 export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
   private initialized = false;
   private disposed = false;
+  private experimentalLocalOwner: { engine: EngineWorkerClient; lifecycle: number } | null = null;
+  private localCapability: LocalContinuationCapability | null = null;
+  private localContext: LocalCapture | null = null;
+  private localLatest: LocalContinuationPublication | null = null;
+  private localUnresolved: LocalOriginalAttempt | null = null;
+  private localAttempts = new WeakMap<object, LocalOriginalAttempt>();
+  private localListeners = new Set<(publication: LocalContinuationPublication) => void | Promise<void>>();
+  private localAuthorityFrame: { sequence: number; snapshotSeq: number } | null = null;
+
+  private sequenceForAuthority(sequence: number): number | null {
+    if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
+    const latest = this.localAuthorityFrame;
+    if (latest && sequence < latest.sequence) return null;
+    if (latest && sequence === latest.sequence) return latest.snapshotSeq;
+    const stamp = nextSnapshotSeq();
+    this.localAuthorityFrame = { sequence, snapshotSeq: stamp };
+    return stamp;
+  }
+
+  localContinuation(): LocalContinuationCapability | null {
+    const owner = this.experimentalLocalOwner;
+    return owner && owner.engine === this.engine && owner.lifecycle === this.lifecycleGeneration ? this.localCapability : null;
+  }
+
+  private installLocalContinuation(context: LocalCapture): void {
+    const owner = this.experimentalLocalOwner!;
+    this.localAuthorityFrame = null;
+    this.localContext = Object.freeze({ ...context });
+    this.localAttempts = new WeakMap();
+    const localAttempts = this.localAttempts;
+    this.localUnresolved = null;
+    this.localLatest = null;
+    this.localListeners.clear();
+    const deliveredResults = new WeakSet<LocalOriginalAttempt>();
+    const currentOwner = () => this.experimentalLocalOwner === owner && owner.engine === this.engine && owner.lifecycle === this.lifecycleGeneration;
+    const publish = async (reply: LocalContinuationResult, notify: boolean, restoring = false, attempt?: LocalOriginalAttempt): Promise<LocalContinuationPublication> => {
+      let engineSnapshot: EngineSnapshot | null = null;
+      let current = reply.current;
+      if (!currentOwner()) current = null;
+      if (current && this.localContext) {
+        const expected = this.localContext;
+        const matching = JSON.stringify(current.context) === JSON.stringify(expected);
+        const rekey = restoring && current.context.ownerLineage === expected.ownerLineage
+          && current.context.restoreEpoch === expected.restoreEpoch + 1 && current.context.adapterGeneration === expected.adapterGeneration + 1;
+        if (!matching && !rekey) current = null;
+        else {
+          const seq = this.sequenceForAuthority(current.frameSequence);
+          if (seq === null) current = null;
+          else {
+            this.localContext = Object.freeze({ ...current.context });
+            current = { ...current, snapshot: { ...current.snapshot, state: unwrapClientGameState(current.snapshot.state) } };
+            const { state, events: _events, ...legalResult } = current.snapshot;
+            engineSnapshot = { state, legalResult, seq };
+          }
+        }
+      }
+      // An older reply cannot replace the current board. Its exact original
+      // receipt can still deliver history that this client has not observed.
+      if (!current && currentOwner() && this.localLatest?.current && this.localLatest.engineSnapshot) {
+        current = this.localLatest.current;
+        engineSnapshot = this.localLatest.engineSnapshot;
+      }
+      const latest = engineSnapshot !== null && (!this.localLatest?.engineSnapshot || engineSnapshot.seq >= this.localLatest.engineSnapshot.seq);
+      const receipt = attempt && JSON.stringify(reply.receipt?.attempt) !== JSON.stringify(attempt)
+        ? { attempt, status: "indeterminate" as const, result: null, rejection: null }
+        : reply.receipt;
+      const appliedResult = currentOwner() && current && engineSnapshot && attempt && receipt?.status === "completed"
+        && JSON.stringify(attempt.context) === JSON.stringify(this.localContext)
+        && receipt.result && !deliveredResults.has(attempt) ? receipt.result : null;
+      if (appliedResult && attempt) deliveredResults.add(attempt);
+      const publication: LocalContinuationPublication = { ...reply, current, engineSnapshot,
+        receipt, appliedResult };
+      if (current && latest) this.localLatest = publication;
+      if (receipt && this.localUnresolved?.attemptId === receipt.attempt.attemptId
+        && (receipt.status === "completed" || receipt.status === "not-applied")) this.localUnresolved = null;
+      if (notify && currentOwner()) for (const listener of this.localListeners) await listener(publication);
+      return publication;
+    };
+    const capture = (key: object, submission: InteractionSubmission, source: ManualResolutionSource): LocalOriginalAttempt => {
+      const existing = this.localAttempts.get(key);
+      if (existing) {
+        if (JSON.stringify(existing.submission) !== JSON.stringify(submission) || JSON.stringify(existing.source) !== JSON.stringify(source)) throw new Error("Local original intent changed");
+        return existing;
+      }
+      if (!currentOwner() || !this.localContext) throw new Error("Authenticated Local continuation unavailable");
+      const cloned = JSON.parse(JSON.stringify({ submission, source })) as { submission: InteractionSubmission; source: ManualResolutionSource };
+      const attempt = Object.freeze({ context: this.localContext, attemptId: crypto.randomUUID(),
+        submission: Object.freeze(cloned.submission), source: Object.freeze(cloned.source) });
+      this.localAttempts.set(key, attempt);
+      return attempt;
+    };
+    const unknown = (attempt: LocalOriginalAttempt): LocalContinuationPublication => ({
+      type: "localContinuation", receipt: { attempt, status: "indeterminate", result: null, rejection: null }, current: null, appliedResult: null, engineSnapshot: null,
+    });
+    const submit = async (attempt: LocalOriginalAttempt): Promise<LocalContinuationPublication> => {
+      if (!currentOwner()) return unknown(attempt);
+      this.localUnresolved = attempt;
+      try {
+        let registered: LocalContinuationResult | null = null;
+        try {
+          registered = await owner.engine.submitLocalContinuation(0, { type: "localContinuation", operation: "register", attempt });
+        } catch {
+          // Registration may have succeeded before its reply was lost. This
+          // initial delivery still sends only the same original apply; native
+          // custody decides whether it was registered or certifies absence.
+        }
+        if (registered && registered.receipt?.status !== "pending") return publish(registered, true, false, attempt);
+        if (!currentOwner()) return unknown(attempt);
+        const reply = await owner.engine.submitLocalContinuation(0, { type: "localContinuation", operation: "apply", attempt });
+        return publish(reply, true, false, attempt);
+      } catch { return unknown(attempt); }
+    };
+    const lookup = async (attempt: LocalOriginalAttempt): Promise<LocalContinuationPublication> => {
+      if (!currentOwner()) return unknown(attempt);
+      try { return await publish(await owner.engine.submitLocalContinuation(0, { type: "localContinuation", operation: "lookup", attempt }), true, false, attempt); }
+      catch { return unknown(attempt); }
+    };
+    const resultFor = (request: ManualResolutionRequest, publication: LocalContinuationPublication): ManualResolutionResult => {
+      switch (publication.receipt?.status) {
+        case "completed": return { binding: request.binding, status: "completed" };
+        case "not-applied": return { binding: request.binding, status: "rejected", reason: publication.receipt.rejection?.message ?? "Local request not applied" };
+        case "pending": case "indeterminate": case undefined: return { binding: request.binding, status: "indeterminate", reason: "Local request outcome unresolved" };
+      }
+    };
+    const boundary: ManualResolutionAtomicBoundary = {
+      submitCaptured: async (request) => {
+        let attempt = this.localAttempts.get(request);
+        if (!attempt) {
+          const frame = this.localLatest?.current;
+          const source = frame?.snapshot.state.derived?.manual_resolution?.source;
+          const opportunity = frame?.snapshot.viewerInteraction?.opportunities.find((candidate) => candidate.interactionId === request.binding.interactionId);
+          if (!source || !opportunity || frame?.context.adapterGeneration !== request.binding.adapterGeneration
+            || source.stackEntryId !== request.command.stackEntryId || source.sourceId !== request.command.sourceObjectId) {
+            return { binding: request.binding, status: "rejected", reason: "Captured Manual frame unavailable" };
+          }
+          let submission: InteractionSubmission;
+          if (request.command.type === "lose-life") submission = { interactionId: request.binding.interactionId,
+            response: { type: "manualResolution", data: { decision: { type: "loseOwnLife", data: { amount: request.command.amount } } } } };
+          else {
+            const choice = opportunity.response.type === "schema" ? opportunity.response.data.candidates.find((candidate) => candidate.surfaces.some((surface) => surface.type === "action" && surface.data.code === "finishManualResolution")) : undefined;
+            if (!choice) return { binding: request.binding, status: "rejected", reason: "Captured Finish choice unavailable" };
+            submission = { interactionId: request.binding.interactionId,
+              response: { type: "manualResolution", data: { decision: { type: "finish", data: { choiceId: choice.id } } } } };
+          }
+          attempt = capture(request, submission, source);
+        }
+        return resultFor(request, await submit(attempt));
+      },
+      lookupReceipt: async (request): Promise<ManualResolutionReconciliation> => {
+        const attempt = this.localAttempts.get(request);
+        if (!attempt) return { binding: request.binding, status: "indeterminate", reason: "Original attempt unavailable" };
+        const publication = await lookup(attempt);
+        switch (publication.receipt?.status) {
+          case "pending": return { binding: request.binding, status: "pending" };
+          case "completed": return { binding: request.binding, status: "completed" };
+          case "not-applied": return { binding: request.binding, status: "not-applied", reason: publication.receipt.rejection?.message };
+          case "indeterminate": case undefined: return { binding: request.binding, status: "indeterminate" };
+        }
+      },
+    };
+    this.localCapability = {
+      readCurrent: async () => {
+        if (!currentOwner()) throw new Error("Authenticated Local continuation unavailable");
+        return this.localUnresolved ? lookup(this.localUnresolved) : publish(await owner.engine.readLocalCurrent(), false);
+      },
+      lookupInteraction: async (submission) => {
+        const attempt = localAttempts.get(submission);
+        return attempt ? lookup(attempt) : {
+          type: "localContinuation", receipt: null, current: null, appliedResult: null, engineSnapshot: null,
+        };
+      },
+      submitInteraction: (submission, source) => submit(capture(submission, submission, source)),
+      restore: async (checkpoint) => {
+        if (!currentOwner() || !this.localContext) throw new Error("Authenticated Local continuation unavailable");
+        await this.requireCardDb();
+        if (!currentOwner()) throw new Error("Local lifecycle changed");
+        return publish(await owner.engine.submitLocalContinuation(0, { type: "localContinuation", operation: "restore", context: this.localContext, checkpoint }), true, true);
+      },
+      commandPortFactory: createManualResolutionReceiptSession({ authenticatedActor: 0, describeFailure: (failure) => failure }).bindBoundary(boundary),
+      subscribe: (listener) => {
+        if (!currentOwner()) return () => {};
+        this.localListeners.add(listener);
+        return () => this.localListeners.delete(listener);
+      },
+    };
+  }
   private unregisterDiagnostics: (() => void) | null = null;
 
   constructor() {
@@ -597,6 +791,12 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   async getSnapshot(): Promise<EngineSnapshot> {
     this.assertInitialized("getSnapshot");
     try {
+      const local = this.localContinuation();
+      if (local) {
+        const publication = await local.readCurrent();
+        if (publication.engineSnapshot) return publication.engineSnapshot;
+        throw new Error("Current Local frame unavailable");
+      }
       const raw = this.engine
         ? await this.engine.getSnapshot()
         : await this.fallback!.getSnapshot();
@@ -975,6 +1175,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const json = JSON.stringify(state);
     if (this.engine) await this.engine.restoreState(json);
     else await this.fallback!.restoreState(json);
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
   }
 
@@ -1029,6 +1230,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       await this.fallback!.setMultiplayerMode(enabled);
     }
     this.invalidateAiDecisionDiagnostics();
+    if (enabled) this.experimentalLocalOwner = null;
   }
 
   async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
@@ -1082,6 +1284,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const resumed = this.engine
       ? await this.engine.resumeMultiplayerHostState(json)
       : await this.fallback!.resumeMultiplayerHostState(json, owner);
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
     return {
       presentation: resumed.presentation,
@@ -1105,6 +1308,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     } else {
       await this.fallback!.resetGameState();
     }
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
   }
 
@@ -1276,6 +1480,11 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   dispose(): void {
+    this.experimentalLocalOwner = null;
+    this.localCapability = null;
+    this.localContext = null;
+    this.localListeners.clear();
+    this.localAuthorityFrame = null;
     this.disposed = true;
     this.unregisterDiagnostics?.();
     this.unregisterDiagnostics = null;
@@ -1308,6 +1517,45 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return this.fallback!.ping();
   }
 
+  async initializeExperimentalLocalGame(
+    request: Parameters<EngineWorkerClient["initializeExperimentalLocalGame"]>[0],
+  ): Promise<SubmitResult> {
+    this.assertInitialized("initializeExperimentalLocalGame");
+    const engine = this.engine;
+    if (!engine) throw new Error("Experimental Local requires a dedicated Worker");
+    const lifecycle = this.lifecycleGeneration;
+    if (request === null || typeof request !== "object" || Array.isArray(request)
+      || (Object.getPrototypeOf(request) !== null && Object.getPrototypeOf(request) !== Object.prototype)
+      || Reflect.ownKeys(request).some((key) => typeof key !== "string"
+        || !["deckData", "seed", "formatConfig", "matchConfig", "playerCount", "firstPlayer", "trustedCheckpoint"].includes(key))) {
+      throw new Error("Invalid experimental Local request");
+    }
+    if (request.deckData || request.trustedCheckpoint !== undefined) await this.requireCardDb();
+    const result = await engine.initializeExperimentalLocalGame(request);
+    this.experimentalLocalOwner = null;
+    if (this.engine !== engine || this.lifecycleGeneration !== lifecycle
+      || await engine.experimentalLocalActor() !== 0) {
+      throw new Error("Experimental Local admission unavailable");
+    }
+    if (this.engine !== engine || this.lifecycleGeneration !== lifecycle) {
+      throw new Error("Experimental Local lifecycle changed");
+    }
+    this.experimentalLocalOwner = { engine, lifecycle };
+    if (result.localContinuationContext) this.installLocalContinuation(result.localContinuationContext);
+    else this.localCapability = null;
+    this.invalidateAiDecisionDiagnostics();
+    return result;
+  }
+
+  async experimentalLocalActor(): Promise<0 | null> {
+    const owner = this.experimentalLocalOwner;
+    if (!owner || owner.engine !== this.engine || owner.lifecycle !== this.lifecycleGeneration) return null;
+    const actor = await owner.engine.experimentalLocalActor();
+    if (this.experimentalLocalOwner !== owner || owner.engine !== this.engine
+      || owner.lifecycle !== this.lifecycleGeneration || actor !== 0) return null;
+    return 0;
+  }
+
   async initializeGame(
     deckData?: unknown,
     formatConfig?: FormatConfig,
@@ -1329,6 +1577,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         playerCount,
         firstPlayer,
       );
+      this.experimentalLocalOwner = null;
       this.invalidateAiDecisionDiagnostics();
       return result;
     }
@@ -1340,6 +1589,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       playerCount,
       firstPlayer,
     );
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
     return result;
   }
@@ -1374,6 +1624,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         playerCount,
         firstPlayer,
       );
+      this.experimentalLocalOwner = null;
       this.invalidateAiDecisionDiagnostics();
       return result;
     }
@@ -1386,6 +1637,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       firstPlayer,
       owner,
     );
+    this.experimentalLocalOwner = null;
     this.invalidateAiDecisionDiagnostics();
     return { events: result.events, log_entries: result.log_entries };
   }

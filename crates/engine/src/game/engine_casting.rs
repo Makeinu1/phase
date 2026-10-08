@@ -25,6 +25,8 @@ pub(super) fn cancel_pending_cast(
             "Cannot cancel an activation after a cost is paid".to_string(),
         ));
     }
+    #[cfg(feature = "manual_resolution_prototype")]
+    state.clear_manual_resolution_source(pending_cast.object_id);
     // CR 601.2: if a player cannot comply with a casting step, that illegal
     // cast returns to the moment before the spell was proposed. This rules
     // note covers only that incomplete-casting rollback fact.

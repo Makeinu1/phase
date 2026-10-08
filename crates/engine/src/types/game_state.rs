@@ -62,13 +62,15 @@ use super::resolution::{
     ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedContinuousEffectCommand,
-    ResolvedContinuousEffectReplayInvariantError, ResolvedFrameTransition,
-    ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError,
-    ResolvedInformationAudience, ResolvedInformationCommand, ResolvedInformationEdit,
-    ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
-    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ManaPaymentRecipient, ResolvedContinuousEffectCommand, ResolvedContinuousEffectEdit,
+    ResolvedContinuousEffectEditReplayInvariantError, ResolvedContinuousEffectReplayInvariantError,
+    ResolvedContinuousEffectRetirementCommand, ResolvedContinuousEffectRetirementInvariantError,
+    ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
+    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
+    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
     RulesExecutionNodeRef,
 };
@@ -589,6 +591,9 @@ pub struct TriggerSourceContext {
     pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 201.5a: the granter stamped on the trigger definition this context was handed with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 impl std::fmt::Debug for TriggerSourceContext {
@@ -665,8 +670,11 @@ impl std::fmt::Debug for TriggerSourceContext {
                 &self.additional_cost_payment_count,
             )
             .field("additional_cost_payments", &self.additional_cost_payments)
-            .field("cast_cost_paid_object", &self.cast_cost_paid_object)
-            .finish()
+            .field("cast_cost_paid_object", &self.cast_cost_paid_object);
+        if self.granting_object.is_some() {
+            debug.field("granting_object", &self.granting_object);
+        }
+        debug.finish()
     }
 }
 
@@ -1159,6 +1167,70 @@ pub struct ManaSpentSourceSnapshot {
 pub struct CastOccurrence {
     pub caster: PlayerId,
     pub turn_journal_index: u32,
+}
+
+/// The paid occurrence selected for Manual resolution. Transport authority is never saved.
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualResolutionBinding {
+    pub actor: PlayerId,
+    pub stack_entry_id: ObjectId,
+    pub source: ObjectIncarnationRef,
+    pub cast_occurrence: CastOccurrence,
+}
+
+/// Begin's validated instruction input, latched before the automatic body.
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualResolutionBegin {
+    pub owner: PlayerId,
+    pub source: ObjectIncarnationRef,
+    pub ability: Option<Box<ResolvedAbility>>,
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualResolutionActivePhase {
+    Open,
+    TerminalChildPending,
+}
+
+/// One source's custody through ordinary casting and resolution. The sole full
+/// stack entry is `GameState::resolving_stack_entry`, never a second frame here.
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", content = "data", deny_unknown_fields)]
+pub enum ManualResolutionState {
+    Casting {
+        actor: PlayerId,
+        source: ObjectIncarnationRef,
+    },
+    Armed {
+        binding: ManualResolutionBinding,
+    },
+    Active {
+        binding: ManualResolutionBinding,
+        begin: ManualResolutionBegin,
+        phase: ManualResolutionActivePhase,
+    },
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+impl ManualResolutionState {
+    pub fn binding(&self) -> Option<&ManualResolutionBinding> {
+        match self {
+            Self::Casting { .. } => None,
+            Self::Armed { binding } | Self::Active { binding, .. } => Some(binding),
+        }
+    }
+    pub fn source_id(&self) -> ObjectId {
+        match self {
+            Self::Casting { source, .. } => source.object_id,
+            Self::Armed { binding } | Self::Active { binding, .. } => binding.source.object_id,
+        }
+    }
 }
 
 /// CR 602.2 + CR 601.2c: one NON-MANA activated ability that was activated this
@@ -2677,6 +2749,9 @@ pub struct PendingExileFromTopUntil {
     pub linked_batch: Vec<ObjectIncarnationRef>,
     /// Cumulative property total completed before the pause.
     pub cumulative: i32,
+    /// `NextMatches` hits completed before the pause, in exile order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<ObjectId>,
 }
 
 impl PendingContinuation {
@@ -13306,6 +13381,345 @@ impl GameState {
     /// caller can finalize or replay it; otherwise a crafted raw snapshot can
     /// smuggle an out-of-range actor/owner through serde and into the ordinary
     /// action boundary.
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub(crate) fn manual_resolution_source_is_supported(
+        &self,
+        actor: PlayerId,
+        entry: &StackEntry,
+    ) -> bool {
+        self.manual_resolution_source_is_supported_in_zone(actor, entry, Zone::Stack)
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub(crate) fn manual_cast_source_is_supported(
+        &self,
+        actor: PlayerId,
+        source: ObjectIncarnationRef,
+        card_id: CardId,
+        entry: &StackEntry,
+    ) -> bool {
+        entry.id == source.object_id
+            && entry.source_id == source.object_id
+            && matches!(&entry.kind, StackEntryKind::Spell { card_id: announced_card, .. } if *announced_card == card_id)
+            && self.objects.get(&source.object_id).is_some_and(|object| {
+                object.incarnation == source.incarnation && object.card_id == card_id
+            })
+            && entry.ability().is_some_and(|ability| {
+                ability.source_id == source.object_id && ability.controller == actor
+            })
+            && self.manual_resolution_source_is_supported_in_zone(actor, entry, Zone::Hand)
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    fn manual_resolution_source_is_supported_in_zone(
+        &self,
+        actor: PlayerId,
+        entry: &StackEntry,
+        zone: Zone,
+    ) -> bool {
+        // This first prototype has no controlled-player operation authority.
+        // Reuse this eligibility check at designation, active operations, Finish,
+        // and checked restore so raw actions and interaction capabilities agree.
+        if crate::game::turn_control::live_authorized_submitter_for_player(self, actor) != actor {
+            return false;
+        }
+        let StackEntryKind::Spell {
+            ability,
+            casting_variant,
+            ..
+        } = &entry.kind
+        else {
+            return false;
+        };
+        let Some(object) = self.objects.get(&entry.id) else {
+            return false;
+        };
+        if entry.controller != actor
+            || object.owner != actor
+            || object.controller != actor
+            || object.zone != zone
+            || object.is_token
+            || object.is_copy
+            || object.exile_from_stack_linked_source.is_some()
+            || object.exile_from_stack_rider.is_some()
+            || !casting_variant.is_normal()
+            || ability
+                .as_deref()
+                .is_some_and(|spell| spell.context.alternative_mana_cost_paid)
+            || !(object.cast_from_zone == Some(Zone::Hand)
+                || ability
+                    .as_deref()
+                    .is_some_and(|spell| spell.context.cast_from_zone == Some(Zone::Hand)))
+            || object
+                .card_types
+                .core_types
+                .iter()
+                .any(|kind| kind.is_permanent_type())
+            || !object
+                .card_types
+                .core_types
+                .iter()
+                .any(|kind| matches!(kind, CoreType::Instant | CoreType::Sorcery))
+        {
+            return false;
+        }
+        let effective_keywords =
+            crate::game::off_zone_characteristics::effective_off_zone_keywords(self, entry.id);
+        let has_buyback = effective_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Buyback(_)));
+        // Manual Finish deliberately suppresses the spell's instruction
+        // chain. Reject keywords whose resolution-time work lives outside that
+        // chain so a manual designation cannot silently omit their hooks.
+        let has_unsupported_resolution_hook = effective_keywords.iter().any(|keyword| {
+            matches!(
+                keyword,
+                Keyword::Cipher | Keyword::Paradigm | Keyword::Rebound | Keyword::Epic
+            )
+        });
+        let paid_buyback = has_buyback
+            && (ability
+                .as_deref()
+                .is_some_and(|spell| spell.context.additional_cost_paid)
+                || self
+                    .stack_paid_facts
+                    .get(&entry.id)
+                    .is_some_and(|facts| facts.additional_cost_paid));
+        !paid_buyback && !has_unsupported_resolution_hook
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub fn manual_cast_unavailable_reason(
+        &self,
+        actor: PlayerId,
+        source: ObjectId,
+    ) -> Option<crate::types::interaction::ManualCastUnsupportedReason> {
+        use crate::types::interaction::ManualCastUnsupportedReason;
+        if self.manual_resolution_state.is_some() {
+            return Some(ManualCastUnsupportedReason::AnotherManualResolution);
+        }
+        let Some(object) = self.objects.get(&source) else {
+            return Some(ManualCastUnsupportedReason::OutsideOwnedControlledHandSpell);
+        };
+        if crate::game::turn_control::live_authorized_submitter_for_player(self, actor) != actor
+            || object.owner != actor
+            || object.controller != actor
+            || object.zone != Zone::Hand
+            || object.is_copy
+            || object.is_token
+            || object
+                .card_types
+                .core_types
+                .iter()
+                .any(|kind| kind.is_permanent_type())
+            || !object
+                .card_types
+                .core_types
+                .iter()
+                .any(|kind| matches!(kind, CoreType::Instant | CoreType::Sorcery))
+        {
+            return Some(ManualCastUnsupportedReason::OutsideOwnedControlledHandSpell);
+        }
+        if crate::game::off_zone_characteristics::effective_off_zone_keywords(self, source)
+            .iter()
+            .any(|keyword| {
+                matches!(
+                    keyword,
+                    Keyword::Cipher | Keyword::Paradigm | Keyword::Rebound | Keyword::Epic
+                )
+            })
+        {
+            return Some(ManualCastUnsupportedReason::ResolutionHook);
+        }
+        None
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub fn manual_resolution_binding(&self) -> Option<&ManualResolutionBinding> {
+        self.manual_resolution_state
+            .as_ref()
+            .and_then(ManualResolutionState::binding)
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub(crate) fn manual_resolution_open_binding(&self) -> Option<&ManualResolutionBinding> {
+        match self.manual_resolution_state.as_ref()? {
+            ManualResolutionState::Active {
+                binding,
+                phase: ManualResolutionActivePhase::Open,
+                ..
+            } => Some(binding),
+            ManualResolutionState::Casting { .. }
+            | ManualResolutionState::Armed { .. }
+            | ManualResolutionState::Active {
+                phase: ManualResolutionActivePhase::TerminalChildPending,
+                ..
+            } => None,
+        }
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub(crate) fn manual_resolution_binding_for_entry(
+        &self,
+        actor: PlayerId,
+        entry: &StackEntry,
+    ) -> Option<ManualResolutionBinding> {
+        if !self.manual_resolution_source_is_supported(actor, entry) {
+            return None;
+        }
+        let object = self.objects.get(&entry.id)?;
+        Some(ManualResolutionBinding {
+            actor,
+            stack_entry_id: entry.id,
+            source: ObjectIncarnationRef::of(entry.source_id, object.incarnation),
+            cast_occurrence: object.cast_occurrence?,
+        })
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub(crate) fn clear_manual_resolution_source(&mut self, id: ObjectId) {
+        if self
+            .manual_resolution_state
+            .as_ref()
+            .is_some_and(|manual| manual.source_id() == id)
+        {
+            self.manual_resolution_state = None;
+        }
+    }
+
+    #[cfg(feature = "manual_resolution_prototype")]
+    pub(crate) fn validate_manual_resolution_state(&self) -> Result<(), String> {
+        let manual_wait = match self.waiting_for {
+            WaitingFor::ManualResolution {
+                player,
+                stack_entry_id,
+            } => Some((player, stack_entry_id)),
+            _ => None,
+        };
+        let Some(manual) = &self.manual_resolution_state else {
+            return if manual_wait.is_none() {
+                Ok(())
+            } else {
+                Err("Manual wait has no custody".into())
+            };
+        };
+        let actor = match manual {
+            ManualResolutionState::Casting { actor, .. } => *actor,
+            ManualResolutionState::Armed { binding }
+            | ManualResolutionState::Active { binding, .. } => binding.actor,
+        };
+        if crate::game::turn_control::live_authorized_submitter_for_player(self, actor) != actor {
+            return Err(
+                "manual-resolution designation is outside the supported source scope".into(),
+            );
+        }
+        match manual {
+            ManualResolutionState::Casting { actor, source } => {
+                let object = self
+                    .objects
+                    .get(&source.object_id)
+                    .ok_or("Manual casting source is missing")?;
+                if manual_wait.is_some()
+                    || object.owner != *actor
+                    || object.controller != *actor
+                    || !matches!(object.zone, Zone::Hand | Zone::Stack)
+                    || (object.zone == Zone::Hand && object.incarnation != source.incarnation)
+                    || (object.zone == Zone::Stack
+                        && Some(object.incarnation) != source.incarnation.checked_add(1))
+                    || self
+                        .waiting_for
+                        .pending_cast_ref()
+                        .or(self.pending_cast.as_deref())
+                        .is_none_or(|pending| pending.object_id != source.object_id)
+                {
+                    return Err(
+                        "Manual casting custody does not match the pending ordinary cast".into(),
+                    );
+                }
+            }
+            ManualResolutionState::Armed { binding } => {
+                let entry = self
+                    .stack
+                    .iter()
+                    .find(|entry| entry.id == binding.stack_entry_id)
+                    .ok_or("Manual armed occurrence is missing")?;
+                if !self.manual_resolution_source_is_supported(binding.actor, entry) {
+                    return Err(
+                        "manual-resolution designation is outside the supported source scope"
+                            .into(),
+                    );
+                }
+                if manual_wait.is_some()
+                    || self
+                        .manual_resolution_binding_for_entry(binding.actor, entry)
+                        .as_ref()
+                        != Some(binding)
+                {
+                    return Err("Manual armed custody does not match the paid occurrence".into());
+                }
+            }
+            ManualResolutionState::Active {
+                binding,
+                begin,
+                phase,
+            } => {
+                let entry = self
+                    .resolving_stack_entry
+                    .as_ref()
+                    .ok_or("Manual active carrier is missing")?;
+                if entry.id != binding.stack_entry_id
+                    || entry.source_id != binding.source.object_id
+                    || entry.controller != binding.actor
+                    || begin.owner != binding.actor
+                    || begin.source != binding.source
+                    || self.stack.iter().any(|stacked| stacked.id == entry.id)
+                    || !matches!(
+                        entry.kind,
+                        StackEntryKind::Spell {
+                            casting_variant: CastingVariant::Normal,
+                            ..
+                        }
+                    )
+                    || entry.ability().map(|ability| ability.cast_occurrence)
+                        != begin
+                            .ability
+                            .as_deref()
+                            .map(|ability| ability.cast_occurrence)
+                    || entry.ability().is_some_and(|ability| {
+                        ability.cast_occurrence != Some(binding.cast_occurrence)
+                            || ability.source_incarnation != Some(binding.source.incarnation)
+                    })
+                    || entry.ability() != begin.ability.as_deref()
+                    || binding.cast_occurrence.caster != binding.actor
+                    || self
+                        .spells_cast_this_turn_by_player
+                        .get(&binding.cast_occurrence.caster)
+                        .and_then(|journal| {
+                            journal.get(binding.cast_occurrence.turn_journal_index as usize)
+                        })
+                        .is_none_or(|record| {
+                            record.spell_object_id != Some(binding.source.object_id)
+                                || record.from_zone != Zone::Hand
+                                || !record.cast_variant.is_normal()
+                        })
+                {
+                    return Err("Manual Begin latch does not match its sole carrier".into());
+                }
+                match phase {
+                    ManualResolutionActivePhase::Open if manual_wait != Some((binding.actor, binding.stack_entry_id)) => return Err("Open Manual custody has no matching wait".into()),
+                    ManualResolutionActivePhase::TerminalChildPending if manual_wait.is_some()
+                        || !(self.pending_replacement.as_ref().is_some_and(|child|
+                            matches!(child.proposed, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, from: Zone::Stack, .. } if object_id == binding.stack_entry_id))
+                            || self.replacement_may_cost_paused || self.active_ability_continuation().is_some()
+                            || self.active_spell_resolution().is_some() || self.has_post_replacement_drain())
+                        => return Err("Manual terminal custody has no live replacement child".into()),
+                    ManualResolutionActivePhase::Open | ManualResolutionActivePhase::TerminalChildPending => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_payment_transaction(&self) -> Result<(), String> {
         let Some(transaction) = self.payment_transaction.as_deref() else {
             return Ok(());
@@ -13689,6 +14103,10 @@ impl PersistedGameState {
         finalization: PersistedRestoreFinalization,
     ) -> Result<PreparedPersistedGameState, PersistedRestoreError> {
         let mut state = self.into_game_state_unchecked();
+        #[cfg(feature = "manual_resolution_prototype")]
+        state
+            .validate_manual_resolution_state()
+            .map_err(PersistedRestoreError::UnsupportedFormat)?;
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
@@ -13814,6 +14232,14 @@ impl ZoneOpponentChooserPurpose {
 pub enum WaitingFor {
     Priority {
         player: PlayerId,
+    },
+    /// Native prototype: the designated exact stack occurrence has been
+    /// completely paused before its first instruction. Only its controller may
+    /// release it with `FinishManualResolution`.
+    #[cfg(feature = "manual_resolution_prototype")]
+    ManualResolution {
+        player: PlayerId,
+        stack_entry_id: ObjectId,
     },
     /// Public Resolve All consent prompt. The protocol details and frozen
     /// submitter ledger remain in `GameState::resolve_all_consent_run`.
@@ -16767,6 +17193,8 @@ impl WaitingFor {
     pub fn variant_name(&self) -> &'static str {
         match self {
             WaitingFor::Priority { .. } => "Priority",
+            #[cfg(feature = "manual_resolution_prototype")]
+            WaitingFor::ManualResolution { .. } => "ManualResolution",
             WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
             WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
@@ -16931,6 +17359,8 @@ impl WaitingFor {
             WaitingFor::ResolveAllReady { .. } => {
                 ActingAuthority::None(NoActor::ResolveAllReadyPrefix)
             }
+            #[cfg(feature = "manual_resolution_prototype")]
+            WaitingFor::ManualResolution { player, .. } => ActingAuthority::One(*player),
             WaitingFor::Priority { player }
             | WaitingFor::ResolveAllConsent {
                 representative: player,
@@ -17281,6 +17711,8 @@ impl WaitingFor {
             WaitingFor::PayManaAbilityMana { .. } => true,
             // Every other prompt is not part of a mana ability's activation.
             // Listed rather than `_` so a new prompt has to be classified.
+            #[cfg(feature = "manual_resolution_prototype")]
+            WaitingFor::ManualResolution { .. } => false,
             WaitingFor::Priority { .. }
             | WaitingFor::ResolveAllConsent { .. }
             | WaitingFor::ResolveAllReady { .. }
@@ -19705,6 +20137,7 @@ fn stack_bound_reveals_is_empty(
 macro_rules! declare_game_state {
     (
         $(
+            $( @cfg($cfg:meta) )?
             $(#[$attribute:meta])*
             $visibility:vis $field:ident: $field_type:ty,
         )*
@@ -19712,6 +20145,7 @@ macro_rules! declare_game_state {
         #[derive(Debug, Clone, Serialize)]
         pub struct GameState {
             $(
+                $(#[cfg($cfg)])?
                 $(#[$attribute])*
                 $visibility $field: $field_type,
             )*
@@ -19720,6 +20154,7 @@ macro_rules! declare_game_state {
         #[derive(Deserialize)]
         struct RawGameStateFields {
             $(
+                $(#[cfg($cfg)])?
                 $(#[$attribute])*
                 $visibility $field: $field_type,
             )*
@@ -19729,11 +20164,13 @@ macro_rules! declare_game_state {
             fn from(raw: RawGameStateFields) -> Self {
                 let RawGameStateFields {
                     $(
+                        $(#[cfg($cfg)])?
                         $field,
                     )*
                 } = raw;
                 Self {
                     $(
+                        $(#[cfg($cfg)])?
                         $field,
                     )*
                 }
@@ -19842,6 +20279,11 @@ declare_game_state! {
     // Shared zones
     pub battlefield: im::Vector<ObjectId>,
     pub stack: im::Vector<StackEntry>,
+    @cfg(feature = "manual_resolution_prototype")
+    /// Native prototype: exact cast occurrence explicitly designated to pause
+    /// before resolution. Omitted when absent to preserve the default save shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) manual_resolution_state: Option<ManualResolutionState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub stack_paid_facts: HashMap<ObjectId, StackPaidSnapshot>,
@@ -20105,7 +20547,8 @@ declare_game_state! {
     /// O(1) presence index over `StaticModeKind` discriminants — "does any functioning
     /// static of kind K exist on the board?" Rebuilt wholesale from `game_functioning_statics`
     /// as a byproduct of the layers pipeline (`layers::refresh_static_mode_presence`), so it is
-    /// exactly `.any(kind)` for every kind. Lets discriminant-only scan gates (e.g. the
+    /// the `.any(kind)` fold for every kind, plus `Goaded` for every def
+    /// `combat::static_designates_goad` admits. Lets discriminant-only scan gates (e.g. the
     /// hexproof scans in `static_abilities`) skip an O(battlefield) `.any()` when zero statics
     /// of that kind exist.
     ///
@@ -22320,6 +22763,10 @@ pub(crate) enum GameStateDecodeMode {
     ResolutionWireV2,
     ResolutionWireV3,
     ResolutionWireV4,
+    /// Native manual-resolution wire. Older readers reject this declared
+    /// version instead of dropping its exact-source state as an unknown field.
+    #[cfg_attr(not(feature = "manual_resolution_prototype"), allow(dead_code))]
+    ResolutionWireV6,
     DirectCurrentRaw,
 }
 
@@ -22680,6 +23127,7 @@ impl GameStateDecode {
             | GameStateDecodeMode::ResolutionWireV2
             | GameStateDecodeMode::ResolutionWireV3
             | GameStateDecodeMode::ResolutionWireV4
+            | GameStateDecodeMode::ResolutionWireV6
             | GameStateDecodeMode::DirectCurrentRaw => {
                 return Err("invalid persisted resolution-state decode mode".to_string());
             }
@@ -22708,6 +23156,35 @@ impl GameStateDecode {
     ) -> Result<GameState, String> {
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
+        if value
+            .get("manual_resolution_designation")
+            .is_some_and(|marker| !marker.is_null())
+        {
+            return Err("legacy Manual designation has no Begin/custody proof".into());
+        }
+        #[cfg(feature = "manual_resolution_prototype")]
+        if matches!(mode, GameStateDecodeMode::DirectCurrentRaw)
+            && (value
+                .get("manual_resolution_state")
+                .is_some_and(|designation| !designation.is_null())
+                || value
+                    .get("waiting_for")
+                    .and_then(|waiting| waiting.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ManualResolution"))
+        {
+            return Err(
+                "manual-resolution state requires the versioned trusted persistence boundary"
+                    .to_string(),
+            );
+        }
+        #[cfg(not(feature = "manual_resolution_prototype"))]
+        if value
+            .get("manual_resolution_state")
+            .is_some_and(|designation| !designation.is_null())
+        {
+            return Err("manual-resolution persistence is unavailable in this build".to_string());
+        }
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
             migrate_legacy_trigger_firing_carriers(
@@ -22759,6 +23236,7 @@ impl GameStateDecode {
                 | GameStateDecodeMode::ResolutionWireV2
                 | GameStateDecodeMode::ResolutionWireV3
                 | GameStateDecodeMode::ResolutionWireV4
+                | GameStateDecodeMode::ResolutionWireV6
         ));
         reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
@@ -22785,6 +23263,19 @@ impl GameStateDecode {
     }
 
     pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {
+        // Check the Manual namespace before serde can discard unknown fields.
+        // Known names retain their existing version and feature guards.
+        if let Some(field) = value.as_object().and_then(|object| {
+            object.keys().find(|field| {
+                field.starts_with("manual_resolution_")
+                    && !matches!(
+                        field.as_str(),
+                        "manual_resolution_designation" | "manual_resolution_state"
+                    )
+            })
+        }) {
+            return Err(format!("unsupported manual-resolution field {field}"));
+        }
         let raw = serde_json::from_value::<RawGameStateFields>(value)
             .map_err(|error| error.to_string())?;
         Ok(GameState::from(raw))
@@ -22833,14 +23324,16 @@ pub struct EndEffectPermission {
 
 /// Exact object bindings captured when a transient continuous effect begins.
 ///
-/// CR 400.7 + CR 611.2b: both fields name the particular objects the resolved
-/// effect may affect or whose state may sustain its duration.  They travel in
-/// the same journaled install command as the rest of the effect, rather than
-/// being attached after installation, so replay cannot observe a partial TCE.
+/// CR 400.7 + CR 611.2b: `affected_recipient` and `duration_subject` name the
+/// particular objects the resolved effect may affect or whose state may sustain
+/// its duration.  They travel in the same journaled install command as the rest
+/// of the effect, rather than being attached after installation, so replay
+/// cannot observe a partial TCE.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransientContinuousEffectBindings {
     pub affected_recipient: Option<ObjectIncarnationRef>,
     pub duration_subject: Option<ObjectIncarnationRef>,
+    pub granting_object: Option<ObjectIncarnationRef>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -22887,12 +23380,15 @@ pub struct TransientContinuousEffect {
     pub duration_event_source: Option<Box<TriggerSourceContext>>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
     /// printed termination permission. Set inside the single construction
-    /// authority (`add_transient_continuous_effect_with_end_permission`), so it
+    /// authority (`add_transient_continuous_effect_inner`), so it
     /// rides inside the journaled `ResolvedContinuousEffectCommand` rather than
     /// being post-stamped. Backward-compatible across the WASM/multiplayer
     /// serialization boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_permission: Option<EndEffectPermission>,
+    /// CR 201.5a: the object that granted the ability that created this effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granting_object: Option<ObjectIncarnationRef>,
     /// Snapshot of the originating object's or dungeon's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
@@ -24349,6 +24845,10 @@ impl GameState {
     /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
     /// and `CancelCast` predicate.
     pub fn withholds_priority(&self) -> bool {
+        #[cfg(feature = "manual_resolution_prototype")]
+        if matches!(self.waiting_for, WaitingFor::ManualResolution { .. }) {
+            return true;
+        }
         self.pending_cast.is_some()
             || self.waiting_for.has_pending_cast()
             || self
@@ -27457,6 +27957,8 @@ impl GameState {
             active_spend_only_on_x_count: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
+            #[cfg(feature = "manual_resolution_prototype")]
+            manual_resolution_state: None,
             stack_paid_facts: HashMap::new(),
             exile: im::Vector::new(),
             command_zone: im::Vector::new(),
@@ -28283,6 +28785,10 @@ impl GameState {
     /// SINGLE AUTHORITY for adding to `transient_continuous_effects`. Resolves
     /// the CR 613.7b timestamp and the effect id, installs the effect, and
     /// journals the settled CR 611.2a creation through its owning family.
+    ///
+    /// Returns `None` when a CR 611.2b "for as long as" duration never starts:
+    /// the effect does nothing, so nothing is allocated, installed or journaled
+    /// and callers must not emit the effect's side effects.
     pub fn add_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
@@ -28291,7 +28797,7 @@ impl GameState {
         affected: TargetFilter,
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28316,7 +28822,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         bindings: TransientContinuousEffectBindings,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28348,7 +28854,7 @@ impl GameState {
         modifications: Vec<ContinuousModification>,
         condition: Option<StaticCondition>,
         end_permission: EndEffectPermission,
-    ) -> u64 {
+    ) -> Option<u64> {
         self.add_transient_continuous_effect_inner(
             source_id,
             controller,
@@ -28362,7 +28868,89 @@ impl GameState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_transient_continuous_effect_inner(
+    pub(crate) fn add_transient_continuous_effect_inner(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: Duration,
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+        condition: Option<StaticCondition>,
+        end_permission: Option<EndEffectPermission>,
+        bindings: TransientContinuousEffectBindings,
+    ) -> Option<u64> {
+        self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
+            .then(|| {
+                self.install_started_transient_continuous_effect(
+                    source_id,
+                    controller,
+                    duration,
+                    affected,
+                    modifications,
+                    condition,
+                    end_permission,
+                    bindings,
+                )
+            })
+    }
+
+    /// CR 701.12a + CR 701.12b + CR 611.2b: register the effects one instruction
+    /// creates simultaneously, such as each player gaining control of the
+    /// other's permanent in an exchange. Every member's duration is tested on
+    /// the same settled board before any member is installed, and if any never
+    /// starts, none is installed. Returns whether the members were installed.
+    pub fn add_simultaneous_transient_continuous_effects(
+        &mut self,
+        source_id: ObjectId,
+        duration: Duration,
+        members: Vec<(PlayerId, TargetFilter, Vec<ContinuousModification>)>,
+    ) -> bool {
+        let bindings = TransientContinuousEffectBindings::default();
+        let all_begin = members.iter().all(|(controller, affected, _)| {
+            self.transient_duration_begins(source_id, *controller, &duration, affected, bindings)
+        });
+        if all_begin {
+            for (controller, affected, modifications) in members {
+                self.install_started_transient_continuous_effect(
+                    source_id,
+                    controller,
+                    duration.clone(),
+                    affected,
+                    modifications,
+                    None,
+                    None,
+                    bindings,
+                );
+            }
+        }
+        all_begin
+    }
+
+    /// CR 611.2b: "If the 'for as long as' duration never starts, the effect
+    /// does nothing." Tests a candidate on the settled board before any
+    /// allocation, journaling or installation; replay installs verbatim
+    /// through `apply_resolved_continuous_effect` and never reaches here.
+    fn transient_duration_begins(
+        &mut self,
+        source_id: ObjectId,
+        controller: PlayerId,
+        duration: &Duration,
+        affected: &TargetFilter,
+        bindings: TransientContinuousEffectBindings,
+    ) -> bool {
+        if !duration.is_for_as_long_as() {
+            return true;
+        }
+        crate::game::layers::flush_layers(self);
+        crate::game::layers::resolved_duration_begins(
+            self, duration, controller, source_id, affected, bindings,
+        )
+    }
+
+    /// Installs and journals an effect whose duration has already been found to
+    /// start; reached only through the checked registration entry points above.
+    #[allow(clippy::too_many_arguments)]
+    fn install_started_transient_continuous_effect(
         &mut self,
         source_id: ObjectId,
         controller: PlayerId,
@@ -28444,6 +29032,7 @@ impl GameState {
                 duration_subject: bindings.duration_subject,
                 duration_event_source,
                 end_permission,
+                granting_object: bindings.granting_object,
                 source_name,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
@@ -28459,6 +29048,56 @@ impl GameState {
             .record_continuous_effect_install(command)
             .expect("resolved continuous-effect install must have a live journal cause");
         id
+    }
+
+    /// Applies one already-resolved continuous-effect storage operation.
+    /// Neither arm derives characteristics or appends a journal entry.
+    pub fn apply_resolved_continuous_effect_edit(
+        &mut self,
+        edit: &ResolvedContinuousEffectEdit,
+    ) -> Result<(), ResolvedContinuousEffectEditReplayInvariantError> {
+        match edit {
+            ResolvedContinuousEffectEdit::Install(command) => {
+                self.apply_resolved_continuous_effect(command)?;
+            }
+            ResolvedContinuousEffectEdit::Retire(command) => {
+                self.retire_exact_continuous_effects(&command.effects)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a complete settled CR 611.2b selection atomically. The expired
+    /// subject need not still be current: the stored record is the operand.
+    pub(crate) fn retire_exact_continuous_effects(
+        &mut self,
+        effects: &[TransientContinuousEffect],
+    ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
+        ResolvedContinuousEffectRetirementCommand::validate_effects(effects)?;
+        for effect in effects {
+            let mut matching = self
+                .transient_continuous_effects
+                .iter()
+                .filter(|stored| stored.id == effect.id);
+            let stored = matching.next().ok_or(
+                ResolvedContinuousEffectRetirementInvariantError::MissingEffect(effect.id),
+            )?;
+            if matching.next().is_some() {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::AmbiguousStoredId(effect.id),
+                );
+            }
+            if stored != effect {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effect.id),
+                );
+            }
+        }
+        let ids: std::collections::HashSet<_> = effects.iter().map(|effect| effect.id).collect();
+        self.transient_continuous_effects
+            .retain(|effect| !ids.contains(&effect.id));
+        self.layers_dirty.mark_full();
+        Ok(())
     }
 
     /// Installs one already-resolved CR 611.2a continuous effect verbatim.
@@ -29827,6 +30466,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_spend_only_on_x_count: _,
         battlefield: _,
         stack: _,
+        #[cfg(feature = "manual_resolution_prototype")]
+            manual_resolution_state: _,
         stack_paid_facts: _,
         exile: _,
         command_zone: _,
@@ -30238,6 +30879,16 @@ impl PartialEq for GameState {
             && self.resolved_rules_journal == other.resolved_rules_journal
             && self.battlefield == other.battlefield
             && self.stack == other.stack
+            && {
+                #[cfg(feature = "manual_resolution_prototype")]
+                {
+                    self.manual_resolution_state == other.manual_resolution_state
+                }
+                #[cfg(not(feature = "manual_resolution_prototype"))]
+                {
+                    true
+                }
+            }
             && self.stack_paid_facts == other.stack_paid_facts
             && self.exile == other.exile
             && self.command_zone == other.command_zone
@@ -31636,6 +32287,77 @@ mod tests {
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
 
+    #[test]
+    fn manual_namespace_guard_preserves_ordinary_raw_readers() {
+        let mut raw = serde_json::to_value(GameState::new_two_player(42)).unwrap();
+        raw["manual_resolution_designation"] = serde_json::Value::Null;
+        raw["manual_resolution_state"] = serde_json::Value::Null;
+        raw["ordinary_future"] = serde_json::json!({"preservedCompatibility": true});
+        serde_json::from_value::<GameState>(raw.clone())
+            .expect("ordinary direct raw state retains known-null and nonmanual compatibility");
+        serde_json::from_value::<PersistedGameState>(raw.clone())
+            .expect("ordinary unversioned persisted raw state remains readable");
+
+        for marker in [serde_json::Value::Null, serde_json::json!({"future": true})] {
+            let mut unknown = raw.clone();
+            unknown["manual_resolution_future"] = marker;
+            let direct_error = serde_json::from_value::<GameState>(unknown.clone())
+                .expect_err("direct raw state must reject unknown Manual keys, including null");
+            assert!(direct_error
+                .to_string()
+                .contains("unsupported manual-resolution field manual_resolution_future"));
+            let persisted_error = serde_json::from_value::<PersistedGameState>(unknown)
+                .expect_err("persisted raw state must reject unknown Manual keys, including null");
+            assert!(persisted_error
+                .to_string()
+                .contains("unsupported manual-resolution field manual_resolution_future"));
+        }
+    }
+
+    #[test]
+    fn manual_namespace_guard_preserves_supported_ordinary_wire_readers() {
+        let mut current = serde_json::to_value(ResolutionStateWire::from_game_state(
+            GameState::new_two_player(42),
+        ))
+        .unwrap();
+        current["manual_resolution_designation"] = serde_json::Value::Null;
+        current["manual_resolution_state"] = serde_json::Value::Null;
+        current["ordinary_future"] = serde_json::json!({"preservedCompatibility": true});
+
+        for version in 1_u64..=4 {
+            let mut wire = current.clone();
+            wire["resolution_state_version"] = version.into();
+            if version == 1 {
+                wire.as_object_mut().unwrap().remove("resolution_frames");
+            }
+            serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                .expect("ordinary supported wire with known-null and nonmanual keys is readable");
+            let envelope = serde_json::json!({"state": wire.clone()});
+            serde_json::from_value::<PersistedGameState>(envelope)
+                .expect("ordinary supported trusted envelope decodes")
+                .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+                .expect("ordinary supported trusted envelope passes checked preparation")
+                .finalize_immediately()
+                .expect("ordinary supported trusted envelope finalizes");
+
+            for marker in [serde_json::Value::Null, serde_json::json!({"future": true})] {
+                let mut unknown = wire.clone();
+                unknown["manual_resolution_future"] = marker;
+                let wire_error = serde_json::from_value::<ResolutionStateWire>(unknown.clone())
+                    .expect_err("supported wire must reject unknown Manual keys, including null");
+                assert!(wire_error
+                    .to_string()
+                    .contains("unsupported manual-resolution field manual_resolution_future"));
+                let envelope = serde_json::json!({"state": unknown});
+                let trusted_error = serde_json::from_value::<PersistedGameState>(envelope)
+                    .expect_err("trusted restore must reject unknown Manual keys, including null");
+                assert!(trusted_error
+                    .to_string()
+                    .contains("unsupported manual-resolution field manual_resolution_future"));
+            }
+        }
+    }
+
     fn state_with_recorded_exploit() -> (GameState, GameEvent) {
         let mut state = GameState::new_two_player(42);
         let exploiter = create_object(
@@ -32440,6 +33162,7 @@ mod tests {
             condition: None,
             duration_subject: Some(ObjectIncarnationRef::of(ObjectId(9), 3)),
             end_permission: None,
+            granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
         };
@@ -41797,24 +42520,27 @@ mod tests {
         state.objects.insert(ObjectId(12), layer_copy);
         let recipient = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let copy_source = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
-            ObjectId(12),
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: ObjectId(12) },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copied_values.clone()),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: Some(printed_ref.clone()),
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(recipient),
-                duration_subject: Some(copy_source),
-            },
-        );
+        let copy_effect_id = state
+            .add_transient_continuous_effect_with_bindings(
+                ObjectId(12),
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: ObjectId(12) },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copied_values.clone()),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: Some(printed_ref.clone()),
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(recipient),
+                    duration_subject: Some(copy_source),
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
         crate::game::printed_cards::apply_copiable_values(
             state
                 .objects
@@ -41891,24 +42617,27 @@ mod tests {
         state.objects.insert(ObjectId(12), recipient);
         let recipient_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(12)]);
         let source_ref = ObjectIncarnationRef::from_object(&state.objects[&ObjectId(10)]);
-        let copy_effect_id = state.add_transient_continuous_effect_with_bindings(
-            ObjectId(12),
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: ObjectId(12) },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(copied_values),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: Some(top_printed_ref),
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            TransientContinuousEffectBindings {
-                affected_recipient: Some(recipient_ref),
-                duration_subject: Some(source_ref),
-            },
-        );
+        let copy_effect_id = state
+            .add_transient_continuous_effect_with_bindings(
+                ObjectId(12),
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: ObjectId(12) },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(copied_values),
+                    display_source: crate::game::game_object::DisplaySource::Card,
+                    printed_ref: Some(top_printed_ref),
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                TransientContinuousEffectBindings {
+                    affected_recipient: Some(recipient_ref),
+                    duration_subject: Some(source_ref),
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
         crate::game::printed_cards::apply_copiable_values(
             state
                 .objects

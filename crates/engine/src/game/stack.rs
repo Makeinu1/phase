@@ -1,8 +1,9 @@
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousModification, CopyCountStatus,
-    DetachedRemainder, Duration, Effect, EffectKind, KeywordAction, PlayerFilter, QuantityExpr,
-    ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode, TriggerCondition,
+    DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition, KeywordAction,
+    PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode,
+    TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -69,6 +70,10 @@ pub(super) fn finish_resolving_stack_entry(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) {
     let entry = state.resolving_stack_entry.take();
+    #[cfg(feature = "manual_resolution_prototype")]
+    if let Some(entry) = entry.as_ref() {
+        state.clear_manual_resolution_source(entry.id);
+    }
     let firing = state.resolving_trigger_firing.take();
     // CR 608.2c: the resolving stack entry owns every nested instruction-result
     // occurrence, including ones parked across replacement choices.
@@ -532,6 +537,15 @@ fn remove_stack_entry_at_unobserved(
         return None;
     }
     let entry = state.stack.remove(index);
+    #[cfg(feature = "manual_resolution_prototype")]
+    if state
+        .manual_resolution_binding()
+        .is_some_and(|binding| binding.stack_entry_id == entry.id)
+    {
+        // Retirement is occurrence-scoped: removing an unrelated response must
+        // leave the lower designated spell armed.
+        state.manual_resolution_state = None;
+    }
     let paid_facts = state.stack_paid_facts.remove(&entry.id);
     let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
     let trigger_firing = take_stack_trigger_firing(state, &entry);
@@ -621,6 +635,125 @@ pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEn
     remove_stack_entry_at_unobserved(state, state.stack.len().checked_sub(1)?)
 }
 
+/// Completes a manually designated ordinary instant or sorcery without
+/// executing its suppressed instructions or resolution hooks. Stack removal,
+/// target-fizzle classification, spell-zone replacement handling, event
+/// cleanup, and carrier settlement remain owned by the same authorities as a
+/// normal resolution.
+#[cfg(feature = "manual_resolution_prototype")]
+fn begin_manual_resolution(
+    state: &mut GameState,
+    entry: &StackEntry,
+    binding: Option<&crate::types::game_state::ManualResolutionBinding>,
+    ability: Option<&ResolvedAbility>,
+) -> bool {
+    let Some(binding) = binding else {
+        return false;
+    };
+    // CR 608.2b: this seam is reached only after the existing target check.
+    let begin_source = state
+        .objects
+        .get(&entry.id)
+        .filter(|_| state.manual_resolution_source_is_supported(binding.actor, entry))
+        .map(|object| {
+            (
+                object.owner,
+                crate::types::identifiers::ObjectIncarnationRef::of(
+                    entry.source_id,
+                    object.incarnation,
+                ),
+            )
+        });
+    // A recognized intent always intercepts. Invalid Begin evidence is rejected
+    // atomically by the existing outer boundary, never allowed into Auto.
+    let (owner, source) = begin_source.unwrap_or((
+        binding.actor,
+        crate::types::identifiers::ObjectIncarnationRef::of(entry.source_id, u64::MAX),
+    ));
+    let controller = stack_object_controller(state, entry);
+    let mut latched = ability.cloned();
+    if let Some(ability) = latched.as_mut() {
+        ability.set_source_incarnation_recursive(Some(binding.source.incarnation));
+    }
+    if let Some(carrier) = state.resolving_stack_entry.as_mut() {
+        carrier.controller = controller;
+        if let StackEntryKind::Spell { ability, .. } = &mut carrier.kind {
+            *ability = latched.clone().map(Box::new);
+        }
+    }
+    state.manual_resolution_state = Some(crate::types::game_state::ManualResolutionState::Active {
+        binding: binding.clone(),
+        begin: crate::types::game_state::ManualResolutionBegin {
+            owner,
+            source,
+            ability: latched.map(Box::new),
+        },
+        phase: crate::types::game_state::ManualResolutionActivePhase::Open,
+    });
+    state.waiting_for = crate::types::game_state::WaitingFor::ManualResolution {
+        player: binding.actor,
+        stack_entry_id: entry.id,
+    };
+    true
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+pub(crate) fn finish_manual_resolution_terminal(
+    state: &mut GameState,
+    stack_entry_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if state
+        .manual_resolution_open_binding()
+        .is_none_or(|binding| binding.stack_entry_id != stack_entry_id)
+        || state
+            .resolving_stack_entry
+            .as_ref()
+            .is_none_or(|entry| entry.id != stack_entry_id)
+    {
+        return false;
+    }
+    // CR 608.2n: terminal movement follows the already-latched Begin; no body,
+    // second pop, support rescan or target reclassification occurs here.
+    if let Some(crate::types::game_state::ManualResolutionState::Active { phase, .. }) =
+        state.manual_resolution_state.as_mut()
+    {
+        *phase = crate::types::game_state::ManualResolutionActivePhase::TerminalChildPending;
+    }
+    let move_result = if state
+        .objects
+        .get(&stack_entry_id)
+        .is_some_and(|object| object.zone == Zone::Stack)
+    {
+        zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::spell_resolution_default(stack_entry_id, Zone::Graveyard),
+            events,
+        )
+    } else {
+        ZoneMoveResult::Done
+    };
+    events.push(GameEvent::StackResolved {
+        object_id: stack_entry_id,
+    });
+    state.current_trigger_event = None;
+    state.current_trigger_events.clear();
+    state.current_trigger_match_count = None;
+    state.die_result_this_resolution = None;
+    if matches!(
+        move_result,
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice
+    ) {
+        return true;
+    }
+    finish_resolving_stack_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::Resolved,
+    );
+    state.resolution_source_relatch = None;
+    true
+}
+
 /// Removes the top stack entry outside normal resolution.
 pub(super) fn pop_nonresolving_top_stack_entry(
     state: &mut GameState,
@@ -667,6 +800,13 @@ pub fn apply_resolved_stack_removal(
 
     // In range: the `get` above returned `Some`, so this cannot panic.
     let entry = state.stack.remove(command.index);
+    #[cfg(feature = "manual_resolution_prototype")]
+    if state
+        .manual_resolution_binding()
+        .is_some_and(|binding| binding.stack_entry_id == entry.id)
+    {
+        state.manual_resolution_state = None;
+    }
     state.stack_paid_facts.remove(&entry.id);
     state.stack_trigger_event_batches.remove(&entry.id);
     state.stack_trigger_firings.remove(&entry.id);
@@ -1490,6 +1630,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         );
         return;
     }
+    #[cfg(feature = "manual_resolution_prototype")]
+    let manual_binding = state
+        .manual_resolution_binding()
+        .filter(|binding| {
+            state
+                .stack
+                .back()
+                .is_some_and(|entry| entry.id == binding.stack_entry_id)
+        })
+        .cloned();
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
@@ -1867,7 +2017,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         {
             let mut validated = validate_targets_in_chain(state, ability);
             let legal_targets = flatten_specified_targets_in_chain(&validated);
-            if targeting::check_fizzle(&original_targets, &legal_targets) {
+            // CR 608.2b + CR 101.1: the ability's own text ("This ability still resolves if
+            // its target becomes illegal") can override non-resolution. Targets are still
+            // pruned by validate_targets_in_chain above, so illegal targets stay unaffected.
+            let fizzle_applies = match ability.illegal_targets_disposition {
+                IllegalTargetsDisposition::DoesNotResolve => true,
+                IllegalTargetsDisposition::StillResolves => false,
+            };
+            if fizzle_applies && targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
                 if is_spell {
                     // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
@@ -1923,12 +2080,24 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
             record_illegal_target_slots(state, Some(&mut validated));
             let _ = illegal_declared_target_slots(ability, &mut validated);
+            #[cfg(feature = "manual_resolution_prototype")]
+            if begin_manual_resolution(state, &entry, manual_binding.as_ref(), Some(&validated)) {
+                return;
+            }
             execute_effect(state, &validated, events);
         } else {
             record_illegal_target_slots(state, None);
             clear_illegal_local_target_slots(ability);
+            #[cfg(feature = "manual_resolution_prototype")]
+            if begin_manual_resolution(state, &entry, manual_binding.as_ref(), Some(ability)) {
+                return;
+            }
             execute_effect(state, ability, events);
         }
+    }
+    #[cfg(feature = "manual_resolution_prototype")]
+    if ability.is_none() && begin_manual_resolution(state, &entry, manual_binding.as_ref(), None) {
+        return;
     }
 
     // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
@@ -3425,7 +3594,16 @@ pub fn resolve_next_with_limit(
     let pending_top = state
         .pending_trigger_entry
         .is_some_and(|pending| state.stack.back().map(|e| e.id) == Some(pending));
-    if !pending_top {
+    #[cfg(feature = "manual_resolution_prototype")]
+    let manual_designated_top = state.manual_resolution_binding().is_some_and(|binding| {
+        state
+            .stack
+            .back()
+            .is_some_and(|entry| entry.id == binding.stack_entry_id)
+    });
+    #[cfg(not(feature = "manual_resolution_prototype"))]
+    let manual_designated_top = false;
+    if !pending_top && !manual_designated_top {
         if let Some(consumed) = inert_noop_run_len(state) {
             let consumed = consumed.min(max_consumed);
             if consumed >= 2 {
@@ -3860,6 +4038,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -3939,6 +4118,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // it is not the vanilla self-counter shape this batch path proves safe.
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4104,6 +4284,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4175,6 +4356,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4328,6 +4510,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         min_x_value,
         announced_x,
         cant_be_copied,
+        illegal_targets_disposition,
         copy_count_status,
         forward_result,
         unless_pay,
@@ -4403,6 +4586,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && *min_x_value == 0
         && announced_x.is_none()
         && !*cant_be_copied
+        && *illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve
         && *copy_count_status == CopyCountStatus::Pending
         && !*forward_result
         && unless_pay.is_none()
@@ -4820,6 +5004,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: a_min_x_value,
         announced_x: a_announced_x,
         cant_be_copied: a_cant_be_copied,
+        illegal_targets_disposition: a_illegal_targets_disposition,
         copy_count_status: a_copy_count_status,
         forward_result: a_forward_result,
         unless_pay: a_unless_pay,
@@ -4902,6 +5087,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         min_x_value: b_min_x_value,
         announced_x: b_announced_x,
         cant_be_copied: b_cant_be_copied,
+        illegal_targets_disposition: b_illegal_targets_disposition,
         copy_count_status: b_copy_count_status,
         forward_result: b_forward_result,
         unless_pay: b_unless_pay,
@@ -4986,6 +5172,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_min_x_value == b_min_x_value
         && a_announced_x == b_announced_x
         && a_cant_be_copied == b_cant_be_copied
+        && a_illegal_targets_disposition == b_illegal_targets_disposition
         && a_copy_count_status == b_copy_count_status
         && a_forward_result == b_forward_result
         && a_unless_pay == b_unless_pay
@@ -14276,11 +14463,14 @@ mod tests {
         /// the (3.3)/(3.4) boards.
         const OVERRIDDEN_NAME: &str = "Cloned Bear";
 
-        /// "Three or more permanents named `OVERRIDDEN_NAME`", counted
+        /// "`comparator` `count` permanents named `OVERRIDDEN_NAME`", counted
         /// board-wide. Same shape as (3.1)'s gate minus the recipient context:
         /// no `FilterProp::Another`, so `condition_uses_recipient_context` is
         /// false and every gather strips it off the effect it pushes.
-        fn overridden_name_count_at_least(count: i32) -> crate::types::ability::StaticCondition {
+        fn overridden_name_count(
+            comparator: Comparator,
+            count: i32,
+        ) -> crate::types::ability::StaticCondition {
             crate::types::ability::StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
@@ -14289,7 +14479,7 @@ mod tests {
                         },
                     },
                 },
-                comparator: Comparator::GE,
+                comparator,
                 rhs: QuantityExpr::Fixed { value: count },
             }
         }
@@ -14299,19 +14489,21 @@ mod tests {
         /// `install_gate`.
         ///
         /// WHY LAYER 1 and not the layer-4 rewrite (3.1) uses: a source-level
-        /// condition and a `ForAsLongAs` duration are both evaluated inside
-        /// `gather_transient_continuous_effects`, and `evaluate_layers` gathers
-        /// at Step 3 — after layer 1 has been applied and before layers 2-7.
-        /// Layer 1 is therefore the ONLY layer whose writes such a gate can see
-        /// within one pass. (A retained recipient-context condition is instead
-        /// re-checked at APPLY time, which is why (3.1) can use layer 4.)
-        /// `prepare_incremental_flush` gathers with NO layer applied at all, so
-        /// the entrant is still printed-named there — that divergence is exactly
-        /// the staleness these boards catch.
+        /// condition is evaluated inside `gather_transient_continuous_effects`,
+        /// and `evaluate_layers` gathers at Step 3 — after layer 1 has been
+        /// applied and before layers 2-7. Layer 1 is therefore the ONLY layer
+        /// whose writes such a gate can see within one pass. (A retained
+        /// recipient-context condition is instead re-checked at APPLY time,
+        /// which is why (3.1) can use layer 4; a `ForAsLongAs` duration is
+        /// checked on the settled board, CR 611.2b.) `prepare_incremental_flush`
+        /// gathers with NO layer applied at all, so the entrant is still
+        /// printed-named there — that divergence is exactly the staleness these
+        /// boards catch.
         ///
         /// Nothing else on the board is a creature, so the overridden-name
         /// population is exactly the creature count: 2 before the entry, 3
-        /// after, which moves a `GE 3` gate from OFF to ON.
+        /// after, which moves a `GE 3` gate from OFF to ON (and ends a `LT 3`
+        /// duration).
         fn transient_name_count_gate_board(
             install_gate: impl Fn(&mut GameState, ObjectId, &[ObjectId]),
         ) -> GameState {
@@ -14368,7 +14560,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::UntilEndOfTurn,
-                    Some(overridden_name_count_at_least(3)),
+                    Some(overridden_name_count(Comparator::GE, 3)),
                 )
             })
         }
@@ -14392,7 +14584,8 @@ mod tests {
                 !forced.transient_continuous_effects.is_empty()
                     && forced.transient_continuous_effects.iter().all(|tce| {
                         matches!(tce.affected, TargetFilter::SpecificObject { .. })
-                            && tce.condition.as_ref() == Some(&overridden_name_count_at_least(3))
+                            && tce.condition.as_ref()
+                                == Some(&overridden_name_count(Comparator::GE, 3))
                     }),
                 "the fixture must install SpecificObject-bound transients whose gate is \
                  source-level, or the `e.condition` channel would cover this board"
@@ -14429,17 +14622,20 @@ mod tests {
             assert_pt_identical(&normal, &forced, "transient source-level condition reads");
         }
 
-        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. Identical board to (3.3)
-        /// with the gate moved from `tce.condition` into
-        /// `Duration::ForAsLongAs` (CR 611.2b — the effect lasts exactly as
-        /// long as its stated condition holds). `transient_effect_is_live`
-        /// evaluates it in the same gather, and no gather ever copies a
-        /// duration's condition onto an `ActiveContinuousEffect`, so this gate
-        /// is invisible to every channel except the transient walk.
+        /// (3.4) `ForAsLongAs` DURATION, READ CHANNEL. The (3.3) board with the
+        /// gate moved from `tce.condition` into `Duration::ForAsLongAs` and its
+        /// comparator inverted to "fewer than three". CR 611.2b: a duration that
+        /// is false when the effect begins never starts, and one that ends
+        /// never restarts — so the only flip an entry can cause is an END. Pre-
+        /// entry two permanents carry the overridden name (duration holds,
+        /// 3/3); the renamed entrant makes three and ends it for good (2/2). No
+        /// gather ever copies a duration's condition onto an
+        /// `ActiveContinuousEffect`, so this gate is invisible to every channel
+        /// except the transient walk.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and `ReadKinds` loses NameText exactly
-        /// as in (3.3) — recipients keep a stale 2/2.
+        /// as in (3.3), so the entry no longer escalates.
         fn transient_duration_gate_read_board() -> GameState {
             use crate::types::ability::ContinuousModification;
             transient_name_count_gate_board(|state, source, bears| {
@@ -14452,7 +14648,7 @@ mod tests {
                         ContinuousModification::AddToughness { value: 1 },
                     ],
                     Duration::ForAsLongAs {
-                        condition: overridden_name_count_at_least(3),
+                        condition: overridden_name_count(Comparator::LT, 3),
                     },
                     None,
                 )
@@ -14469,30 +14665,36 @@ mod tests {
                 escalated,
                 "CR 611.2b makes a `for as long as` duration a live gate, so the kinds \
                  it reads are live reads — a layer-1 name override reaching the entrant \
-                 must escalate"
+                 can end it and must escalate"
             );
+            let mut pre = transient_duration_gate_read_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION, not in `condition`,
             // so no `tce.condition` channel could have covered this board.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_read_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_base_named(&pre, "NameBear"),
-                vec![(Some(2), Some(2)); 2],
+                vec![(Some(3), Some(3)); 2],
                 "pre-entry only 2 permanents carry the overridden name, so the \
-                 duration has not started"
+                 duration holds"
             );
             assert_eq!(
                 pts_base_named(&forced, "NameBear"),
-                vec![(Some(3), Some(3)); 2],
-                "layer 1 renames the entrant too, making it the third — the duration holds"
+                vec![(Some(2), Some(2)); 2],
+                "layer 1 renames the entrant too, making it the third — the duration ends"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_base_named(&normal, "NameBear"),
@@ -14504,18 +14706,17 @@ mod tests {
 
         /// (3.5) `ForAsLongAs` DURATION, PERTURBATION-PROBE CHANNEL. The twin
         /// of (3.2) with the gate moved into the duration: Master Thief's "for
-        /// as long as you control this creature" shape, inverted to an
-        /// opponent-presence check so an entry can start it. NOTHING on this
+        /// as long as you control this creature" shape, recast as an
+        /// opponent-ABSENCE check so an entry can end it. CR 611.2b: the
+        /// duration holds when the effect begins (no opponent creature, 5/5);
+        /// the opponent's entrant ends it permanently (2/2). NOTHING on this
         /// board writes the kinds the gate reads, so the read union cannot see
-        /// the flip — while the duration is unmet the effect is not gathered at
-        /// all and `all_writes` is empty, which exits the kind relation at
-        /// stage 1.
+        /// the flip.
         ///
         /// DISCRIMINATING: drop `transient_duration_condition` from
         /// `transient_gate_conditions` and the probe's transient arm sees only
-        /// `tce.condition`, which is `None` here — no disjunct fires, the entry
-        /// stays incremental, and the frozen recipients keep a stale 2/2 while
-        /// a full pass says 5/5.
+        /// `tce.condition`, which is `None` here — no disjunct fires and the
+        /// entry no longer escalates.
         fn transient_duration_gate_probe_board() -> GameState {
             use crate::types::ability::{ContinuousModification, StaticCondition};
             use crate::types::ControllerRef;
@@ -14542,12 +14743,14 @@ mod tests {
                 // CR 611.2b + CR 109.5: the duration is re-read every pass and
                 // "an opponent" stays bound to the resolver, P0.
                 Duration::ForAsLongAs {
-                    condition: StaticCondition::IsPresent {
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![TypeFilter::Creature],
-                            controller: Some(ControllerRef::Opponent),
-                            ..Default::default()
-                        })),
+                    condition: StaticCondition::Not {
+                        condition: Box::new(StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                controller: Some(ControllerRef::Opponent),
+                                ..Default::default()
+                            })),
+                        }),
                     },
                 },
                 None,
@@ -14565,29 +14768,35 @@ mod tests {
             assert!(
                 escalated,
                 "CR 611.2c freezes a resolved effect's affected SET, not its duration — \
-                 an entry that starts a `for as long as` duration must escalate or every \
+                 an entry that ends a `for as long as` duration must escalate or every \
                  frozen recipient keeps a stale board"
             );
+            let mut pre = transient_duration_gate_probe_board();
+            flush_layers(&mut pre);
             // Non-vacuity: the gate lives in the DURATION only.
             assert!(
-                !forced.transient_continuous_effects.is_empty()
-                    && forced.transient_continuous_effects.iter().all(|tce| {
+                pre.transient_continuous_effects.len() == 2
+                    && pre.transient_continuous_effects.iter().all(|tce| {
                         tce.condition.is_none()
                             && matches!(tce.duration, Duration::ForAsLongAs { .. })
                     }),
                 "the fixture must gate purely through `Duration::ForAsLongAs`"
             );
-            let mut pre = transient_duration_gate_probe_board();
-            flush_layers(&mut pre);
             assert_eq!(
                 pts_named(&pre, "DurationBear"),
-                vec![(Some(2), Some(2)); 2],
-                "pre-entry no opponent controls a creature, so the duration never started"
+                vec![(Some(5), Some(5)); 2],
+                "pre-entry no opponent controls a creature, so the duration holds"
             );
             assert_eq!(
                 pts_named(&forced, "DurationBear"),
-                vec![(Some(5), Some(5)); 2],
-                "the opponent's entrant starts the duration for every frozen recipient"
+                vec![(Some(2), Some(2)); 2],
+                "the opponent's entrant ends the duration for every frozen recipient"
+            );
+            // CR 611.2b: an ended duration is retired, never merely suppressed.
+            assert!(
+                normal.transient_continuous_effects.is_empty()
+                    && forced.transient_continuous_effects.is_empty(),
+                "the ended duration's effects must be retired on both paths"
             );
             assert_eq!(
                 pts_named(&normal, "DurationBear"),

@@ -1,11 +1,16 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
+  InteractionId,
   InteractionPreview,
   InteractionPreviewRequest,
   InteractionSubmission,
+  InteractionSessionId,
+  ManualResolutionSource,
+  ManualResolutionView,
   ViewerInteraction,
 } from "./generated/interaction";
+import type { ManualResolutionCommandPortFactory } from "../components/sandbox/manual-resolution-ui-contract";
 
 export type {
   InteractionActionId,
@@ -2486,6 +2491,7 @@ export type MulliganDecisionPhase =
   | { type: "BottomCards"; count: number; then: PendingMulliganAction };
 
 export type WaitingFor =
+  | { type: "ManualResolution"; data: { player: PlayerId; stack_entry_id: ObjectId } }
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
   | { type: "ResolveAllReady"; data: { epoch: number } }
@@ -3888,7 +3894,10 @@ export type TargetChoiceKind =
  * `engine::game::derived_views::DerivedViews`.
  */
 export interface DerivedViews {
+  manual_resolution?: ManualResolutionView | null;
   unique_authorized_submitter?: PlayerId;
+  /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
+  scry_prompt_id?: InteractionId;
   /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
   visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**
@@ -4753,6 +4762,61 @@ export interface SubmitResult {
   log_entries?: GameLogEntry[];
 }
 
+/** Equality fences captured from the admitted Worker; these are not credentials. */
+export interface LocalCapture {
+  readonly ownerLineage: string;
+  readonly interactionSessionId: InteractionSessionId;
+  readonly restoreEpoch: number;
+  readonly adapterGeneration: number;
+}
+
+export interface LocalOriginalAttempt {
+  readonly context: LocalCapture;
+  readonly attemptId: string;
+  readonly submission: InteractionSubmission;
+  readonly source: ManualResolutionSource;
+}
+
+export type LocalContinuationEnvelope =
+  | { type: "localContinuation"; operation: "register" | "apply" | "lookup"; attempt: LocalOriginalAttempt }
+  | { type: "localContinuation"; operation: "restore"; context: LocalCapture; checkpoint: string };
+
+export interface LocalReceipt {
+  attempt: LocalOriginalAttempt;
+  status: "pending" | "completed" | "not-applied" | "indeterminate";
+  result: SubmitResult | null;
+  rejection: ActionRejection | null;
+}
+
+export interface LocalCurrentFrame {
+  context: LocalCapture;
+  frameSequence: number;
+  snapshot: ViewerTransitionSnapshot;
+}
+
+/** Transport receipt and the separately read newest resident frame. */
+export interface LocalContinuationResult {
+  type: "localContinuation";
+  receipt: LocalReceipt | null;
+  current: LocalCurrentFrame | null;
+  appliedResult: SubmitResult | null;
+}
+
+/** The existing snapshot sequence gate remains the store's commit authority. */
+export interface LocalContinuationPublication extends LocalContinuationResult {
+  engineSnapshot: EngineSnapshot | null;
+}
+
+export interface LocalContinuationCapability {
+  readCurrent(): Promise<LocalContinuationPublication>;
+  /** Lookup only the original retained for this exact submission object. */
+  lookupInteraction(submission: InteractionSubmission): Promise<LocalContinuationPublication>;
+  submitInteraction(submission: InteractionSubmission, source: ManualResolutionSource): Promise<LocalContinuationPublication>;
+  restore(checkpoint: string): Promise<LocalContinuationPublication>;
+  readonly commandPortFactory: ManualResolutionCommandPortFactory;
+  subscribe(listener: (publication: LocalContinuationPublication) => void | Promise<void>): () => void;
+}
+
 /** Bundles legal actions with the engine's auto-pass recommendation. */
 /**
  * Engine-owned non-fatal diagnostic (an engine-level progress wedge, not a
@@ -5001,6 +5065,13 @@ export type AiProposalSubmission =
   | { status: "rejected"; rejection: ActionRejection };
 
 export interface EngineAdapter {
+  /** Available only for the retained explicitly admitted Local Worker. */
+  localContinuation?(): LocalContinuationCapability | null;
+  initializeExperimentalLocalGame?(request: {
+    deckData?: unknown; seed?: number; formatConfig?: unknown; matchConfig?: unknown;
+    playerCount?: number; firstPlayer?: number; trustedCheckpoint?: string;
+  }): Promise<SubmitResult>;
+  experimentalLocalActor?(): Promise<0 | null>;
   initialize(): Promise<void>;
   initializeGame(
     deckData?: unknown,

@@ -38,6 +38,7 @@ use crate::types::game_state::{
     SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
@@ -619,10 +620,18 @@ pub use crate::game::dungeon::{DungeonCardView, DungeonRoomNodeView};
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    #[cfg(feature = "manual_resolution_prototype")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_resolution: Option<crate::types::interaction::ManualResolutionView>,
+
     /// The sole player currently authorized to answer the live prompt. Omitted
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// The authorized viewer's Scry identity, retained when the bounded
+    /// interaction projection omits its opportunities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scry_prompt_id: Option<InteractionId>,
     /// Viewer-visible object ids in each player's shared exile pile. This is
     /// projected after face-down visibility filtering so the client can anchor
     /// rejection feedback without reimplementing private-information rules.
@@ -1087,6 +1096,7 @@ fn client_state_wire_value(
     root.remove("resolving_trigger_firing");
     root.remove("resolved_rules_journal");
     root.remove("stack_resolution_session");
+    root.remove("manual_resolution_state");
     // CR 605.4a + CR 117.3c: Defense in depth for direct `ClientGameStateRef`
     // callers that did not first run `visibility::filter_state_for_viewer`.
     // Both are trusted persistence authorities, never client schema.
@@ -1535,6 +1545,8 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        scry_prompt_id: viewer
+            .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         current_target_kind: current_target_kind(state),
@@ -2169,6 +2181,14 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.scry_prompt_id = viewer.and_then(|viewer| {
+        crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
+    });
+    #[cfg(feature = "manual_resolution_prototype")]
+    {
+        views.manual_resolution =
+            manual_resolution_view(authoritative_state, filtered_state, viewer);
+    }
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
@@ -2184,6 +2204,195 @@ pub fn derive_filtered_views(
             stack_display_groups_revealing(filtered_state, &views.stack_revealed_cards);
     }
     views
+}
+
+/// Source identity comes from native custody. A paid source's label comes from
+/// its public cast record and original carrier, never its current hidden object.
+#[cfg(feature = "manual_resolution_prototype")]
+pub(crate) fn manual_resolution_source(
+    state: &GameState,
+) -> Option<crate::types::interaction::ManualResolutionSource> {
+    use crate::types::game_state::ManualResolutionState;
+    use crate::types::interaction::ManualResolutionSource;
+    match state.manual_resolution_state.as_ref()? {
+        ManualResolutionState::Casting { actor, source } => {
+            let object = state.objects.get(&source.object_id)?;
+            Some(ManualResolutionSource {
+                actor: actor.0,
+                source_id: source.object_id.0,
+                source_incarnation: source.incarnation,
+                stack_entry_id: None,
+                cast_turn_journal_index: None,
+                card_id: object.card_id.0,
+                name: object.name.clone(),
+            })
+        }
+        ManualResolutionState::Armed { binding }
+        | ManualResolutionState::Active { binding, .. } => {
+            let entry = state
+                .resolving_stack_entry
+                .as_ref()
+                .filter(|entry| entry.id == binding.stack_entry_id)
+                .or_else(|| {
+                    state
+                        .stack
+                        .iter()
+                        .find(|entry| entry.id == binding.stack_entry_id)
+                })?;
+            let StackEntryKind::Spell { card_id, .. } = &entry.kind else {
+                return None;
+            };
+            let record = state
+                .spells_cast_this_turn_by_player
+                .get(&binding.cast_occurrence.caster)?
+                .get(binding.cast_occurrence.turn_journal_index as usize)?;
+            if record.spell_object_id != Some(binding.source.object_id) {
+                return None;
+            }
+            Some(ManualResolutionSource {
+                actor: binding.actor.0,
+                source_id: binding.source.object_id.0,
+                source_incarnation: binding.source.incarnation,
+                stack_entry_id: Some(binding.stack_entry_id.0),
+                cast_turn_journal_index: Some(binding.cast_occurrence.turn_journal_index),
+                card_id: card_id.0,
+                name: record.name.clone(),
+            })
+        }
+    }
+}
+
+/// No private ability, saved authority or current hidden object payload leaks.
+#[cfg(feature = "manual_resolution_prototype")]
+pub fn manual_resolution_view(
+    state: &GameState,
+    filtered: &GameState,
+    viewer: Option<PlayerId>,
+) -> Option<crate::types::interaction::ManualResolutionView> {
+    use crate::types::game_state::{ManualResolutionActivePhase, ManualResolutionState};
+    use crate::types::interaction::{ManualResolutionPhase, ManualResolutionView};
+    let manual = state.manual_resolution_state.as_ref()?;
+    let (actor, phase) = match manual {
+        ManualResolutionState::Casting { actor, source } => {
+            let object = filtered.objects.get(&source.object_id)?;
+            if object.name == "Hidden Card" {
+                return None;
+            }
+            (*actor, ManualResolutionPhase::Casting)
+        }
+        ManualResolutionState::Armed { binding } => (binding.actor, ManualResolutionPhase::Armed),
+        ManualResolutionState::Active { binding, phase, .. } => (
+            binding.actor,
+            match phase {
+                ManualResolutionActivePhase::Open => ManualResolutionPhase::Open,
+                ManualResolutionActivePhase::TerminalChildPending => {
+                    ManualResolutionPhase::TerminalChildPending
+                }
+            },
+        ),
+    };
+    let interaction_id = (viewer == Some(actor) && phase == ManualResolutionPhase::Open)
+        .then(|| {
+            state
+                .active_interaction_slots
+                .iter()
+                .find(|slot| slot.semantic_owner == actor.0)
+                .map(|slot| slot.interaction_id.clone())
+        })
+        .flatten();
+    let operable = interaction_id.is_some();
+    Some(ManualResolutionView {
+        source: manual_resolution_source(state)?,
+        phase,
+        interaction_id,
+        min_life_loss: operable.then_some(1),
+        max_life_loss: operable.then_some(i32::MAX as u32),
+    })
+}
+
+/// A captured source can be observed closed without confusing a completed
+/// Finish receipt with a still-live terminal replacement child.
+#[cfg(feature = "manual_resolution_prototype")]
+pub fn manual_resolution_view_for_source(
+    state: &GameState,
+    filtered: &GameState,
+    viewer: Option<PlayerId>,
+    captured: &crate::types::interaction::ManualResolutionSource,
+) -> crate::types::interaction::ManualResolutionView {
+    if let Some(current) = manual_resolution_view(state, filtered, viewer) {
+        if current.source == *captured
+            || (captured.stack_entry_id.is_none()
+                && current.source.actor == captured.actor
+                && current.source.source_id == captured.source_id
+                && Some(current.source.source_incarnation)
+                    == captured.source_incarnation.checked_add(1)
+                && current.source.card_id == captured.card_id
+                && current.source.stack_entry_id.is_some())
+        {
+            return current;
+        }
+    }
+    // Presentation absence is not closure evidence. Even if its display record
+    // is unavailable, matching native custody retains the captured public label.
+    if let Some(crate::types::game_state::ManualResolutionState::Casting { actor, source }) =
+        state.manual_resolution_state.as_ref()
+    {
+        if actor.0 == captured.actor
+            && source.object_id.0 == captured.source_id
+            && source.incarnation == captured.source_incarnation
+            && captured.stack_entry_id.is_none()
+            && captured.cast_turn_journal_index.is_none()
+        {
+            return crate::types::interaction::ManualResolutionView {
+                source: captured.clone(),
+                phase: crate::types::interaction::ManualResolutionPhase::Casting,
+                interaction_id: None,
+                min_life_loss: None,
+                max_life_loss: None,
+            };
+        }
+    }
+    if let Some(binding) = state.manual_resolution_binding() {
+        if binding.actor.0 == captured.actor
+            && binding.source.object_id.0 == captured.source_id
+            && binding.source.incarnation == captured.source_incarnation
+            && Some(binding.stack_entry_id.0) == captured.stack_entry_id
+            && Some(binding.cast_occurrence.turn_journal_index) == captured.cast_turn_journal_index
+        {
+            use crate::types::game_state::{ManualResolutionActivePhase, ManualResolutionState};
+            use crate::types::interaction::ManualResolutionPhase;
+            let phase = match state
+                .manual_resolution_state
+                .as_ref()
+                .expect("matching binding")
+            {
+                ManualResolutionState::Armed { .. } => ManualResolutionPhase::Armed,
+                ManualResolutionState::Active {
+                    phase: ManualResolutionActivePhase::Open,
+                    ..
+                } => ManualResolutionPhase::Open,
+                ManualResolutionState::Active {
+                    phase: ManualResolutionActivePhase::TerminalChildPending,
+                    ..
+                } => ManualResolutionPhase::TerminalChildPending,
+                ManualResolutionState::Casting { .. } => unreachable!("casting has no binding"),
+            };
+            return crate::types::interaction::ManualResolutionView {
+                source: captured.clone(),
+                phase,
+                interaction_id: None,
+                min_life_loss: None,
+                max_life_loss: None,
+            };
+        }
+    }
+    crate::types::interaction::ManualResolutionView {
+        source: captured.clone(),
+        phase: crate::types::interaction::ManualResolutionPhase::Closed,
+        interaction_id: None,
+        min_life_loss: None,
+        max_life_loss: None,
+    }
 }
 
 /// CR 702.40a: Storm counts each other spell cast before it this turn. A
@@ -4204,36 +4413,39 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&target).unwrap(),
         );
-        let tce_id = state.add_transient_continuous_effect_with_bindings(
-            source,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::IsTapped {
-                    scope: ObjectScope::Target,
+        let tce_id = state
+            .add_transient_continuous_effect_with_bindings(
+                source,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Target,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: source },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-            crate::types::game_state::TransientContinuousEffectBindings {
-                affected_recipient: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&source],
+                TargetFilter::SpecificObject { id: source },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                crate::types::game_state::TransientContinuousEffectBindings {
+                    affected_recipient: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&source],
+                        ),
                     ),
-                ),
-                duration_subject: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&target],
+                    duration_subject: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&target],
+                        ),
                     ),
-                ),
-            },
-        );
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
 
         assert_eq!(
             derive_views(&state, None).copied_permanents,
@@ -4306,20 +4518,22 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&host).unwrap(),
         );
-        let independent_copy_effect_id = state.add_transient_continuous_effect(
-            host,
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: host },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
-            }],
-            None,
-        );
+        let independent_copy_effect_id = state
+            .add_transient_continuous_effect(
+                host,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: host },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         assert_ne!(
             Some(independent_copy_effect_id),
             merge_effect_id,
@@ -6623,6 +6837,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }]
             .into();
         }

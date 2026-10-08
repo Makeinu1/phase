@@ -188,9 +188,30 @@ describe("adapter boundary guardrails", () => {
     const rustSource = readFileSync(resolve(root, "crates/engine/src/types/actions.rs"), "utf8");
     const tsSource = readFileSync(resolve(root, "client/src/adapter/types.ts"), "utf8");
 
-    const rustVariants = rustEnumVariants(rustSource, "GameAction");
+    // These engine-only prototype actions are cfg-gated and intentionally do
+    // not enter the frontend GameAction surface. Manual P1 goes through the
+    // authenticated InteractionSubmission continuation instead.
+    const nativePrototypeOnly = new Set([
+      "DesignateManualResolution",
+      "FinishManualResolution",
+      "ApplyManualLifeLoss",
+    ]);
+    for (const variant of nativePrototypeOnly) {
+      expect(rustSource).toMatch(
+        new RegExp(
+          `#\\[cfg\\(feature = "manual_resolution_prototype"\\)\\]\\s+${variant}\\b`,
+        ),
+      );
+    }
+
+    const rustVariants = rustEnumVariants(rustSource, "GameAction").filter(
+      (variant) => !nativePrototypeOnly.has(variant),
+    );
     const tsVariants = tsUnionVariantTypes(tsSource, "GameAction", "// CR 605.3b");
 
     expect(new Set(tsVariants)).toEqual(new Set(rustVariants));
+    for (const variant of nativePrototypeOnly) {
+      expect(tsVariants).not.toContain(variant);
+    }
   });
 });

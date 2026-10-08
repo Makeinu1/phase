@@ -1281,6 +1281,10 @@ enum FlatPriorityActionClass {
 fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass {
     match action {
         GameAction::PassPriority => FlatPriorityActionClass::Pass,
+        #[cfg(feature = "manual_resolution_prototype")]
+        GameAction::DesignateManualResolution { .. }
+        | GameAction::FinishManualResolution { .. }
+        | GameAction::ApplyManualLifeLoss { .. } => FlatPriorityActionClass::Other,
         GameAction::CastSpell { .. } => FlatPriorityActionClass::CastSpell,
         GameAction::ActivateAbility {
             source_id,
@@ -6373,6 +6377,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -6497,6 +6502,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             };
             obj.static_definitions = vec![def].into();
         }

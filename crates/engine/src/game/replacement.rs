@@ -2271,10 +2271,10 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
-/// CR 614.9: Read back the captured chosen recipient (an object or a player)
+/// CR 614.9: Read back the captured concrete recipient (an object or a player)
 /// stashed in the matched replacement's `redirect_target` field (set at
 /// resolution time for `DamageRedirectTarget::ChosenTarget` — "to target
-/// creature" / "to any target").
+/// creature" / "to any target", or the creating ability's implicit "you").
 fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
@@ -4275,72 +4275,171 @@ fn proliferate_applier(
     })
 }
 
+/// Unsupported references remain `None`; arithmetic failure is a separate
+/// result so the bounded caller cannot fall back to the original event.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReplacementQuantityOverflow;
+
+#[derive(Clone, Copy)]
+enum ReplacementQuantityArithmetic {
+    Checked,
+    Saturating,
+}
+
 fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
-    match expr {
+    resolve_event_replacement_quantity_with_arithmetic(
+        expr,
+        event_count,
+        ReplacementQuantityArithmetic::Saturating,
+    )
+    .expect("saturating replacement arithmetic is infallible")
+}
+
+fn resolve_event_replacement_quantity_with_arithmetic(
+    expr: &QuantityExpr,
+    event_count: u32,
+    arithmetic: ReplacementQuantityArithmetic,
+) -> Result<Option<i32>, ReplacementQuantityOverflow> {
+    let narrow = |value: i64| match arithmetic {
+        ReplacementQuantityArithmetic::Checked => {
+            i32::try_from(value).map_err(|_| ReplacementQuantityOverflow)
+        }
+        ReplacementQuantityArithmetic::Saturating => {
+            Ok(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+        }
+    };
+    let resolve = |expr: &QuantityExpr| {
+        resolve_event_replacement_quantity_with_arithmetic(expr, event_count, arithmetic)
+    };
+    // Propagate an unsupported operand independently of arithmetic overflow.
+    macro_rules! operand {
+        ($expr:expr) => {
+            match resolve($expr)? {
+                Some(value) => value,
+                None => return Ok(None),
+            }
+        };
+    }
+    let value = match expr {
         QuantityExpr::Ref {
             qty: crate::types::ability::QuantityRef::EventContextAmount,
-        } => Some(event_count as i32),
-        QuantityExpr::Fixed { value } => Some(*value),
+        } => narrow(event_count as i64)?,
+        QuantityExpr::Fixed { value } => *value,
         QuantityExpr::DivideRounded {
             inner,
             divisor,
             rounding,
         } => {
-            let value = resolve_event_replacement_quantity(inner, event_count)?;
-            let divisor = i32::try_from((*divisor).max(1)).ok()?;
-            Some(match rounding {
+            let value = operand!(inner) as i64;
+            let divisor = (*divisor).max(1) as i64;
+            // Widen before adding: a representable quotient must not fail just
+            // because its rounding numerator exceeds the signed event domain.
+            narrow(match rounding {
                 crate::types::ability::RoundingMode::Up => (value + divisor - 1) / divisor,
                 crate::types::ability::RoundingMode::Down => value / divisor,
-            })
+            })?
         }
-        QuantityExpr::Offset { inner, offset } => {
-            Some(resolve_event_replacement_quantity(inner, event_count)? + offset)
-        }
-        QuantityExpr::ClampMin { inner, minimum } => {
-            Some(resolve_event_replacement_quantity(inner, event_count)?.max(*minimum))
-        }
+        QuantityExpr::Offset { inner, offset } => narrow(operand!(inner) as i64 + *offset as i64)?,
+        QuantityExpr::ClampMin { inner, minimum } => operand!(inner).max(*minimum),
         QuantityExpr::Multiply { factor, inner } => {
-            Some(factor * resolve_event_replacement_quantity(inner, event_count)?)
+            narrow(*factor as i64 * operand!(inner) as i64)?
         }
         QuantityExpr::Sum { exprs } => {
             let mut total = 0i32;
             for inner in exprs {
-                total += resolve_event_replacement_quantity(inner, event_count)?;
+                total = narrow(total as i64 + operand!(inner) as i64)?;
             }
-            Some(total)
+            total
         }
         // CR 107.1: the maximum of the computed operand values; empty → 0.
         QuantityExpr::Max { exprs } => {
             let mut best: Option<i32> = None;
             for inner in exprs {
-                let value = resolve_event_replacement_quantity(inner, event_count)?;
+                let value = operand!(inner);
                 best = Some(best.map_or(value, |b| b.max(value)));
             }
-            Some(best.unwrap_or(0))
+            best.unwrap_or(0)
         }
-        // CR 107.1c + CR 608.2d: For replacement quantity resolution, treat
-        // `UpTo` transparently as its upper bound — the replacement-effect
-        // pipeline does not honor "may pick fewer" semantics (the choice
-        // already happened at effect resolution before the replacement fires).
-        QuantityExpr::UpTo { max } => resolve_event_replacement_quantity(max, event_count),
-        // CR 107.3: `base ^ exponent`. Negative exponents clamp to 0 per
-        // CR 107.1b; `saturating_pow` prevents overflow.
+        // CR 107.1c + CR 608.2d: the replacement uses the chosen upper bound.
+        QuantityExpr::UpTo { max } => operand!(max),
+        // CR 107.3 + CR 107.1b: negative exponents clamp to zero.
         QuantityExpr::Power { base, exponent } => {
-            let exp = resolve_event_replacement_quantity(exponent, event_count)?.max(0) as u32;
-            Some(base.saturating_pow(exp))
+            let exponent = operand!(exponent).max(0) as u32;
+            match arithmetic {
+                ReplacementQuantityArithmetic::Checked => base
+                    .checked_pow(exponent)
+                    .ok_or(ReplacementQuantityOverflow)?,
+                ReplacementQuantityArithmetic::Saturating => base.saturating_pow(exponent),
+            }
         }
-        // "The difference between A and B" being unsigned is an Oracle
-        // templating convention with no dedicated CR number — resolves to the
-        // absolute value of the gap. (CR 107.1b is distinct: it clamps a
-        // negative result to zero, not the operand-order-independent magnitude
-        // taken here.)
+        // Oracle's "difference between" means the unsigned magnitude.
         QuantityExpr::Difference { left, right } => {
-            let l = resolve_event_replacement_quantity(left, event_count)?;
-            let r = resolve_event_replacement_quantity(right, event_count)?;
-            Some((l - r).abs())
+            narrow((operand!(left) as i64 - operand!(right) as i64).abs())?
         }
-        QuantityExpr::Ref { .. } => None,
+        QuantityExpr::Ref { .. } => return Ok(None),
+    };
+    Ok(Some(value))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BoundedLifeLossReplacementError {
+    QuantityOverflow,
+    UnsupportedQuantity,
+    UnsupportedSubstitution,
+    ExceedsMaximum,
+}
+
+fn validate_bounded_life_loss_replacement(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+    maximum: Option<u32>,
+) -> Result<(), BoundedLifeLossReplacementError> {
+    if maximum.is_none() {
+        return Ok(());
     }
+    let ProposedEvent::LifeLoss { amount, .. } = proposed else {
+        return Ok(());
+    };
+    let Some(definition) = replacement_choice_definition(state, rid) else {
+        return Ok(());
+    };
+    // The bounded operation supports scalar event modification only. Reject
+    // substitute instructions and residual work before the applier can stash
+    // an unbounded synchronous continuation (CR 614.6), including a rider on
+    // a structured quantity modification.
+    if rid.source == ObjectId(0)
+        || definition.runtime_execute.is_some()
+        || definition.execute.as_deref().is_some_and(|execute| {
+            definition.quantity_modification.is_some()
+                || execute.sub_ability.is_some()
+                || execute.else_ability.is_some()
+                || !matches!(&*execute.effect, Effect::LoseLife { .. })
+        })
+    {
+        return Err(BoundedLifeLossReplacementError::UnsupportedSubstitution);
+    }
+    if definition.quantity_modification.is_some() {
+        return Ok(());
+    }
+    if let Some(execute) = definition.execute.as_deref() {
+        if let Effect::LoseLife {
+            amount: quantity, ..
+        } = &*execute.effect
+        {
+            if resolve_event_replacement_quantity_with_arithmetic(
+                quantity,
+                *amount,
+                ReplacementQuantityArithmetic::Checked,
+            )
+            .map_err(|_| BoundedLifeLossReplacementError::QuantityOverflow)?
+            .is_none()
+            {
+                return Err(BoundedLifeLossReplacementError::UnsupportedQuantity);
+            }
+        }
+    }
+    Ok(())
 }
 
 // --- 5. GainLife ---
@@ -4735,8 +4834,8 @@ fn create_token_applier(
             // existing `execute` field (Approach A, no new field).
             def.execute
                 .as_deref()
-                .map(|ability| (*ability.effect).clone())
-                .filter(|effect| matches!(effect, Effect::Token { .. })),
+                .filter(|ability| matches!(*ability.effect, Effect::Token { .. }))
+                .cloned(),
             def.execute
                 .as_deref()
                 .is_some_and(is_choose_token_substitution),
@@ -4748,7 +4847,7 @@ fn create_token_applier(
         additional_spec,
         ensure_specs,
         owner_redirect,
-        substitute_effect,
+        substitute,
         choose_token_substitution,
         source_controller,
     ) = if rid.source == ObjectId(0) {
@@ -4852,13 +4951,9 @@ fn create_token_applier(
         // `new_count` ("that many" — same count) and `owner`. The creature-type
         // gate (`TokenCoreTypeMatches`) already passed in
         // `find_applicable_replacements`, so non-creature tokens never reach here.
-        if let Some(token_effect) = substitute_effect {
-            let ability = crate::types::ability::ResolvedAbility::new(
-                token_effect,
-                Vec::new(),
-                rid.source,
-                source_controller,
-            );
+        if let Some(substitute) = substitute {
+            // CR 201.5a: the funnel carries a granted substitute's granter stamp.
+            let ability = build_resolved_from_def(&substitute, rid.source, source_controller);
             if let Some((substitute_spec, _, _, _)) =
                 crate::game::effects::token::resolve_token_spec(state, &ability)
             {
@@ -6451,17 +6546,15 @@ fn replacement_condition_quantity_ctx(
     // draws — its `EventContextAmount` is this event's own count.
     let event_amount = match event {
         ProposedEvent::Draw { count, .. } => Some(u32_to_i32_saturating(*count)),
+        // CR 120.4b + CR 616.1f: damage thresholds read the current proposal,
+        // including changes made by a previously applied replacement.
+        ProposedEvent::Damage { amount, .. } => Some(u32_to_i32_saturating(*amount)),
         _ => None,
     };
     crate::game::quantity::QuantityContext {
-        entering: None,
-        source: source_id,
-        trigger_source: None,
-        recipient: None,
         scoped_player,
-        damage_source: None,
         event_amount,
-        spell: None,
+        ..crate::game::quantity::QuantityContext::new(source_id)
     }
 }
 
@@ -6473,8 +6566,10 @@ fn replacement_valid_card_matches(
     event: &ProposedEvent,
     state: &GameState,
     filter: &TargetFilter,
-    ctx: &FilterContext<'_>,
+    source_id: ObjectId,
+    controller: Option<PlayerId>,
 ) -> bool {
+    let ctx = &repl_def.valid_card_context(state, source_id, controller);
     if let ProposedEvent::Connive { subject, .. } = event {
         return matches_target_filter_on_event_snapshot(state, subject, filter, ctx);
     }
@@ -7110,10 +7205,16 @@ fn apply_state_level_gates(
     source_controller: PlayerId,
     state: &GameState,
 ) -> bool {
-    // CR 614.1d: valid_card filter — the event's affected object must match.
+    // CR 614.1: valid_card filter — the event's affected object must match.
     if let Some(ref filter) = repl_def.valid_card {
-        let ctx = FilterContext::from_source_with_controller(source, source_controller);
-        let matches = replacement_valid_card_matches(repl_def, event, state, filter, &ctx);
+        let matches = replacement_valid_card_matches(
+            repl_def,
+            event,
+            state,
+            filter,
+            source,
+            Some(source_controller),
+        );
         if !matches {
             return false;
         }
@@ -7554,8 +7655,14 @@ fn object_replacement_candidate_applies(
     }
 
     if let Some(ref filter) = repl_def.valid_card {
-        let ctx = FilterContext::from_source_with_controller(obj.id, replacement_player);
-        let matches = replacement_valid_card_matches(repl_def, event, state, filter, &ctx);
+        let matches = replacement_valid_card_matches(
+            repl_def,
+            event,
+            state,
+            filter,
+            obj.id,
+            Some(replacement_player),
+        );
         if !matches {
             return false;
         }
@@ -8773,13 +8880,14 @@ pub fn find_applicable_replacements(
                     // divergence in both directions and inherits its Connive / ChangeZone /
                     // TokenEntry handling.
                     if let Some(ref vc) = repl_def.valid_card {
-                        let ctx = match repl_def.source_controller {
-                            Some(pid) => {
-                                FilterContext::from_source_with_controller(source_host, pid)
-                            }
-                            None => FilterContext::from_source(state, source_host),
-                        };
-                        if !replacement_valid_card_matches(repl_def, event, state, vc, &ctx) {
+                        if !replacement_valid_card_matches(
+                            repl_def,
+                            event,
+                            state,
+                            vc,
+                            source_host,
+                            repl_def.source_controller,
+                        ) {
                             continue;
                         }
                     }
@@ -9257,13 +9365,7 @@ fn extract_etb_counters_from_effect(
             };
             let ctx = crate::game::quantity::QuantityContext {
                 entering,
-                source: source_id,
-                trigger_source: None,
-                recipient: None,
-                scoped_player: None,
-                damage_source: None,
-                event_amount: None,
-                spell: None,
+                ..crate::game::quantity::QuantityContext::new(source_id)
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -9296,13 +9398,7 @@ fn extract_etb_counters_from_effect(
                     .unwrap_or(PlayerId(0));
                 let ctx = crate::game::quantity::QuantityContext {
                     entering: event.affected_object_id(),
-                    source: source_id,
-                    trigger_source: None,
-                    recipient: None,
-                    scoped_player: None,
-                    damage_source: None,
-                    event_amount: None,
-                    spell: None,
+                    ..crate::game::quantity::QuantityContext::new(source_id)
                 };
                 let n =
                     crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)
@@ -9973,6 +10069,27 @@ fn apply_single_replacement(
                     // the whole substitute.
                     if draw_is_substituted_away(state, rid, repl_def, ability, &proposed) {
                         return true;
+                    }
+                    if let (
+                        ProposedEvent::LifeLoss { amount, .. },
+                        Effect::LoseLife {
+                            amount: execute_amount,
+                            ..
+                        },
+                    ) = (&proposed, &*def.effect)
+                    {
+                        // Suppress only the scalar template the selected live-object
+                        // applier folds. Other sources, structured modifiers, dynamic
+                        // quantities and captured work still need their continuation.
+                        // The producer above builds Resolved exactly when runtime_execute
+                        // exists; every other continuation is a Template.
+                        let folded_template = repl_def.runtime_execute.is_none()
+                            && rid.source != ObjectId(0)
+                            && !state.liminal_entries.contains_key(&rid.source)
+                            && repl_def.quantity_modification.is_none()
+                            && resolve_event_replacement_quantity(execute_amount, *amount)
+                                .is_some();
+                        return !folded_template;
                     }
                     !matches!(
                         (&proposed, &*def.effect),
@@ -11574,17 +11691,38 @@ fn replay_pending_replacement(
 
 fn pipeline_loop(
     state: &mut GameState,
+    proposed: ProposedEvent,
+    depth: u16,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    pipeline_loop_checked(state, proposed, depth, registry, events, None)
+        .expect("the ordinary replacement pipeline has no checked quantity bound")
+}
+
+fn pipeline_loop_checked(
+    state: &mut GameState,
     mut proposed: ProposedEvent,
     mut depth: u16,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
-) -> ReplacementResult {
+    maximum_life_loss: Option<u32>,
+) -> Result<ReplacementResult, BoundedLifeLossReplacementError> {
     // The single recording point (CR 614.1a). This is the pipeline BODY every one
     // of the 9 entries runs, so an event a resolver proposes cannot avoid it.
     // Disarmed (a no-op) outside a speculative probe.
     record_proposed_event(&proposed);
 
     loop {
+        // Check every intermediate event before another replacement can reduce
+        // an out-of-range quantity into a misleadingly accepted final amount.
+        if maximum_life_loss.is_some_and(|maximum| {
+            matches!(
+                &proposed, ProposedEvent::LifeLoss { amount, .. } if *amount > maximum
+            )
+        }) {
+            return Err(BoundedLifeLossReplacementError::ExceedsMaximum);
+        }
         if depth >= MAX_REPLACEMENT_DEPTH {
             break;
         }
@@ -11604,7 +11742,7 @@ fn pipeline_loop(
         if is_counter_placement_event(&proposed)
             && counter_placement_prevention_applies(state, &candidates)
         {
-            return ReplacementResult::Prevented;
+            return Ok(ReplacementResult::Prevented);
         }
 
         // CR 616.1a-e: only the earliest CR 616.1 step present may be chosen now;
@@ -11679,21 +11817,28 @@ fn pipeline_loop(
                     may_cost_paid: false,
                     may_cost_remaining: None,
                 });
-                return replay_pending_replacement(state, affected, events);
+                return Ok(if maximum_life_loss.is_some() {
+                    // This caller cannot resume a choice. Do not replay saved
+                    // automation through the unbounded continuation path.
+                    ReplacementResult::NeedsChoice(affected)
+                } else {
+                    replay_pending_replacement(state, affected, events)
+                });
             }
 
             if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
             {
-                return park_entry_controller_choice(
+                return Ok(park_entry_controller_choice(
                     state,
                     proposed,
                     depth,
                     rid,
                     player,
                     entry_candidates,
-                );
+                ));
             }
 
+            validate_bounded_life_loss_replacement(state, &proposed, rid, maximum_life_loss)?;
             proposed.mark_applied(rid);
             match apply_single_replacement_and_dirty(
                 state,
@@ -11704,7 +11849,7 @@ fn pipeline_loop(
                 events,
             ) {
                 Ok(new_event) => proposed = new_event,
-                Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
+                Err(ApplyResult::Prevented) => return Ok(ReplacementResult::Prevented),
                 Err(ApplyResult::Modified(_)) => unreachable!(),
             }
         } else if state.replacement_auto_choice_tail.is_some()
@@ -11737,7 +11882,13 @@ fn pipeline_loop(
                 may_cost_paid: false,
                 may_cost_remaining: None,
             });
-            return replay_pending_replacement(state, affected, events);
+            return Ok(if maximum_life_loss.is_some() {
+                // This caller cannot resume a choice. Do not replay saved
+                // automation through the unbounded continuation path.
+                ReplacementResult::NeedsChoice(affected)
+            } else {
+                replay_pending_replacement(state, affected, events)
+            });
         } else {
             // CR 616.1: the choice is degenerate here — every candidate ordering
             // yields an observationally identical outcome — so the prompt is
@@ -11746,6 +11897,7 @@ fn pipeline_loop(
             // over the still-applicable effects). All candidates still apply
             // exactly once.
             let rid = candidates[0];
+            validate_bounded_life_loss_replacement(state, &proposed, rid, maximum_life_loss)?;
             proposed.mark_applied(rid);
             match apply_single_replacement_and_dirty(
                 state,
@@ -11756,7 +11908,7 @@ fn pipeline_loop(
                 events,
             ) {
                 Ok(new_event) => proposed = new_event,
-                Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
+                Err(ApplyResult::Prevented) => return Ok(ReplacementResult::Prevented),
                 Err(ApplyResult::Modified(_)) => unreachable!(),
             }
         }
@@ -11765,7 +11917,7 @@ fn pipeline_loop(
     }
 
     state.replacement_auto_choice_tail = None;
-    ReplacementResult::Execute(proposed)
+    Ok(ReplacementResult::Execute(proposed))
 }
 
 pub fn replace_event(
@@ -11785,6 +11937,29 @@ pub fn replace_event(
     let result = pipeline_loop(state, proposed, 0, registry, events);
     clear_replacement_index_pipeline(state);
     release_transformed_entry_projection(state, staged, &result);
+    result
+}
+
+/// Run the ordinary replacement driver with checks before each life-loss
+/// replacement. A choice stays deferred; the caller owns atomic rollback.
+pub(crate) fn replace_bounded_life_loss(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    maximum: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<ReplacementResult, BoundedLifeLossReplacementError> {
+    debug_assert!(matches!(proposed, ProposedEvent::LifeLoss { .. }));
+    state.replacement_auto_choice_tail = None;
+    prepare_replacement_index_for_pipeline(state);
+    let result = pipeline_loop_checked(
+        state,
+        proposed,
+        0,
+        replacement_registry(),
+        events,
+        Some(maximum),
+    );
+    clear_replacement_index_pipeline(state);
     result
 }
 
@@ -15859,6 +16034,50 @@ mod tests {
             1
         );
         assert!(find_applicable_replacements(&state, &opponent_event, &registry).is_empty());
+    }
+
+    #[test]
+    fn fixed_damage_threshold_reads_current_event_before_ambient_amounts() {
+        let replacement = crate::parser::oracle_replacement::parse_replacement_line(
+            "If a source would deal 4 or more damage to a permanent or player, that source deals 3 damage to that permanent or player instead.",
+            "Divine Presence",
+        )
+        .expect("the printed fixed damage replacement must parse");
+        assert_eq!(
+            replacement.damage_modification,
+            Some(DamageModification::SetTo { value: 3 })
+        );
+        let registry = build_replacement_registry();
+        for (amount, ambient, expected) in [(3, 20, 0), (4, 0, 1), (u32::MAX, 0, 1)] {
+            let mut state =
+                test_state_with_object(ObjectId(10), Zone::Battlefield, vec![replacement.clone()]);
+            state.last_effect_count = Some(ambient);
+            state.last_effect_amount = Some(ambient);
+            state.current_trigger_event = Some(GameEvent::DamageDealt {
+                source_id: ObjectId(11),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: ambient as u32,
+                is_combat: false,
+                excess: 0,
+            });
+            let event = ProposedEvent::Damage {
+                source_id: ObjectId(11),
+                target: TargetRef::Player(PlayerId(1)),
+                amount,
+                is_combat: false,
+                applied: HashSet::new(),
+            };
+            // CR 120.4b + CR 616.1f: only the current proposed damage amount
+            // determines applicability, including after other replacements.
+            assert_eq!(
+                find_applicable_replacements(&state, &event, &registry).len(),
+                expected
+            );
+            assert_eq!(
+                replacement_condition_quantity_ctx(&state, ObjectId(10), None, &event).event_amount,
+                Some(i32::try_from(amount).unwrap_or(i32::MAX)),
+            );
+        }
     }
 
     #[test]
@@ -24720,7 +24939,7 @@ mod tests {
         // Assembled, never written whole: a literal needle would appear in this
         // file and be counted by the very scan that looks for it.
         let hook_needle = format!("{}{}", "record_proposed_", "event(&");
-        let fn_header = format!("\n{}{} ", "fn ", "pipeline_loop(");
+        let fn_header = format!("\n{}{} ", "fn ", "pipeline_loop_checked(");
         let src = std::fs::read_to_string(format!(
             "{}/src/game/replacement.rs",
             env!("CARGO_MANIFEST_DIR")
@@ -24744,7 +24963,7 @@ mod tests {
             .expect("a top-level `fn` encloses the hook");
         assert!(
             src[enclosing..].starts_with(fn_header.trim_end()),
-            "the hook must sit in `pipeline_loop` — the pipeline BODY every entry \
+            "the hook must sit in `pipeline_loop_checked` — the pipeline BODY every entry \
              runs — not in the `replace_event` wrapper that \
              `replace_combat_damage_batch` bypasses"
         );

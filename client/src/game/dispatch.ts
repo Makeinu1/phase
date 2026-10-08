@@ -1,8 +1,9 @@
-import type { AiActionProposal, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, PersistedGameState, RewindOption, WaitingFor } from "../adapter/types";
+import type { AiActionProposal, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, LocalContinuationPublication, PersistedGameState, RewindOption, WaitingFor } from "../adapter/types";
 import type {
   InteractionPreview,
   InteractionPreviewRequest,
   InteractionSubmission,
+  ManualResolutionSource,
 } from "../adapter/generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter/types";
 import { reportStructuredActionRejection } from "./actionRejectionReporter";
@@ -858,14 +859,24 @@ export async function dispatchAiActionProposal(
  * atomic snapshot boundary used by ordinary game actions.  The response is
  * opaque: UI callers cannot materialize or reinterpret a GameAction.
  */
+export function dispatchInteraction(submission: InteractionSubmission, actor?: number): Promise<void>;
+export function dispatchInteraction(submission: InteractionSubmission, actor: number, manualSource: ManualResolutionSource): Promise<LocalContinuationPublication | void>;
 export async function dispatchInteraction(
   submission: InteractionSubmission,
   actor: number = getPlayerId(),
-): Promise<void> {
+  manualSource?: ManualResolutionSource,
+): Promise<LocalContinuationPublication | void> {
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
 
   try {
+    if (manualSource) {
+      const continuation = adapter.localContinuation?.();
+      if (!continuation) throw new AdapterError(AdapterErrorCode.UNSUPPORTED, i18n.t("game:manualResolution.startupAdmissionUnavailable"), false);
+      // The one GameProvider subscriber commits the atomic publication. The
+      // capability retains the immutable attempt before delivery begins.
+      return await continuation.submitInteraction(submission, manualSource);
+    }
     if (!adapter.submitInteraction) {
       throw new AdapterError(
         AdapterErrorCode.UNSUPPORTED,
@@ -884,6 +895,29 @@ export async function dispatchInteraction(
     reportActionError(err);
     throw err;
   }
+}
+
+/** Bind the sole admitted Local publication listener to the live game lifecycle. */
+export function createLocalContinuationPublisher(adapter: EngineAdapter): (publication: LocalContinuationPublication) => void {
+  const generation = dispatchGeneration;
+  const session = { adapter, generation: useGameStore.getState().gameSessionGeneration };
+  return (publication) => {
+    if (!isDispatchContextCurrent(generation, session) || !publication.engineSnapshot || !publication.current) return;
+    const { current, appliedResult, engineSnapshot } = publication;
+    const accepted = useGameStore.getState().commitEngineSnapshot(engineSnapshot, {
+      events: appliedResult?.events ?? [],
+      logEntries: appliedResult?.log_entries ?? [],
+      extraState: {
+        restoredStackAutomation: null,
+        localContinuationContext: {
+          restoreEpoch: current.context.restoreEpoch,
+          adapterGeneration: current.context.adapterGeneration,
+        },
+      },
+    });
+    const gameId = useGameStore.getState().gameId;
+    if (accepted && appliedResult && gameId) void saveAuthoritativeGame(gameId, adapter, engineSnapshot.state);
+  };
 }
 
 /**
@@ -1066,6 +1100,7 @@ export async function restoreGameState(
       stateHistory: [],
       turnCheckpoints: preservedCheckpoints,
       restoredStackAutomation: null,
+      localContinuationContext: null,
     },
   });
   if (gameId) {

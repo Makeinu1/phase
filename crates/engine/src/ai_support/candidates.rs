@@ -3490,6 +3490,8 @@ pub fn candidate_actions_broad_with_probe(
             })
             .collect(),
         WaitingFor::GameOver { .. } => Vec::new(),
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution { .. } => Vec::new(),
         WaitingFor::ReplacementChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }

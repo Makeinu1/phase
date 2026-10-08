@@ -201,6 +201,8 @@ pub enum DecisionKind {
     DeclareBlockers,
     ManaPayment,
     ChooseX,
+    /// A human-owned manual resolution wait, deliberately outside AI policy routing.
+    ManualResolution,
 }
 
 /// Structured reason emitted alongside every policy verdict — no freeform

@@ -38,7 +38,9 @@ const CHECKPOINT_INTERVAL: u32 = 20;
 pub enum ReplayError {
     #[error("replay is missing its format version")]
     MissingFormatVersion,
-    #[error("unsupported replay format version {version}; this engine supports versions 2 and 3")]
+    #[error(
+        "unsupported replay format version {version}; this engine supports versions 2, 3 and 4"
+    )]
     UnsupportedFormatVersion { version: u32 },
     /// An action that was recorded as having succeeded failed to re-apply
     /// during reconstruction. This means the recording and the engine version
@@ -145,10 +147,11 @@ impl ReplayPlayer {
         db: Option<&std::sync::Arc<CardDatabase>>,
     ) -> Result<Self, ReplayError> {
         match log.format_version {
-            Some(2 | REPLAY_FORMAT_VERSION) => {}
+            Some(2 | 3 | REPLAY_FORMAT_VERSION) => {}
             Some(version) => return Err(ReplayError::UnsupportedFormatVersion { version }),
             None => return Err(ReplayError::MissingFormatVersion),
         }
+        validate_action_kinds(&log)?;
         validate_resolve_all_boundaries(&log)?;
         let initial = reconstruct_initial_state(&log.header, db)?;
         let mut checkpoints = BTreeMap::new();
@@ -222,6 +225,35 @@ impl ReplayPlayer {
                         recorded.action.clone(),
                     )
                 }
+                RecordedActionKind::ManualCastIntent { source } => {
+                    #[cfg(feature = "manual_resolution_prototype")]
+                    {
+                        let before = state.clone();
+                        super::interaction::install_manual_cast_intent_for_action(
+                            &mut state,
+                            recorded.actor,
+                            source,
+                            &recorded.action,
+                        )
+                        .map_err(|error| ReplayError::Desync {
+                            index: recorded.seq,
+                            message: format!("invalid Manual cast intent: {error:?}"),
+                        })?;
+                        let result = apply(&mut state, recorded.actor, recorded.action.clone());
+                        if result.is_err() {
+                            state = before;
+                        }
+                        result
+                    }
+                    #[cfg(not(feature = "manual_resolution_prototype"))]
+                    {
+                        let _ = source;
+                        return Err(ReplayError::Desync {
+                            index: recorded.seq,
+                            message: "Manual replay is unavailable in this engine".into(),
+                        });
+                    }
+                }
             };
             applied.map_err(|e| ReplayError::Desync {
                 index: recorded.seq,
@@ -255,6 +287,33 @@ impl ReplayPlayer {
         }
         Ok(state)
     }
+}
+
+fn validate_action_kinds(log: &ReplayLog) -> Result<(), ReplayError> {
+    for recorded in &log.actions {
+        if let RecordedActionKind::ManualCastIntent { source } = recorded.kind {
+            let message = if log.format_version != Some(REPLAY_FORMAT_VERSION) {
+                Some("Manual cast intent requires replay version 4")
+            } else if !cfg!(feature = "manual_resolution_prototype") {
+                Some("Manual replay is unavailable in this engine")
+            } else if !matches!(
+                recorded.action,
+                crate::types::actions::GameAction::CastSpell { object_id, .. }
+                    if object_id == source.object_id
+            ) {
+                Some("Manual cast intent must match its ordinary CastSpell source")
+            } else {
+                None
+            };
+            if let Some(message) = message {
+                return Err(ReplayError::Desync {
+                    index: recorded.seq,
+                    message: message.into(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_resolve_all_boundaries(log: &ReplayLog) -> Result<(), ReplayError> {
@@ -415,6 +474,7 @@ mod tests {
 
         let header = two_player_header(42);
         let mut log = ReplayLog::new(header);
+        log.format_version = Some(3);
         log.push_verified_ai_priority_pass(PlayerId(0), PlayerId(0));
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(0, initial);
@@ -478,8 +538,67 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_versions_two_three_four_reconstruct_and_seek() {
+        for version in [2, 3, 4] {
+            let mut log = ReplayLog::new(two_player_header(31));
+            log.format_version = Some(version);
+            let mut live = reconstruct_initial_state(&log.header, None).unwrap();
+            let (actor, action) = next_priority_pass(&live).expect("ordinary priority reach guard");
+            apply(&mut live, actor, action.clone()).unwrap();
+            log.push_action(actor, action);
+            let mut player = ReplayPlayer::load(log, None).unwrap();
+            assert_eq!(player.seek(player.len()).unwrap(), &live);
+            player.seek(0).unwrap();
+            assert_eq!(player.seek(player.len()).unwrap(), &live);
+        }
+    }
+
+    fn marked_cast_log() -> ReplayLog {
+        let mut log = ReplayLog::new(two_player_header(32));
+        log.push_action_with_kind(
+            PlayerId(0),
+            GameAction::CastSpell {
+                object_id: ObjectId(7),
+                card_id: CardId(7),
+                targets: Vec::new(),
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+            RecordedActionKind::ManualCastIntent {
+                source: ObjectIncarnationRef::of(ObjectId(7), 3),
+            },
+        );
+        log
+    }
+
+    #[test]
+    fn manual_marker_requires_version_four_and_matching_cast_before_reconstruction() {
+        for version in [Some(2), Some(3), None, Some(5)] {
+            let mut log = marked_cast_log();
+            log.format_version = version;
+            assert!(ReplayPlayer::load(log, None).is_err());
+        }
+        let mut wrong_action = marked_cast_log();
+        wrong_action.actions[0].action = GameAction::PassPriority;
+        assert!(ReplayPlayer::load(wrong_action, None).is_err());
+        let mut wrong_source = marked_cast_log();
+        wrong_source.actions[0].kind = RecordedActionKind::ManualCastIntent {
+            source: ObjectIncarnationRef::of(ObjectId(8), 3),
+        };
+        assert!(ReplayPlayer::load(wrong_source, None).is_err());
+    }
+
+    #[cfg(not(feature = "manual_resolution_prototype"))]
+    #[test]
+    fn feature_off_refuses_well_formed_manual_marker_but_ordinary_v4_loads() {
+        assert!(matches!(ReplayPlayer::load(marked_cast_log(), None),
+            Err(ReplayError::Desync { message, .. }) if message == "Manual replay is unavailable in this engine"));
+        ReplayPlayer::load(ReplayLog::new(two_player_header(32)), None).unwrap();
+    }
+
+    #[test]
     fn version_three_rejects_invalid_resolve_all_boundary_anchors() {
         let mut base = ReplayLog::new(two_player_header(3));
+        base.format_version = Some(3);
         base.push_action(PlayerId(0), GameAction::PassPriority);
         base.push_action(PlayerId(1), GameAction::PassPriority);
 
@@ -728,6 +847,7 @@ mod tests {
 
         let mut live = initial.clone();
         let mut log = ReplayLog::new(header);
+        log.format_version = Some(3);
         let grant = GameAction::RespondResolveAllConsent {
             epoch,
             decision: ResolveAllConsentDecision::Grant,

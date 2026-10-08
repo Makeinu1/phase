@@ -21,11 +21,14 @@ test-support = []
 # Generates only the self-contained interaction DTO contract. Production
 # consumers do not enable this feature and continue to use the existing action
 # transport until the explicit adapter cutover.
-interaction-bindings = ["dep:ts-rs"]
+interaction-bindings = ["dep:ts-rs", "manual_resolution_prototype"]
 # Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
 # `combo-verify` tool bin, including the scenario harness it drives. Excluded
 # from the default lib / WASM surface.
 combo-verify = ["test-support"]
+# Opt-in Manual continuation for one ordinary human-owned hand spell.
+# Default consumers remain disabled; admitted Local WASM enables it explicitly.
+manual_resolution_prototype = []
 
 [dependencies]
 serde = { workspace = true }
@@ -121,6 +124,14 @@ path = "src/bin/coverage_parse_diff.rs"
 name = "resolution-face-census"
 path = "src/bin/resolution_face_census.rs"
 required-features = ["test-support"]
+
+# This source is also registered in the shared integration harness. Keep the
+# explicit focused target so the bounded native prototype checks do not need
+# to link the full engine integration corpus (which exceeded the executor's
+# memory budget in a prior run).
+[[test]]
+name = "manual_resolution_prototype"
+path = "tests/integration/manual_resolution_prototype.rs"
 
 [build-dependencies]
 # build.rs converts data/known-tokens.toml → JSON in OUT_DIR so the runtime
