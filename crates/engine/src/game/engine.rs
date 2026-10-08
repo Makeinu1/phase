@@ -19419,6 +19419,7 @@ mod priority_reducer_census_tests {
             "CastSpellForFree",
             "CompanionToHand",
             "CrewVehicle",
+            "DesignateManualResolution",
             "EndContinuousEffect",
             "Equip",
             "Foretell",
@@ -19443,12 +19444,19 @@ mod priority_reducer_census_tests {
             .into_iter()
             .map(|family| format!("{family:?}"))
             .collect::<BTreeSet<_>>();
+        // Manual designation is pinned in the reducer surface above. It arms one exact stack
+        // occurrence and leaves the same Priority window active; the ordinary mandatory-step
+        // preflight probes its typed announcement candidates, where this prototype control does
+        // not participate.
         let expected_preflight_families = expected
             .iter()
             .filter(|family| {
                 !matches!(
                     family.as_str(),
-                    "BeginResolveAll" | "PassPriority" | "SetAutoPass"
+                    "BeginResolveAll"
+                        | "DesignateManualResolution"
+                        | "PassPriority"
+                        | "SetAutoPass"
                 )
             })
             .map(|family| (*family).to_owned())
