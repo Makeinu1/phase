@@ -70,6 +70,10 @@ pub(super) fn finish_resolving_stack_entry(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) {
     let entry = state.resolving_stack_entry.take();
+    #[cfg(feature = "manual_resolution_prototype")]
+    if let Some(entry) = entry.as_ref() {
+        state.clear_manual_resolution_source(entry.id);
+    }
     let firing = state.resolving_trigger_firing.take();
     // CR 608.2c: the resolving stack entry owns every nested instruction-result
     // occurrence, including ones parked across replacement choices.
@@ -533,6 +537,15 @@ fn remove_stack_entry_at_unobserved(
         return None;
     }
     let entry = state.stack.remove(index);
+    #[cfg(feature = "manual_resolution_prototype")]
+    if state
+        .manual_resolution_binding()
+        .is_some_and(|binding| binding.stack_entry_id == entry.id)
+    {
+        // Retirement is occurrence-scoped: removing an unrelated response must
+        // leave the lower designated spell armed.
+        state.manual_resolution_state = None;
+    }
     let paid_facts = state.stack_paid_facts.remove(&entry.id);
     let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
     let trigger_firing = take_stack_trigger_firing(state, &entry);
@@ -622,6 +635,125 @@ pub(crate) fn pop_top_stack_entry(state: &mut GameState) -> Option<PoppedStackEn
     remove_stack_entry_at_unobserved(state, state.stack.len().checked_sub(1)?)
 }
 
+/// Completes a manually designated ordinary instant or sorcery without
+/// executing its suppressed instructions or resolution hooks. Stack removal,
+/// target-fizzle classification, spell-zone replacement handling, event
+/// cleanup, and carrier settlement remain owned by the same authorities as a
+/// normal resolution.
+#[cfg(feature = "manual_resolution_prototype")]
+fn begin_manual_resolution(
+    state: &mut GameState,
+    entry: &StackEntry,
+    binding: Option<&crate::types::game_state::ManualResolutionBinding>,
+    ability: Option<&ResolvedAbility>,
+) -> bool {
+    let Some(binding) = binding else {
+        return false;
+    };
+    // CR 608.2b: this seam is reached only after the existing target check.
+    let begin_source = state
+        .objects
+        .get(&entry.id)
+        .filter(|_| state.manual_resolution_source_is_supported(binding.actor, entry))
+        .map(|object| {
+            (
+                object.owner,
+                crate::types::identifiers::ObjectIncarnationRef::of(
+                    entry.source_id,
+                    object.incarnation,
+                ),
+            )
+        });
+    // A recognized intent always intercepts. Invalid Begin evidence is rejected
+    // atomically by the existing outer boundary, never allowed into Auto.
+    let (owner, source) = begin_source.unwrap_or((
+        binding.actor,
+        crate::types::identifiers::ObjectIncarnationRef::of(entry.source_id, u64::MAX),
+    ));
+    let controller = stack_object_controller(state, entry);
+    let mut latched = ability.cloned();
+    if let Some(ability) = latched.as_mut() {
+        ability.set_source_incarnation_recursive(Some(binding.source.incarnation));
+    }
+    if let Some(carrier) = state.resolving_stack_entry.as_mut() {
+        carrier.controller = controller;
+        if let StackEntryKind::Spell { ability, .. } = &mut carrier.kind {
+            *ability = latched.clone().map(Box::new);
+        }
+    }
+    state.manual_resolution_state = Some(crate::types::game_state::ManualResolutionState::Active {
+        binding: binding.clone(),
+        begin: crate::types::game_state::ManualResolutionBegin {
+            owner,
+            source,
+            ability: latched.map(Box::new),
+        },
+        phase: crate::types::game_state::ManualResolutionActivePhase::Open,
+    });
+    state.waiting_for = crate::types::game_state::WaitingFor::ManualResolution {
+        player: binding.actor,
+        stack_entry_id: entry.id,
+    };
+    true
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+pub(crate) fn finish_manual_resolution_terminal(
+    state: &mut GameState,
+    stack_entry_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if state
+        .manual_resolution_open_binding()
+        .is_none_or(|binding| binding.stack_entry_id != stack_entry_id)
+        || state
+            .resolving_stack_entry
+            .as_ref()
+            .is_none_or(|entry| entry.id != stack_entry_id)
+    {
+        return false;
+    }
+    // CR 608.2n: terminal movement follows the already-latched Begin; no body,
+    // second pop, support rescan or target reclassification occurs here.
+    if let Some(crate::types::game_state::ManualResolutionState::Active { phase, .. }) =
+        state.manual_resolution_state.as_mut()
+    {
+        *phase = crate::types::game_state::ManualResolutionActivePhase::TerminalChildPending;
+    }
+    let move_result = if state
+        .objects
+        .get(&stack_entry_id)
+        .is_some_and(|object| object.zone == Zone::Stack)
+    {
+        zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::spell_resolution_default(stack_entry_id, Zone::Graveyard),
+            events,
+        )
+    } else {
+        ZoneMoveResult::Done
+    };
+    events.push(GameEvent::StackResolved {
+        object_id: stack_entry_id,
+    });
+    state.current_trigger_event = None;
+    state.current_trigger_events.clear();
+    state.current_trigger_match_count = None;
+    state.die_result_this_resolution = None;
+    if matches!(
+        move_result,
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice
+    ) {
+        return true;
+    }
+    finish_resolving_stack_entry(
+        state,
+        super::lifecycle::DelayedTerminalDisposition::Resolved,
+    );
+    state.resolution_source_relatch = None;
+    true
+}
+
 /// Removes the top stack entry outside normal resolution.
 pub(super) fn pop_nonresolving_top_stack_entry(
     state: &mut GameState,
@@ -668,6 +800,13 @@ pub fn apply_resolved_stack_removal(
 
     // In range: the `get` above returned `Some`, so this cannot panic.
     let entry = state.stack.remove(command.index);
+    #[cfg(feature = "manual_resolution_prototype")]
+    if state
+        .manual_resolution_binding()
+        .is_some_and(|binding| binding.stack_entry_id == entry.id)
+    {
+        state.manual_resolution_state = None;
+    }
     state.stack_paid_facts.remove(&entry.id);
     state.stack_trigger_event_batches.remove(&entry.id);
     state.stack_trigger_firings.remove(&entry.id);
@@ -1491,6 +1630,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         );
         return;
     }
+    #[cfg(feature = "manual_resolution_prototype")]
+    let manual_binding = state
+        .manual_resolution_binding()
+        .filter(|binding| {
+            state
+                .stack
+                .back()
+                .is_some_and(|entry| entry.id == binding.stack_entry_id)
+        })
+        .cloned();
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
     state.resolution_source_relatch = None;
@@ -1931,12 +2080,24 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
             record_illegal_target_slots(state, Some(&mut validated));
             let _ = illegal_declared_target_slots(ability, &mut validated);
+            #[cfg(feature = "manual_resolution_prototype")]
+            if begin_manual_resolution(state, &entry, manual_binding.as_ref(), Some(&validated)) {
+                return;
+            }
             execute_effect(state, &validated, events);
         } else {
             record_illegal_target_slots(state, None);
             clear_illegal_local_target_slots(ability);
+            #[cfg(feature = "manual_resolution_prototype")]
+            if begin_manual_resolution(state, &entry, manual_binding.as_ref(), Some(ability)) {
+                return;
+            }
             execute_effect(state, ability, events);
         }
+    }
+    #[cfg(feature = "manual_resolution_prototype")]
+    if ability.is_none() && begin_manual_resolution(state, &entry, manual_binding.as_ref(), None) {
+        return;
     }
 
     // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
@@ -3433,7 +3594,16 @@ pub fn resolve_next_with_limit(
     let pending_top = state
         .pending_trigger_entry
         .is_some_and(|pending| state.stack.back().map(|e| e.id) == Some(pending));
-    if !pending_top {
+    #[cfg(feature = "manual_resolution_prototype")]
+    let manual_designated_top = state.manual_resolution_binding().is_some_and(|binding| {
+        state
+            .stack
+            .back()
+            .is_some_and(|entry| entry.id == binding.stack_entry_id)
+    });
+    #[cfg(not(feature = "manual_resolution_prototype"))]
+    let manual_designated_top = false;
+    if !pending_top && !manual_designated_top {
         if let Some(consumed) = inert_noop_run_len(state) {
             let consumed = consumed.min(max_consumed);
             if consumed >= 2 {

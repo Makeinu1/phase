@@ -2043,6 +2043,8 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            #[cfg(feature = "manual_resolution_prototype")]
+            WaitingFor::ManualResolution { .. } => "ManualResolution",
             WaitingFor::ResolveAllConsent { .. } => "ResolveAllConsent",
             WaitingFor::ResolveAllReady { .. } => "ResolveAllReady",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",

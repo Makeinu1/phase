@@ -17,6 +17,7 @@ import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from ".
 import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import type { GameObject, ManaCost, ObjectId, Zone } from "../../adapter/types.ts";
+import type { ManualCastAvailability } from "../../adapter/generated/interaction";
 import {
   collectObjectActions,
   resolveDirectPlayOrCastAction,
@@ -77,11 +78,21 @@ const DROP_ARROW_PX = 28;
 // stays on the gap center for any fan tilt.
 const ARROW_TIP_FRAC = 20 / 24;
 
-interface PlayerHandProps {
-  interactionDisabled?: boolean;
+export interface ManualHandCastController {
+  availabilityFor(objectId: number): ManualCastAvailability | null;
+  submit(objectId: number): Promise<void>;
+  attempt: { objectId: number; cardName: string; status: "submitting" | "pending" | "indeterminate" } | null;
+  message: string | null;
+  lookupBusy: boolean;
+  checkStatus(): Promise<void>;
 }
 
-export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
+interface PlayerHandProps {
+  interactionDisabled?: boolean;
+  manualCast?: ManualHandCastController | null;
+}
+
+export function PlayerHand({ interactionDisabled = false, manualCast = null }: PlayerHandProps) {
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const handContainerRef = useRef<HTMLDivElement | null>(null);
@@ -107,6 +118,9 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   const interactionWasDisabledRef = useRef(false);
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const manualMenuOpenRef = useRef(false);
+  const manualOffer = selectedCardId === null ? null : manualCast?.availabilityFor(selectedCardId) ?? null;
+  const manualCastAttempt = manualCast?.attempt;
   const manaPaymentPreviewRequestId = useRef(0);
 
   // Hide the card being cast (shown on stack as preview during TargetSelection)
@@ -182,7 +196,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
 
   const playCard = useCallback(
     (objectId: number) => {
-      if (!hasPriority || !objects) return;
+      if (!hasPriority || !objects || manualCastAttempt?.objectId === objectId) return;
       const obj = objects[objectId];
       if (!obj) return;
 
@@ -201,7 +215,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
         setPendingAbilityChoice({ objectId: objectId as ObjectId, actions: allActions });
       }
     },
-    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
+    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, manualCastAttempt],
   );
 
   const isMobileHandCardPlayable = useCallback(
@@ -598,9 +612,37 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       onClick={handleContainerClick}
       onMouseLeave={() => {
         setExpanded(false);
-        setSelectedCardId(null);
+        if (!manualMenuOpenRef.current && !manualCast) setSelectedCardId(null);
       }}
     >
+      {manualOffer && selectedCardId !== null && (
+        <div className="absolute bottom-full left-1/2 z-50 -translate-x-1/2 pb-2" onClick={(event) => event.stopPropagation()}>
+          <PopoverMenu ariaLabel={t("manualResolution.cardOptions", { card: objects?.[selectedCardId]?.name })}
+            variant="dialog" menuWidthPx={300} onOpenChange={(open) => { manualMenuOpenRef.current = open; }}
+            renderTrigger={({ ref, open, toggle }) => <button type="button" ref={ref} aria-expanded={open} onClick={toggle}
+              className="rounded-lg border border-cyan-200/40 bg-slate-950 px-3 py-2 text-sm text-cyan-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("manualResolution.cardOptions", { card: objects?.[selectedCardId]?.name })}</button>}>
+            {(close) => <div className="space-y-3 p-3 text-sm text-slate-100">
+              <p>{t("manualResolution.scope")}</p>
+              {manualOffer.type === "unsupported" && <p role="status">{t({
+                outsideOwnedControlledHandSpell: "manualResolution.unsupportedOutsideOwnedControlledHandSpell",
+                resolutionHook: "manualResolution.unsupportedResolutionHook",
+                anotherManualResolution: "manualResolution.unsupportedAnotherManualResolution",
+              }[manualOffer.data.reason])}</p>}
+              <button type="button" disabled={manualOffer.type !== "supported" || manualCastAttempt != null}
+                onClick={() => { close(); void manualCast?.submit(selectedCardId); }} className="w-full rounded bg-cyan-900 px-3 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("manualResolution.castManually")}</button>
+              <button type="button" disabled={manualCastAttempt?.objectId === selectedCardId}
+                onClick={() => { close(); playCard(selectedCardId); }} className="w-full rounded bg-slate-800 px-3 py-2">{t("manualResolution.castNormally")}</button>
+            </div>}
+          </PopoverMenu>
+        </div>
+      )}
+      {!isMobile && (manualCastAttempt || manualCast?.message) && <div className="absolute bottom-full right-0 z-50 max-w-xs rounded-lg bg-slate-950 p-3 text-sm text-slate-100">
+        {manualCastAttempt && <p>{manualCastAttempt.cardName}</p>}
+        <p role="status">{manualCastAttempt?.status === "pending" ? t("manualResolution.authorityPending")
+          : manualCastAttempt?.status === "submitting" ? t("manualResolution.operationPending")
+          : manualCast?.message ?? t("manualResolution.deliveryUnknown")}</p>
+        {manualCastAttempt && manualCastAttempt.status !== "submitting" && <button type="button" disabled={manualCast?.lookupBusy} onClick={() => { void manualCast?.checkStatus(); }} className="mt-2 rounded px-2 py-1 text-cyan-100">{t("manualResolution.checkStatus")}</button>}
+      </div>}
       {/* Hand organizer (desktop): a compact popover to sort / hide-filter the
           player's own hand for DISPLAY only. Gated on the TRUE hand count
           (`handCardIds`, not the post-filter `handObjects`) so a filter that
@@ -1026,6 +1068,16 @@ const HandCard = memo(function HandCard({
         e.stopPropagation();
         if (longPressFired.current) { longPressFired.current = false; return; }
         onClick(objectId, e);
+      }}
+      role="button"
+      tabIndex={isMobileDragged || isMobile ? -1 : 0}
+      aria-label={cardName}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          onClick(objectId);
+        }
       }}
       onDoubleClick={(e) => {
         e.stopPropagation();

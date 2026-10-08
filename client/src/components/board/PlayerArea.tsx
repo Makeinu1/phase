@@ -13,6 +13,7 @@ import {
   type MiddleCell,
 } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
@@ -168,6 +169,7 @@ export function PlayerArea({
   splitOverview = false,
 }: PlayerAreaProps) {
   const { t } = useTranslation("game");
+  const { manualPlayerAreaSelection } = useBoardInteractionState();
   const gameState = useGameStore((s) => s.gameState);
   const isCompactHeight = useIsCompactHeight();
   // Lands↔support split (lands' share of the middle row). One global ratio,
@@ -223,6 +225,8 @@ export function PlayerArea({
   // boundary markers so the editor grabs a single, predictable divider — the
   // ratio it sets is global, so every area reflows in step.
   const isOwnArea = mode === "full";
+  const manualSelection = isOwnArea && manualPlayerAreaSelection?.playerId === playerId
+    ? manualPlayerAreaSelection : null;
   const partitioned = battlefieldView;
 
   const creatures = creatureOverride ?? partitioned?.creatures ?? [];
@@ -440,6 +444,19 @@ export function PlayerArea({
       data-testid={`player-area-${playerId}`}
       data-phased-out={isPhasedOut ? "true" : undefined}
     >
+      {manualSelection && (
+        <button
+          ref={(element) => { manualSelection.returnFocusRef.current = element; }}
+          type="button"
+          aria-pressed={manualSelection.selected}
+          aria-label={t(manualSelection.selected ? "manualResolution.areaSelected" : "manualResolution.selectArea", { player: manualSelection.playerName })}
+          onKeyDownCapture={(event) => event.stopPropagation()}
+          onClick={(event) => { event.stopPropagation(); manualSelection.onSelect(); }}
+          className={`absolute left-2 top-1 z-40 rounded-lg border px-3 py-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200 ${manualSelection.selected ? "border-cyan-200 bg-cyan-950 text-cyan-100" : "border-cyan-200/40 bg-slate-950/90 text-cyan-200"}`}
+        >
+          {t(manualSelection.selected ? "manualResolution.areaSelected" : "manualResolution.selectArea", { player: manualSelection.playerName })}
+        </button>
+      )}
       <div
         className={`flex min-w-0 flex-1 flex-col px-1 ${areaGap} ${verticalPlacement}`}
       >

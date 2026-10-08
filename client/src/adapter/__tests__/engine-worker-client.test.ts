@@ -1,7 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EngineWorkerClient } from "../engine-worker-client";
-import type { GameEvent } from "../types";
+import type {
+  GameEvent,
+  LocalCapture,
+  LocalContinuationEnvelope,
+  LocalContinuationResult,
+  LocalOriginalAttempt,
+} from "../types";
+import type {
+  InteractionChoiceId,
+  InteractionId,
+  InteractionSessionId,
+} from "../generated/interaction";
 
 const notifyEngineSlow = vi.hoisted(() => vi.fn());
 vi.mock("../../game/engineRecovery", () => ({
@@ -165,6 +176,132 @@ describe("EngineWorkerClient request timeout", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await expect(promise).resolves.toEqual({ stack: [] });
   });
+
+  it("keeps an ordinary interaction alive for a late ACK after notifying", async () => {
+    vi.useFakeTimers();
+    const client = new EngineWorkerClient();
+    const submission = {
+      interactionId: "ordinary.frame" as InteractionId,
+      response: { type: "choose" as const, data: { choiceId: "ordinary.pass" as InteractionChoiceId } },
+    };
+    const promise = client.submitInteraction(0, submission);
+    const settled = vi.fn();
+    void promise.then(settled, settled);
+    const worker = currentWorker();
+    expect(worker.posted).toEqual([
+      { type: "submitInteraction", actor: 0, submission, id: 0 },
+    ]);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(notifyEngineSlow).toHaveBeenCalledExactlyOnceWith("submitInteraction-timeout");
+    expect(settled).not.toHaveBeenCalled();
+    const answer = { events: [], log_entries: [] };
+    worker.replyResult(0, answer);
+    await expect(promise).resolves.toEqual(answer);
+    expect(worker.posted).toHaveLength(1);
+    client.dispose();
+  });
+});
+
+describe("EngineWorkerClient Local continuation timeout", () => {
+  const context: LocalCapture = {
+    ownerLineage: "owner.fixture",
+    interactionSessionId: "session.fixture" as InteractionSessionId,
+    restoreEpoch: 0,
+    adapterGeneration: 10,
+  };
+  const attempt: LocalOriginalAttempt = {
+    context,
+    attemptId: "attempt.fixture",
+    submission: {
+      interactionId: "manual.frame" as InteractionId,
+      response: {
+        type: "choose",
+        data: { choiceId: "manual.life" as InteractionChoiceId },
+      },
+    },
+    source: {
+      actor: 0,
+      sourceId: 40,
+      sourceIncarnation: 2,
+      stackEntryId: 44,
+      castTurnJournalIndex: 0,
+      cardId: 1,
+      name: "Fixture",
+    },
+  };
+  const envelopes: LocalContinuationEnvelope[] = [
+    { type: "localContinuation", operation: "register", attempt },
+    { type: "localContinuation", operation: "apply", attempt },
+    { type: "localContinuation", operation: "lookup", attempt },
+    { type: "localContinuation", operation: "restore", context, checkpoint: "trusted.fixture" },
+  ];
+  const requests = [
+    ...envelopes.map((submission) => ({
+      name: submission.operation,
+      message: { type: "submitInteraction", actor: 0, submission },
+      send: (client: EngineWorkerClient) => client.submitLocalContinuation(0, submission),
+    })),
+    {
+      name: "current read",
+      message: { type: "getViewerSnapshot", viewerId: 0, localContinuation: true },
+      send: (client: EngineWorkerClient) => client.readLocalCurrent(),
+    },
+  ];
+  const answer: LocalContinuationResult = {
+    type: "localContinuation",
+    receipt: null,
+    current: null,
+    appliedResult: null,
+  };
+
+  it.each(requests)("rejects $name at 60 seconds and ignores its late reply without resending", async ({ message, send }) => {
+    vi.useFakeTimers();
+    const client = new EngineWorkerClient();
+    const promise = send(client);
+    const resolved = vi.fn();
+    const rejected = vi.fn();
+    void promise.then(resolved, rejected);
+    const worker = currentWorker();
+    expect(worker.posted).toEqual([{ ...message, id: 0 }]);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(resolved).not.toHaveBeenCalled();
+    expect(rejected).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(rejected).toHaveBeenCalledExactlyOnceWith(expect.any(Error));
+    await expect(promise).rejects.toThrow(`Engine worker ${message.type} timed out after 60000ms`);
+    expect(notifyEngineSlow).not.toHaveBeenCalled();
+
+    worker.replyResult(0, answer);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(resolved).not.toHaveBeenCalled();
+    expect(rejected).toHaveBeenCalledTimes(1);
+    expect(worker.posted).toEqual([{ ...message, id: 0 }]);
+    expect(vi.getTimerCount()).toBe(0);
+    client.dispose();
+  });
+
+  it.each(requests)("resolves $name before the deadline and clears its timer", async ({ message, send }) => {
+    vi.useFakeTimers();
+    const client = new EngineWorkerClient();
+    const promise = send(client);
+    const worker = currentWorker();
+    expect(worker.posted).toEqual([{ ...message, id: 0 }]);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    worker.replyResult(0, answer);
+    await expect(promise).resolves.toEqual(answer);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(promise).resolves.toEqual(answer);
+    expect(notifyEngineSlow).not.toHaveBeenCalled();
+    expect(worker.posted).toHaveLength(1);
+    client.dispose();
+  });
 });
 
 describe("EngineWorkerClient viewer transition projection", () => {
@@ -277,5 +414,37 @@ describe("EngineWorkerClient structured action rejections", () => {
       message: "The engine rejected that action.",
       rejection: undefined,
     });
+  });
+});
+
+
+describe("EngineWorkerClient experimental Local", () => {
+  it("forwards only the valid payload with its own envelope", async () => {
+    const client = new EngineWorkerClient();
+    const fields = { deckData: null, seed: 42, formatConfig: null, matchConfig: null, playerCount: 2, firstPlayer: 0 };
+    const pending = client.initializeExperimentalLocalGame(fields);
+    const worker = currentWorker();
+    expect(worker.posted[0]).toEqual({ ...fields, type: "initializeExperimentalLocalGame", id: 0 });
+    worker.replyResult(0, { events: [], log_entries: [] });
+    await expect(pending).resolves.toEqual({ events: [], log_entries: [] }); client.dispose();
+  });
+  it("rejects hostile fields including caller envelope fields before posting", async () => {
+    const client = new EngineWorkerClient();
+    for (const key of ["type", "id", "actor", "authenticatedActor", "owner", "session", "ticket", "enrollment", "worker", "unknown"]) {
+      await expect(client.initializeExperimentalLocalGame({ seed: 42, [key]: 0 })).rejects.toThrow("Invalid experimental Local request");
+    }
+    for (const request of [new Date(), new Map(), new (class {})()]) {
+      await expect(client.initializeExperimentalLocalGame(request as never)).rejects.toThrow("Invalid experimental Local request");
+    }
+    expect(currentWorker().posted).toHaveLength(0); client.dispose();
+  });
+  it("normalizes the primitive verifier without granting another seat", async () => {
+    const client = new EngineWorkerClient(); const worker = currentWorker();
+    for (const value of [0, 1, null, undefined]) {
+      const pending = client.experimentalLocalActor(); const last = worker.posted[worker.posted.length - 1];
+      expect(last.type).toBe("experimentalLocalActor"); worker.replyResult(last.id as number, value);
+      await expect(pending).resolves.toBe(value === 0 ? 0 : null);
+    }
+    client.dispose();
   });
 });

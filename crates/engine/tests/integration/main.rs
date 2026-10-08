@@ -1089,6 +1089,7 @@ mod mana_spent_independent_conjuncts;
 mod mana_target_recipient_and_count_source;
 mod mana_values_among_graveyard_condition;
 mod manifest_dread_that_creature_anaphor;
+mod manual_resolution_prototype;
 mod maraxus_team_pump_anthem;
 mod martial_impetus_other_attacker_exclusion_6017;
 mod mass_library_order_restore;

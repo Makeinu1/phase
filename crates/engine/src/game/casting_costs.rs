@@ -543,6 +543,33 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    #[cfg(feature = "manual_resolution_prototype")]
+    if pay
+        && state
+            .manual_resolution_state
+            .as_ref()
+            .is_some_and(|manual| manual.source_id() == pending.object_id)
+        && super::off_zone_characteristics::effective_off_zone_keywords(state, pending.object_id)
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Buyback(_)))
+    {
+        return Err(EngineError::InvalidAction("Paid Buyback is unavailable for the selected Manual resolution; decline or cancel before payment".into()));
+    }
+    #[cfg(feature = "manual_resolution_prototype")]
+    if pay
+        && state
+            .manual_resolution_state
+            .as_ref()
+            .is_some_and(|manual| manual.source_id() == pending.object_id)
+        && matches!(additional_cost, AdditionalCost::Choice(_, fallback) if matches!(fallback, AbilityCost::Mana { .. }))
+        && !state
+            .objects
+            .get(&pending.object_id)
+            .and_then(|object| object.additional_cost.as_ref())
+            .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
+    {
+        return Err(EngineError::InvalidAction("Alternative costs are unavailable for the selected Manual resolution; pay the printed cost or cancel".into()));
+    }
     if pending
         .additional_cost_queue
         .first()
@@ -11792,6 +11819,40 @@ fn finalize_cast_with_phyrexian_choices_inner(
     deferred_life_resume_pending: Option<&PendingCast>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    #[cfg(feature = "manual_resolution_prototype")]
+    if let Some(crate::types::game_state::ManualResolutionState::Casting { actor, source }) =
+        state.manual_resolution_state.as_ref()
+    {
+        if source.object_id == object_id {
+            let mut entry = state
+                .stack
+                .iter()
+                .find(|entry| entry.id == object_id)
+                .cloned()
+                .ok_or_else(abandoned_cast_finalization_error)?;
+            if let StackEntryKind::Spell {
+                ability: entry_ability,
+                ..
+            } = &mut entry.kind
+            {
+                let mut checked = ability.clone();
+                checked.context.cast_from_zone = Some(origin_zone);
+                *entry_ability = Some(Box::new(checked));
+            }
+            // Announcement installs the stack entry while the object retains
+            // its original hand custody until payment and finalization below.
+            if *actor != player
+                || origin_zone != Zone::Hand
+                || !casting_variant.is_normal()
+                || !state.manual_cast_source_is_supported(player, *source, card_id, &entry)
+            {
+                return Err(EngineError::InvalidAction(
+                    "Selected Manual cast is outside its supported scope; costs were not committed"
+                        .into(),
+                ));
+            }
+        }
+    }
     let cost_event_start = events.len();
     let FinalizePrePaymentChecks {
         early_waiting_for,
@@ -12705,6 +12766,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
     )
     .map_err(finalized_spell_cast_ledger_error)?;
     stamp_cast_occurrence_on_stack_spell(state, object_id, occurrence)?;
+    #[cfg(feature = "manual_resolution_prototype")]
+    if state.manual_resolution_state.as_ref().is_some_and(|manual| matches!(manual, crate::types::game_state::ManualResolutionState::Casting { source, .. } if source.object_id == object_id)) {
+        let entry = state.stack.get(entry_position).expect("finalized occurrence remains at its checked position");
+        let binding = state.manual_resolution_binding_for_entry(player, entry).ok_or_else(|| EngineError::InvalidAction("Selected Manual cast lost supported paid custody".into()))?;
+        state.manual_resolution_state = Some(crate::types::game_state::ManualResolutionState::Armed { binding });
+    }
 
     // Record the resolved-command finalization only after the ledger has minted
     // and the shared authority has stamped the occurrence, so replay reproduces

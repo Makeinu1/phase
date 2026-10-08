@@ -1,6 +1,16 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, type RefObject } from "react";
+
+export interface ManualPlayerAreaSelection {
+  playerId: number;
+  playerName: string;
+  selected: boolean;
+  onSelect: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
+}
 
 interface BoardInteractionState {
+  /** Display selection only; it submits no game action. */
+  manualPlayerAreaSelection?: ManualPlayerAreaSelection | null;
   activatableObjectIds: Set<number>;
   /** Attackers this defender's blockers may legally block: the union of the
    *  current `DeclareBlockers` prompt's `valid_block_targets` values

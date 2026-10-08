@@ -37,7 +37,7 @@ import { restrictAiPoolByBracket } from "../services/aiRandomPool";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
-import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { createLocalContinuationPublisher, dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
 import { debugLog } from "../game/debugLog";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
@@ -47,7 +47,7 @@ import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult } from "../services/p2pTerminalResult";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
-import { formatSuppliesDeck } from "../data/formatRegistry";
+import { formatMetadata, formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
 import { loadGameStrict } from "../services/gamePersistence";
@@ -647,6 +647,8 @@ export interface GameProviderProps {
   useBroker?: boolean;
   roomName?: string;
   source?: string;
+  /** Finite production-board admission; absent on ordinary game routes. */
+  manualFixture?: string | null;
   draftId?: string;
   /**
    * The lobby authority this join or spectate was launched from, carried by
@@ -680,6 +682,7 @@ export function GameProvider({
   useBroker = false,
   roomName,
   source,
+  manualFixture,
   draftId,
   serverUrl: originUrl,
   onWsEvent,
@@ -822,6 +825,10 @@ export function GameProvider({
       && nativeEngineKey !== null;
     setGameMode(mode);
     setEngineMode(mode === "ai" ? (shouldUseNativeAi ? null : "wasm") : null);
+    if (manualFixture !== undefined && mode !== "local") {
+      onNoDeckRef.current?.(tRef.current("manualResolution.startupLocalOnly"));
+      return;
+    }
 
     const isOnline = mode === "online" || mode === "spectate";
     const isSpectate = mode === "spectate";
@@ -1227,6 +1234,7 @@ export function GameProvider({
     }
 
     let cancelled = false;
+    let unsubscribeLocalContinuation: (() => void) | null = null;
 
     if (isOnline || isReconnect) {
       const parsedDeck = isSpectate ? null : loadActiveDeck();
@@ -1543,6 +1551,48 @@ export function GameProvider({
     const setupLocal = async () => {
       if (cancelled) return;
       const adapter = getSharedAdapter();
+      if (manualFixture !== undefined) {
+        try {
+          if (!manualFixture) throw new Error(tRef.current("manualResolution.startupFixtureRequired"));
+          const response = await fetch("/p1-integration-fixtures/trusted-game-states.json");
+          if (!response.ok) throw new Error(tRef.current("manualResolution.startupFixtureUnavailable"));
+          const bundle: unknown = await response.json();
+          if (!bundle || typeof bundle !== "object" || !("version" in bundle) || bundle.version !== 1
+            || !("cases" in bundle) || !bundle.cases || typeof bundle.cases !== "object" || Array.isArray(bundle.cases)) {
+            throw new Error(tRef.current("manualResolution.startupInvalidFixture"));
+          }
+          const fixture: unknown = Object.hasOwn(bundle.cases, manualFixture)
+            ? (bundle.cases as Record<string, unknown>)[manualFixture] : null;
+          const fixtureKeyParts = manualFixture.split(".");
+          if (!fixture || typeof fixture !== "object"
+            || !("checkpoint" in fixture) || typeof fixture.checkpoint !== "string" || !fixture.checkpoint
+            || !("familyVariant" in fixture) || typeof fixture.familyVariant !== "string" || !fixture.familyVariant
+            || !("position" in fixture) || typeof fixture.position !== "string"
+            || !["B", "K0", "K1", "K2", "K3", "K4"].includes(fixture.position)
+            || fixtureKeyParts.length < 2 || fixtureKeyParts.some((part) => !part)
+            || fixtureKeyParts[0] !== fixture.familyVariant
+            || fixtureKeyParts[fixtureKeyParts.length - 1] !== fixture.position) {
+            throw new Error(tRef.current("manualResolution.startupInvalidFixture"));
+          }
+          if (cancelled) return;
+          const bootstrapDeck = { main_deck: Array<string>(40).fill("Plains"), bracket_tier: "core" };
+          await initGame(gameId, adapter,
+            { player: bootstrapDeck, opponent: bootstrapDeck, ai_decks: [], ai_difficulties: [] },
+            formatMetadata("Limited")?.default_config, 2, matchConfig, 0, "strict",
+            { kind: "experimentalLocal", checkpoint: fixture.checkpoint });
+          if (cancelled) return;
+          const continuation = adapter.localContinuation?.();
+          if (!continuation) throw new Error(tRef.current("manualResolution.startupAdmissionUnavailable"));
+          unsubscribeLocalContinuation = continuation.subscribe(createLocalContinuationPublisher(adapter));
+          controller = createGameLoopController({ mode: "local", playerCount: 2 });
+          controller.start();
+          audioManager.setContext("battlefield");
+          return;
+        } catch (error) {
+          if (!cancelled) onNoDeckRef.current?.(error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
       const soloDraft = source === "draft" && !!draftId;
       const draftDeckKey = `phase:draft-deck:${gameId}`;
       const reportDraftError = (error: unknown) => {
@@ -2107,6 +2157,7 @@ export function GameProvider({
 
     return () => {
       cancelled = true;
+      unsubscribeLocalContinuation?.();
       if (controller) controller.dispose();
       audioManager.setContext("menu");
       // Issue #2369: drop prompt overlays synchronously so the next mount's
@@ -2133,6 +2184,7 @@ export function GameProvider({
             nextLogSeq: 0,
             adapter: null,
             gameSessionGeneration: nextGameSessionGeneration(),
+            localContinuationContext: null,
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,
@@ -2147,7 +2199,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId, originUrl]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, manualFixture, draftId, originUrl]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

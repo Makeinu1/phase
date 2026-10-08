@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -21,6 +21,7 @@ import {
 import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
 import { StormCopyBadge } from "./StormCopyBadge.tsx";
+import type { ManualHandCastController } from "./PlayerHand.tsx";
 
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
@@ -29,9 +30,10 @@ const EMPTY_STORM_COUNTS: Record<string, number> = {};
 
 interface MobileHandDrawerProps {
   interactionDisabled?: boolean;
+  manualCast?: ManualHandCastController | null;
 }
 
-export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDrawerProps) {
+export function MobileHandDrawer({ interactionDisabled = false, manualCast = null }: MobileHandDrawerProps) {
   const { t } = useTranslation("game");
   const isOpen = useUiStore((s) => s.mobileHandOpen);
   const setOpen = useUiStore((s) => s.setMobileHandOpen);
@@ -45,6 +47,8 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const openDebugContextMenu = useUiStore((s) => s.openDebugContextMenu);
+  const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
+  const manualOffer = selectedCardId === null ? null : manualCast?.availabilityFor(selectedCardId) ?? null;
 
   const canActForWaitingState = useCanActForWaitingState();
   const hasPriority = useGameStore((s) =>
@@ -122,7 +126,7 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
 
   const playCard = useCallback(
     (objectId: number) => {
-      if (!hasPriority || !objects) return;
+      if (!hasPriority || !objects || manualCast?.attempt?.objectId === objectId) return;
       const obj = objects[objectId];
       if (!obj) return;
 
@@ -143,8 +147,15 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
         setPendingAbilityChoice({ objectId: objectId as ObjectId, actions: allActions });
       }
     },
-    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, setOpen],
+    [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice, setOpen, manualCast?.attempt],
   );
+  const chooseCard = useCallback((objectId: number) => {
+    if (manualCast?.availabilityFor(objectId)) {
+      setSelectedCardId(objectId);
+    } else {
+      playCard(objectId);
+    }
+  }, [manualCast, playCard]);
 
   if (interactionDisabled || !player || !objects) return null;
 
@@ -201,6 +212,30 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
                 showFilter
                 disabled={pendingObjectId != null}
               />
+              {manualOffer && selectedCardId !== null && <section className="space-y-3 rounded-lg bg-slate-950 p-3 text-sm text-slate-100"
+                aria-label={t("manualResolution.cardOptions", { card: objects[selectedCardId]?.name })}>
+                <p>{objects[selectedCardId]?.name}</p>
+                <p>{t("manualResolution.scope")}</p>
+                {manualOffer.type === "unsupported" && <p role="status">{t({
+                  outsideOwnedControlledHandSpell: "manualResolution.unsupportedOutsideOwnedControlledHandSpell",
+                  resolutionHook: "manualResolution.unsupportedResolutionHook",
+                  anotherManualResolution: "manualResolution.unsupportedAnotherManualResolution",
+                }[manualOffer.data.reason])}</p>}
+                <button type="button" disabled={manualOffer.type !== "supported" || manualCast?.attempt != null}
+                  onClick={() => { void manualCast?.submit(selectedCardId); }}
+                  className="w-full rounded bg-cyan-900 px-3 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">{t("manualResolution.castManually")}</button>
+                <button type="button" disabled={manualCast?.attempt?.objectId === selectedCardId}
+                  onClick={() => playCard(selectedCardId)} className="w-full rounded bg-slate-800 px-3 py-2">{t("manualResolution.castNormally")}</button>
+              </section>}
+              {(manualCast?.attempt || manualCast?.message) && <div className="rounded-lg bg-slate-950 p-3 text-sm text-slate-100">
+                {manualCast.attempt && <p>{manualCast.attempt.cardName}</p>}
+                <p role="status">{manualCast.attempt?.status === "pending" ? t("manualResolution.authorityPending")
+                  : manualCast.attempt?.status === "submitting" ? t("manualResolution.operationPending")
+                  : manualCast.message ?? t("manualResolution.deliveryUnknown")}</p>
+                {manualCast.attempt && manualCast.attempt.status !== "submitting" && <button type="button"
+                  disabled={manualCast.lookupBusy} onClick={() => { void manualCast.checkStatus(); }}
+                  className="mt-2 rounded px-2 py-1 text-cyan-100">{t("manualResolution.checkStatus")}</button>}
+              </div>}
             </div>
 
             <div
@@ -225,7 +260,7 @@ export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDraw
                     isPlayable={isPlayable}
                     hasPriority={hasPriority}
                     stormCopyCount={prospectiveStormCounts[String(obj.id)]}
-                    onPlay={playCard}
+                    onPlay={chooseCard}
                     onDebugOpen={handleDebugOpen}
                   />
                 );

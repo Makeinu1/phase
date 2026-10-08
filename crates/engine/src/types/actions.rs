@@ -149,6 +149,26 @@ pub enum OutsideGameSelection {
 #[strum_discriminants(name(GameActionKind), derive(PartialOrd, Ord))]
 pub enum GameAction {
     PassPriority,
+    /// Native prototype only: mark one exact ordinary hand-cast spell to pause
+    /// before its first resolving instruction. Not exposed to WASM transports.
+    #[cfg(feature = "manual_resolution_prototype")]
+    DesignateManualResolution {
+        stack_entry_id: ObjectId,
+    },
+    /// Native prototype only: resume the selected spell through the ordinary
+    /// stack resolver and the authenticated outer action boundary.
+    #[cfg(feature = "manual_resolution_prototype")]
+    FinishManualResolution {
+        stack_entry_id: ObjectId,
+    },
+    /// Native prototype only: apply one human-selected, bounded own-life-loss
+    /// operation to the exact designated spell while it is paused. This action
+    /// may be repeated while the same manual wait remains current.
+    #[cfg(feature = "manual_resolution_prototype")]
+    ApplyManualLifeLoss {
+        stack_entry_id: ObjectId,
+        amount: u32,
+    },
     /// CR 608.2d + CR 701.42: select the exact pair to process for meld.
     ChooseMeldPair {
         source_id: ObjectId,
@@ -1890,13 +1910,21 @@ impl GameAction {
     /// whether an action may skip the seat check, that one whether an action
     /// leaves an open interaction standing. The two lists may diverge.
     pub fn is_submitter_scoped(&self) -> bool {
-        self.is_actor_scoped_preference()
+        if self.is_actor_scoped_preference()
             || matches!(
                 self,
                 GameAction::Debug(_)
                     | GameAction::GrantDebugPermission { .. }
                     | GameAction::RevokeDebugPermission { .. }
             )
+        {
+            return true;
+        }
+        #[cfg(feature = "manual_resolution_prototype")]
+        if matches!(self, GameAction::ApplyManualLifeLoss { .. }) {
+            return true;
+        }
+        false
     }
 
     /// Issue #4878: allocation-free total order over `GameAction`, used for
@@ -1949,6 +1977,12 @@ impl GameAction {
     pub fn related_object_ids(&self) -> Vec<ObjectId> {
         let mut ids = Vec::new();
         match self {
+            #[cfg(feature = "manual_resolution_prototype")]
+            Self::DesignateManualResolution { stack_entry_id }
+            | Self::FinishManualResolution { stack_entry_id }
+            | Self::ApplyManualLifeLoss { stack_entry_id, .. } => {
+                push_related_object_id(&mut ids, *stack_entry_id);
+            }
             Self::PassPriority
             | Self::ChooseExert { .. }
             | Self::ChooseClashOpponent { .. }
@@ -2254,6 +2288,10 @@ impl GameAction {
     /// without updating this method is a compile-time error.
     pub fn source_object(&self) -> Option<ObjectId> {
         match self {
+            #[cfg(feature = "manual_resolution_prototype")]
+            GameAction::DesignateManualResolution { .. }
+            | GameAction::FinishManualResolution { .. }
+            | GameAction::ApplyManualLifeLoss { .. } => None,
             GameAction::ChooseMeldPair { source_id, .. } => Some(*source_id),
             GameAction::ChooseEntryAttackTarget { .. } => None,
             GameAction::PlayLand { object_id, .. } => Some(*object_id),

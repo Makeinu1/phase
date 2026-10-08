@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+use serde::Deserialize;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -56,6 +58,8 @@ use engine::types::interaction::{
 };
 use engine::types::mana::ManaCost;
 use engine::types::match_config::{MatchConfig, MatchType};
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+use engine::types::replay::RecordedActionKind;
 use engine::types::{
     ActionRejection, ActionRejectionCode, GameAction, GameState, PlayerId, ReplayHeader, ReplayLog,
 };
@@ -748,6 +752,9 @@ fn rejected_action_outcome(rejection: ActionRejection) -> JsValue {
 /// local game on a shared worker may undo again.
 #[wasm_bindgen]
 pub fn set_multiplayer_mode(enabled: bool) {
+    if enabled {
+        revoke_experimental_local_owner();
+    }
     MULTIPLAYER_MODE.with(|cell| cell.set(enabled));
 }
 
@@ -913,6 +920,7 @@ pub fn take_last_panic_message() -> Option<String> {
 /// immediately rather than running a full search on stale state.
 #[wasm_bindgen]
 pub fn clear_game_state() {
+    revoke_experimental_local_owner();
     GAME_STATE.with(|cell| cell.set(None));
     clear_ai_session_cache();
     REPLAY_LOG.with(|cell| cell.set(None));
@@ -936,6 +944,9 @@ pub fn create_initial_state() -> JsValue {
 /// Must be called before initialize_game to enable name-based deck resolution.
 #[wasm_bindgen]
 pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
+    if local_mutation_pending() {
+        return Err(JsValue::from_str("Local continuation pending"));
+    }
     let db = CardDatabase::from_json_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse card database: {}", e)))?;
     let count = db.card_count() as u32;
@@ -1505,6 +1516,716 @@ fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
     })
 }
 
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Clone, PartialEq, Eq)]
+struct ExperimentalLocalOwner {
+    interaction_session: InteractionSessionId,
+    session: String,
+    ticket: String,
+    lineage: String,
+    restore_epoch: u32,
+    adapter_generation: u32,
+    last_source: Option<engine::types::interaction::ManualResolutionSource>,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+thread_local! {
+    // Private admission only. None of these values is part of a wire/save DTO.
+    static EXPERIMENTAL_LOCAL_OWNER: Cell<Option<ExperimentalLocalOwner>> = const { Cell::new(None) };
+    static LOCAL_RECEIPTS: Cell<HashMap<(String, String), LocalReceipt>> = Cell::new(HashMap::new());
+}
+
+fn revoke_experimental_local_owner() {
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    {
+        retire_local_pending();
+        EXPERIMENTAL_LOCAL_OWNER.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalCapture {
+    owner_lineage: String,
+    interaction_session_id: InteractionSessionId,
+    restore_epoch: u32,
+    adapter_generation: u32,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+impl ExperimentalLocalOwner {
+    fn capture(&self) -> LocalCapture {
+        LocalCapture {
+            owner_lineage: self.lineage.clone(),
+            interaction_session_id: self.interaction_session.clone(),
+            restore_epoch: self.restore_epoch,
+            adapter_generation: self.adapter_generation,
+        }
+    }
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalOriginalAttempt {
+    context: LocalCapture,
+    attempt_id: String,
+    submission: InteractionSubmission,
+    source: engine::types::interaction::ManualResolutionSource,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum LocalEnvelopeTag {
+    LocalContinuation,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "camelCase", deny_unknown_fields)]
+enum LocalEnvelope {
+    Register {
+        #[serde(rename = "type")]
+        kind: LocalEnvelopeTag,
+        attempt: LocalOriginalAttempt,
+    },
+    Apply {
+        #[serde(rename = "type")]
+        kind: LocalEnvelopeTag,
+        attempt: LocalOriginalAttempt,
+    },
+    Lookup {
+        #[serde(rename = "type")]
+        kind: LocalEnvelopeTag,
+        attempt: LocalOriginalAttempt,
+    },
+    Restore {
+        #[serde(rename = "type")]
+        kind: LocalEnvelopeTag,
+        context: LocalCapture,
+        checkpoint: String,
+    },
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum LocalReceiptStatus {
+    Pending,
+    Completed,
+    NotApplied,
+    Indeterminate,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Debug, Clone, Serialize)]
+struct LocalReceipt {
+    attempt: LocalOriginalAttempt,
+    status: LocalReceiptStatus,
+    result: Option<engine::types::game_state::ActionResult>,
+    rejection: Option<ActionRejection>,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Serialize)]
+struct LocalCurrentFrame {
+    context: LocalCapture,
+    snapshot: serde_json::Value,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalContinuationResult {
+    #[serde(rename = "type")]
+    kind: LocalEnvelopeTag,
+    receipt: Option<LocalReceipt>,
+    current: Option<LocalCurrentFrame>,
+    applied_result: Option<engine::types::game_state::ActionResult>,
+}
+
+fn local_mutation_pending() -> bool {
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    {
+        LOCAL_RECEIPTS.with(|cell| {
+            let receipts = cell.take();
+            let pending = receipts
+                .values()
+                .any(|receipt| receipt.status == LocalReceiptStatus::Pending);
+            cell.set(receipts);
+            pending
+        })
+    }
+    #[cfg(not(feature = "manual_resolution_local_bootstrap"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn retire_local_pending() {
+    LOCAL_RECEIPTS.with(|cell| {
+        let mut receipts = cell.take();
+        for receipt in receipts
+            .values_mut()
+            .filter(|receipt| receipt.status == LocalReceiptStatus::Pending)
+        {
+            receipt.status = LocalReceiptStatus::NotApplied;
+            receipt.rejection = Some(ActionRejection::new(ActionRejectionCode::StaleInteraction));
+        }
+        cell.set(receipts);
+    });
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn local_owner() -> Option<ExperimentalLocalOwner> {
+    if experimental_local_actor_inner() != Some(0) {
+        return None;
+    }
+    EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+        let owner = cell.take();
+        let copy = owner.clone();
+        cell.set(owner);
+        copy
+    })
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn local_current_frame(
+    source: Option<&engine::types::interaction::ManualResolutionSource>,
+    events: &[GameEvent],
+) -> Option<LocalCurrentFrame> {
+    let owner = local_owner()?;
+    GAME_STATE.with(|cell| {
+        let resident = cell.take();
+        let frame = resident.as_ref().map(|state| {
+            let filtered = filter_state_for_viewer(state, PlayerId(0));
+            let mut snapshot = serde_json::to_value(viewer_transition_snapshot(
+                state,
+                &filtered,
+                PlayerId(0),
+                events,
+            ))
+            .expect("viewer frame serializes");
+            if let Some(source) = source
+                .or(owner.last_source.as_ref())
+                .filter(|_| snapshot["state"]["derived"]["manual_resolution"].is_null())
+            {
+                let view = engine::game::derived_views::manual_resolution_view_for_source(
+                    state,
+                    &filtered,
+                    Some(PlayerId(0)),
+                    source,
+                );
+                snapshot["state"]["derived"]["manual_resolution"] =
+                    serde_json::to_value(view).expect("manual view serializes");
+            }
+            LocalCurrentFrame {
+                context: owner.capture(),
+                snapshot,
+            }
+        });
+        cell.set(resident);
+        frame
+    })
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn local_receipt(
+    attempt: LocalOriginalAttempt,
+    status: LocalReceiptStatus,
+    code: Option<ActionRejectionCode>,
+) -> LocalReceipt {
+    LocalReceipt {
+        attempt,
+        status,
+        result: None,
+        rejection: code.map(ActionRejection::new),
+    }
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn local_result(
+    receipt: Option<LocalReceipt>,
+    applied_result: Option<engine::types::game_state::ActionResult>,
+) -> LocalContinuationResult {
+    let current = local_current_frame(
+        receipt.as_ref().map(|receipt| &receipt.attempt.source),
+        applied_result
+            .as_ref()
+            .map_or(&[][..], |result| result.events.as_slice()),
+    );
+    LocalContinuationResult {
+        kind: LocalEnvelopeTag::LocalContinuation,
+        receipt,
+        current,
+        applied_result,
+    }
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn decode_local_checkpoint(checkpoint: &str) -> Result<GameState, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(checkpoint).map_err(|error| error.to_string())?;
+    let object = value.as_object().ok_or("Trusted checkpoint required")?;
+    if object.len() != 2
+        || !object.contains_key("state")
+        || !object.contains_key("precast_shortcut_runtime")
+    {
+        return Err("Trusted checkpoint required".into());
+    }
+    let restored = decode_and_rehydrate_restored_game_state(checkpoint, |state| {
+        state.rehydrate_rng();
+        Ok(())
+    })?;
+    let state = restored.state;
+    if state.players.len() != 2 || !state.players.iter().any(|player| player.id == PlayerId(0)) {
+        return Err("Local checkpoint seat mismatch".into());
+    }
+    Ok(state)
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn local_restore(
+    context: LocalCapture,
+    checkpoint: &str,
+) -> Result<LocalContinuationResult, String> {
+    let owner = local_owner().ok_or_else(|| "Local owner unavailable".to_string())?;
+    if owner.capture() != context || local_mutation_pending() {
+        return Err("Local continuation is not current".into());
+    }
+    let mut state = decode_local_checkpoint(checkpoint)?;
+    let session = InteractionSessionId(format!("wasm-{:016x}", rand::rng().random::<u64>()));
+    bind_interaction_authority(&mut state, session.clone())
+        .map_err(|error| format!("Local session bind failed: {error:?}"))?;
+    let next_owner = ExperimentalLocalOwner {
+        interaction_session: session,
+        session: format!("local-{:016x}", rand::rng().random::<u64>()),
+        ticket: format!("owner-{:016x}", rand::rng().random::<u64>()),
+        lineage: owner.lineage,
+        restore_epoch: owner
+            .restore_epoch
+            .checked_add(1)
+            .ok_or("Local epoch exhausted")?,
+        adapter_generation: owner
+            .adapter_generation
+            .checked_add(1)
+            .ok_or("Local generation exhausted")?,
+        last_source: owner.last_source,
+    };
+    // Every fallible preparation precedes this synchronous installation.
+    GAME_STATE.with(|cell| cell.set(Some(state)));
+    EXPERIMENTAL_LOCAL_OWNER.with(|cell| cell.set(Some(next_owner)));
+    REPLAY_LOG.with(|cell| cell.set(None));
+    clear_ai_session_cache();
+    invalidate_ai_proposals();
+    Ok(local_result(None, None))
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn local_continuation_inner(
+    actor: PlayerId,
+    envelope: LocalEnvelope,
+    worker_realm: bool,
+) -> Result<LocalContinuationResult, String> {
+    if !worker_realm || actor != PlayerId(0) || local_owner().is_none() {
+        return Err("Authenticated Local continuation unavailable".into());
+    }
+    if let LocalEnvelope::Restore {
+        context,
+        checkpoint,
+        ..
+    } = envelope
+    {
+        return local_restore(context, &checkpoint);
+    }
+    let (attempt, lookup, apply) = match envelope {
+        LocalEnvelope::Register { attempt, .. } => (attempt, false, false),
+        LocalEnvelope::Apply { attempt, .. } => (attempt, false, true),
+        LocalEnvelope::Lookup { attempt, .. } => (attempt, true, false),
+        LocalEnvelope::Restore { .. } => unreachable!(),
+    };
+    let owner = local_owner().expect("checked owner");
+    if attempt.attempt_id.is_empty()
+        || attempt.attempt_id.len() > 128
+        || attempt.context.owner_lineage != owner.lineage
+    {
+        return Err("Invalid Local original attempt".into());
+    }
+    let key = (
+        attempt.context.owner_lineage.clone(),
+        attempt.attempt_id.clone(),
+    );
+    let mut receipts = LOCAL_RECEIPTS.with(Cell::take);
+    if let Some(original) = receipts.get(&key) {
+        if original.attempt != attempt {
+            LOCAL_RECEIPTS.with(|cell| cell.set(receipts));
+            return Ok(local_result(
+                Some(local_receipt(
+                    attempt,
+                    LocalReceiptStatus::Indeterminate,
+                    Some(ActionRejectionCode::InvalidInteractionResponse),
+                )),
+                None,
+            ));
+        }
+        if lookup || !apply || original.status != LocalReceiptStatus::Pending {
+            let receipt = original.clone();
+            LOCAL_RECEIPTS.with(|cell| cell.set(receipts));
+            return Ok(local_result(Some(receipt), None));
+        }
+    }
+    // A retained terminal original is historical even after a same-lineage
+    // restore. Only a still-unscheduled mutation is subject to current fences.
+    if !lookup && attempt.context != owner.capture() {
+        let receipt = local_receipt(
+            attempt,
+            LocalReceiptStatus::NotApplied,
+            Some(ActionRejectionCode::StaleInteraction),
+        );
+        receipts.insert(key, receipt.clone());
+        LOCAL_RECEIPTS.with(|cell| cell.set(receipts));
+        return Ok(local_result(Some(receipt), None));
+    }
+    if !receipts.contains_key(&key) {
+        if lookup || apply {
+            // This authority retains every registered original. Absence proves
+            // this exact attempt was never scheduled, and closes later delivery.
+            let receipt = local_receipt(
+                attempt,
+                LocalReceiptStatus::NotApplied,
+                Some(ActionRejectionCode::StaleInteraction),
+            );
+            receipts.insert(key, receipt.clone());
+            LOCAL_RECEIPTS.with(|cell| cell.set(receipts));
+            return Ok(local_result(Some(receipt), None));
+        }
+        let pending = receipts
+            .values()
+            .any(|receipt| receipt.status == LocalReceiptStatus::Pending);
+        let rejection = if pending {
+            Some(ActionRejection::new(ActionRejectionCode::ActionNotAllowed))
+        } else {
+            GAME_STATE.with(|cell| {
+                let resident = cell.take();
+                let rejection = resident.as_ref().and_then(|state| {
+                    match engine::game::interaction::manual_interaction_source(
+                        state,
+                        actor,
+                        &attempt.submission,
+                    ) {
+                        Ok(Some(source)) if source == attempt.source => None,
+                        Ok(Some(_)) | Ok(None) | Err(_) => Some(ActionRejection::new(
+                            ActionRejectionCode::InvalidInteractionResponse,
+                        )),
+                    }
+                });
+                cell.set(resident);
+                rejection
+            })
+        };
+        let receipt = match rejection {
+            Some(rejection) => LocalReceipt {
+                attempt,
+                status: LocalReceiptStatus::NotApplied,
+                result: None,
+                rejection: Some(rejection),
+            },
+            None => local_receipt(attempt, LocalReceiptStatus::Pending, None),
+        };
+        if receipt.status == LocalReceiptStatus::Pending {
+            EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+                let mut owner = cell.take().expect("checked owner");
+                owner.last_source = Some(receipt.attempt.source.clone());
+                cell.set(Some(owner));
+            });
+        }
+        receipts.insert(key, receipt.clone());
+        LOCAL_RECEIPTS.with(|cell| cell.set(receipts));
+        return Ok(local_result(Some(receipt), None));
+    }
+    let applied = GAME_STATE.with(|cell| {
+        let mut state = cell
+            .take()
+            .ok_or_else(|| "Local resident unavailable".to_string())?;
+        let kind = if matches!(
+            engine::game::interaction::classify_manual_interaction(
+                &state,
+                actor,
+                &attempt.submission
+            ),
+            Ok(Some(
+                engine::game::interaction::ManualInteractionKind::CastIntent
+            ))
+        ) {
+            RecordedActionKind::ManualCastIntent {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(
+                    ObjectId(attempt.source.source_id),
+                    attempt.source.source_incarnation,
+                ),
+            }
+        } else {
+            RecordedActionKind::Submitted
+        };
+        let result = match engine::game::interaction::manual_interaction_source(
+            &state,
+            actor,
+            &attempt.submission,
+        ) {
+            Ok(Some(source)) if source == attempt.source => {
+                submit_interaction_with_rejection(&mut state, actor, attempt.submission.clone())
+            }
+            Ok(Some(_)) | Ok(None) | Err(_) => Err(ActionRejection::new(
+                ActionRejectionCode::InvalidInteractionResponse,
+            )),
+        };
+        cell.set(Some(state));
+        Ok((result, kind))
+    });
+    let (receipt, result) = match applied {
+        Ok((Ok(applied), kind)) => {
+            REPLAY_LOG.with(|cell| {
+                let mut log = cell.take();
+                if let Some(log) = log.as_mut() {
+                    log.push_action_with_kind(actor, applied.action, kind);
+                }
+                cell.set(log);
+            });
+            invalidate_ai_proposals();
+            (
+                LocalReceipt {
+                    attempt,
+                    status: LocalReceiptStatus::Completed,
+                    result: Some(applied.result.clone()),
+                    rejection: None,
+                },
+                Some(applied.result),
+            )
+        }
+        Ok((Err(rejection), _)) => (
+            LocalReceipt {
+                attempt,
+                status: LocalReceiptStatus::NotApplied,
+                result: None,
+                rejection: Some(rejection),
+            },
+            None,
+        ),
+        Err(error) => {
+            LOCAL_RECEIPTS.with(|cell| cell.set(receipts));
+            return Err(error);
+        }
+    };
+    receipts.insert(key, receipt.clone());
+    LOCAL_RECEIPTS.with(|cell| cell.set(receipts));
+    Ok(local_result(Some(receipt), result))
+}
+
+#[derive(Clone, Copy)]
+enum InitializeAdmission {
+    Ordinary,
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    ExperimentalLocal,
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn experimental_local_actor_inner() -> Option<u8> {
+    if is_multiplayer_mode() {
+        return None;
+    }
+    EXPERIMENTAL_LOCAL_OWNER.with(|owner_cell| {
+        let owner = owner_cell.take();
+        let actor = owner.as_ref().and_then(|owner| {
+            GAME_STATE.with(|state_cell| {
+                let state = state_cell.take();
+                let valid = state.as_ref().is_some_and(|state| {
+                    state.interaction_session_id.as_ref() == Some(&owner.interaction_session)
+                        && state.players.iter().any(|player| player.id == PlayerId(0))
+                        && !owner.session.is_empty()
+                        && !owner.ticket.is_empty()
+                });
+                state_cell.set(state);
+                valid.then_some(0)
+            })
+        });
+        owner_cell.set(owner);
+        actor
+    })
+}
+
+#[cfg(all(feature = "manual_resolution_local_bootstrap", target_arch = "wasm32"))]
+#[wasm_bindgen(module = "/src/experimental-local-worker-realm.js")]
+extern "C" {
+    fn is_experimental_local_worker_realm() -> bool;
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn experimental_worker_realm() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        is_experimental_local_worker_realm()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn initialize_experimental_local_game_inner(
+    inputs: InitializeInputs,
+    trusted_checkpoint: Option<&str>,
+) -> Result<engine::types::game_state::ActionResult, serde_json::Value> {
+    init_guard(InitSessionKind::Local).map_err(|reason| {
+        serde_json::json!({
+            "error": true, "engine_occupied": true, "reasons": [reason],
+        })
+    })?;
+    let mut prepared = prepare_initialize_game(inputs, InitSessionKind::Local)?;
+    if let Some(checkpoint) = trusted_checkpoint {
+        prepared.state = decode_local_checkpoint(checkpoint)
+            .map_err(|reason| serde_json::json!({ "error": true, "reasons": [reason] }))?;
+        // The ordinary initializer's shuffled board is not this checkpoint.
+        // Its events and replay reconstruction header must not survive startup.
+        prepared.result = engine::types::game_state::ActionResult::applied(
+            Vec::new(),
+            prepared.state.waiting_for.clone(),
+        );
+        prepared.replay_header = None;
+    }
+    // Check the prospective installed seat, never the existence of an old game.
+    if !prepared
+        .state
+        .players
+        .iter()
+        .any(|player| player.id == PlayerId(0))
+    {
+        return Err(
+            serde_json::json!({ "error": true, "reasons": ["Experimental Local seat unavailable"] }),
+        );
+    }
+    let session = InteractionSessionId(format!("wasm-{:016x}", rand::rng().random::<u64>()));
+    bind_interaction_authority(&mut prepared.state, session).map_err(|error| {
+        serde_json::json!({ "error": true, "reasons": [format!("Local session bind failed: {error:?}")] })
+    })?;
+    Ok(install_initialized_game(
+        prepared,
+        InitSessionKind::Local,
+        InitializeAdmission::ExperimentalLocal,
+    ))
+}
+
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+fn decode_experimental_local_request(
+    request: JsValue,
+) -> Result<(InitializeInputs, Option<String>), serde_json::Value> {
+    let refusal =
+        || serde_json::json!({ "error": true, "reasons": ["Invalid experimental Local request"] });
+    if !request.is_object() || request.is_null() || js_sys::Array::is_array(&request) {
+        return Err(refusal());
+    }
+    let prototype: JsValue = js_sys::Reflect::get_prototype_of(&request)
+        .map_err(|_| refusal())?
+        .into();
+    let record_prototype: JsValue = js_sys::Object::get_prototype_of(&js_sys::Object::new()).into();
+    if !prototype.is_null() && prototype != record_prototype {
+        return Err(refusal());
+    }
+    let keys = js_sys::Reflect::own_keys(&request).map_err(|_| refusal())?;
+    for key in keys.iter() {
+        if !key.as_string().is_some_and(|key| {
+            matches!(
+                key.as_str(),
+                "deckData"
+                    | "seed"
+                    | "formatConfig"
+                    | "matchConfig"
+                    | "playerCount"
+                    | "firstPlayer"
+                    | "trustedCheckpoint"
+            )
+        }) {
+            return Err(refusal());
+        }
+    }
+    let field = |name: &str| {
+        js_sys::Reflect::get(&request, &JsValue::from_str(name)).map_err(|_| refusal())
+    };
+    let number = |value: JsValue| {
+        if value.is_null() || value.is_undefined() {
+            Ok(None)
+        } else {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(Some)
+                .ok_or_else(refusal)
+        }
+    };
+    let byte = |value: JsValue| {
+        number(value)?
+            .map(|value| {
+                if value.fract() == 0.0 && (0.0..=255.0).contains(&value) {
+                    Ok(value as u8)
+                } else {
+                    Err(refusal())
+                }
+            })
+            .transpose()
+    };
+    let checkpoint = field("trustedCheckpoint")?;
+    let trusted_checkpoint = if checkpoint.is_undefined() {
+        None
+    } else {
+        Some(checkpoint.as_string().ok_or_else(refusal)?)
+    };
+    Ok((
+        decode_initialize_inputs(
+            field("deckData")?,
+            number(field("seed")?)?,
+            field("formatConfig")?,
+            field("matchConfig")?,
+            byte(field("playerCount")?)?,
+            byte(field("firstPlayer")?)?,
+        ),
+        trusted_checkpoint,
+    ))
+}
+
+/// Explicit experimental Local admission, available only in a dedicated Worker.
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[wasm_bindgen]
+pub fn initialize_experimental_local_game(request: JsValue) -> JsValue {
+    if !experimental_worker_realm() {
+        return to_js(
+            &serde_json::json!({ "error": true, "reasons": ["Experimental Local requires a dedicated Worker"] }),
+        );
+    }
+    match decode_experimental_local_request(request).and_then(|(inputs, checkpoint)| {
+        initialize_experimental_local_game_inner(inputs, checkpoint.as_deref())
+    }) {
+        Ok(result) => {
+            let mut value = serde_json::to_value(result).expect("initial result serializes");
+            value["localContinuationContext"] =
+                serde_json::to_value(local_owner().expect("installed owner").capture())
+                    .expect("capture serializes");
+            to_js(&value)
+        }
+        Err(error) => to_js(&error),
+    }
+}
+
+/// Verification read only: cannot enroll an ordinary resident or mint a ticket.
+#[cfg(feature = "manual_resolution_local_bootstrap")]
+#[wasm_bindgen]
+pub fn experimental_local_actor() -> Option<u8> {
+    experimental_worker_realm()
+        .then(experimental_local_actor_inner)
+        .flatten()
+}
+
 /// Which client-side session is installing this game. Selects the
 /// debug-permission posture and whether the multiplayer flag is claimed in the
 /// same call.
@@ -1722,42 +2443,79 @@ fn validate_deck_list_seats(
     None
 }
 
-/// Shared body of both initialize entry points. The guard lives in the shells
-/// (they are where `JsValue` envelopes are produced); this function assumes it
-/// has already passed and installs unconditionally.
-fn initialize_game_impl(
-    deck_data: JsValue,
+/// Decoded ordinary fields. Both JS initializers and the native preparation
+/// tests feed this same fallible preparation and successful-install boundary.
+struct InitializeInputs {
+    deck_data: Result<Option<DeckList>, String>,
     seed: Option<f64>,
-    format_config_js: JsValue,
-    match_config_js: JsValue,
+    format_config: Result<Option<FormatConfig>, String>,
+    match_config: Option<MatchConfig>,
     player_count: Option<u8>,
     first_player: Option<u8>,
+}
+
+fn decode_optional_initialize_field<T: serde::de::DeserializeOwned>(
+    value: JsValue,
+) -> Result<Option<T>, String> {
+    if value.is_null() || value.is_undefined() {
+        Ok(None)
+    } else {
+        serde_wasm_bindgen::from_value(value)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn decode_initialize_inputs(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config: JsValue,
+    match_config: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+) -> InitializeInputs {
+    InitializeInputs {
+        deck_data: decode_optional_initialize_field(deck_data),
+        seed,
+        format_config: decode_optional_initialize_field(format_config),
+        // Ordinary initialization has always defaulted malformed match config.
+        match_config: decode_optional_initialize_field(match_config)
+            .ok()
+            .flatten(),
+        player_count,
+        first_player,
+    }
+}
+
+struct PreparedInitializeGame {
+    state: GameState,
+    replay_header: Option<ReplayHeader>,
+    result: engine::types::game_state::ActionResult,
+}
+
+/// Every fallible operation acts on prospective state, before any resident write.
+fn prepare_initialize_game(
+    inputs: InitializeInputs,
     kind: InitSessionKind,
-) -> JsValue {
-    let seed = seed.map(|s| s as u64).unwrap_or(42);
+) -> Result<PreparedInitializeGame, serde_json::Value> {
+    let seed = inputs.seed.map(|s| s as u64).unwrap_or(42);
 
     // Resolved before the format config: an undeclared config's default must
     // be chosen FOR this seat count (see
     // `resolve_and_validate_initialize_format_config`), so `count` has to be
     // known first.
-    let count = player_count.unwrap_or(2);
+    let count = inputs.player_count.unwrap_or(2);
 
-    let decoded_format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        match parse_initialize_format_config(
-            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-                .map_err(|error| error.to_string()),
-        ) {
-            Ok(config) => Some(config),
-            Err(error) => return to_js(&error),
-        }
-    } else {
-        None
-    };
+    let decoded_format_config = inputs.format_config.map_err(|error| {
+        parse_initialize_format_config(Err(error))
+            .err()
+            .unwrap_or_else(|| panic!("invalid format decode"))
+    })?;
     let format_config =
         match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
             Ok(config) => config,
             Err(reason) => {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "reasons": [reason],
                 }));
@@ -1770,12 +2528,7 @@ fn initialize_game_impl(
     // thread-local is still clear here and a host game would otherwise be given
     // local debug permissions.
     initialize_debug_permissions(&mut state, kind == InitSessionKind::MultiplayerHost);
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
-    };
+    let match_config = inputs.match_config.unwrap_or_default();
     // CR 732.2a: project the immutable match config (incl. the combo-detector opt-in)
     // onto the runtime `loop_detection` gate via the single engine authority shared
     // with the server path. The detector is player-count-agnostic, so it carries
@@ -1798,21 +2551,17 @@ fn initialize_game_impl(
     // (wasm-adapter.ts:701) already throws on `{ error: true, reasons }`, so
     // returning that envelope here gives the user a real failure message
     // instead of a silently-broken match.
-    if !deck_data.is_null() && !deck_data.is_undefined() {
-        let deck_list = match serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
-            Ok(d) => d,
-            Err(e) => {
-                return to_js(&serde_json::json!({
-                    "error": true,
-                    "reasons": [format!("Deck payload deserialization failed: {e}")],
-                }));
-            }
-        };
+    if let Some(deck_list) = inputs.deck_data.map_err(|error| {
+        serde_json::json!({
+            "error": true,
+            "reasons": [format!("Deck payload deserialization failed: {error}")],
+        })
+    })? {
         recorded_deck_list = Some(deck_list.clone());
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
         if card_db_missing {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [
                     "Card database not loaded in engine worker. \
@@ -1855,7 +2604,7 @@ fn initialize_game_impl(
         });
 
         if let Some(reasons) = validation_error {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": reasons,
             }));
@@ -1883,7 +2632,7 @@ fn initialize_game_impl(
                     .map(|e| vec![e.to_string()])
             });
             if let Some(reasons) = cedh_error {
-                return to_js(&serde_json::json!({
+                return Err(serde_json::json!({
                     "error": true,
                     "cedh_bracket_violation": true,
                     "reasons": reasons,
@@ -1906,7 +2655,7 @@ fn initialize_game_impl(
             .map(|p| p.id.0)
             .collect();
         if !empty_seats.is_empty() {
-            return to_js(&serde_json::json!({
+            return Err(serde_json::json!({
                 "error": true,
                 "reasons": [format!(
                     "Empty library after deck load for seat(s): {empty_seats:?}. \
@@ -1918,7 +2667,7 @@ fn initialize_game_impl(
     }
 
     // CR 103.1: Start the game with the chosen starting player.
-    let result = match first_player {
+    let result = match inputs.first_player {
         Some(0) => start_game_with_starting_player(&mut state, PlayerId(0)),
         Some(1) => start_game_with_starting_player(&mut state, PlayerId(1)),
         _ => start_game(&mut state),
@@ -1932,25 +2681,91 @@ fn initialize_game_impl(
         format_config,
         match_config,
         player_count: count,
-        first_player,
+        first_player: inputs.first_player,
         seed,
         deck_data: recorded_deck_list,
     };
-    REPLAY_LOG.with(|cell| cell.set(Some(ReplayLog::new(replay_header))));
+    Ok(PreparedInitializeGame {
+        state,
+        replay_header: Some(replay_header),
+        result,
+    })
+}
 
-    // After `start_game`, so the slots bound here match the pause the caller is
-    // about to be handed — `bind_all_current_slots` binds for the *current*
-    // `waiting_for`, and nothing re-derives it until the first action boundary.
-    bind_interaction_session(&mut state);
-
-    GAME_STATE.with(|cell| cell.set(Some(state)));
-    // Adjacent to the install, exactly as `resume_multiplayer_host_state` does:
-    // the flag and the game it describes are set in one uninterruptible step.
+/// The one successful install used by both ordinary and experimental callers.
+fn install_initialized_game(
+    mut prepared: PreparedInitializeGame,
+    kind: InitSessionKind,
+    admission: InitializeAdmission,
+) -> engine::types::game_state::ActionResult {
+    if prepared.state.interaction_session_id.is_none() {
+        bind_interaction_session(&mut prepared.state);
+    }
+    revoke_experimental_local_owner();
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    if matches!(admission, InitializeAdmission::ExperimentalLocal) {
+        EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+            cell.set(Some(ExperimentalLocalOwner {
+                interaction_session: prepared
+                    .state
+                    .interaction_session_id
+                    .clone()
+                    .expect("bound session"),
+                session: format!("local-{:016x}", rand::rng().random::<u64>()),
+                ticket: format!("owner-{:016x}", rand::rng().random::<u64>()),
+                lineage: format!("lineage-{:016x}", rand::rng().random::<u64>()),
+                restore_epoch: 0,
+                adapter_generation: 10,
+                last_source: None,
+            }))
+        });
+    }
+    #[cfg(not(feature = "manual_resolution_local_bootstrap"))]
+    let _ = admission;
+    REPLAY_LOG.with(|cell| cell.set(prepared.replay_header.map(ReplayLog::new)));
+    GAME_STATE.with(|cell| cell.set(Some(prepared.state)));
     claim_engine_for(kind);
     clear_ai_session_cache();
     invalidate_ai_proposals();
+    prepared.result
+}
 
-    to_js(&result)
+fn initialize_game_inner(
+    inputs: InitializeInputs,
+    kind: InitSessionKind,
+) -> Result<engine::types::game_state::ActionResult, serde_json::Value> {
+    init_guard(kind).map_err(|reason| {
+        serde_json::json!({
+            "error": true, "engine_occupied": true, "reasons": [reason],
+        })
+    })?;
+    prepare_initialize_game(inputs, kind)
+        .map(|prepared| install_initialized_game(prepared, kind, InitializeAdmission::Ordinary))
+}
+
+fn initialize_game_impl(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config_js: JsValue,
+    match_config_js: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+    kind: InitSessionKind,
+) -> JsValue {
+    match initialize_game_inner(
+        decode_initialize_inputs(
+            deck_data,
+            seed,
+            format_config_js,
+            match_config_js,
+            player_count,
+            first_player,
+        ),
+        kind,
+    ) {
+        Ok(result) => to_js(&result),
+        Err(error) => to_js(&error),
+    }
 }
 
 /// Submit a game action on behalf of `actor` and return the ActionResult
@@ -1980,6 +2795,23 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         }
     };
     let actor = PlayerId(actor);
+
+    if local_mutation_pending() {
+        return rejected_action_outcome(ActionRejection::new(
+            ActionRejectionCode::ActionNotAllowed,
+        ));
+    }
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    if matches!(
+        action,
+        GameAction::DesignateManualResolution { .. }
+            | GameAction::ApplyManualLifeLoss { .. }
+            | GameAction::FinishManualResolution { .. }
+    ) {
+        return rejected_action_outcome(ActionRejection::new(
+            ActionRejectionCode::UnsupportedInteractionResponse,
+        ));
+    }
 
     if let GameAction::Debug(debug_action) = &action {
         if debug_action.is_zero_count_create() {
@@ -2043,7 +2875,40 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
 /// the exact action to the replay recorder.
 #[wasm_bindgen]
 pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
-    let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
+    let value: serde_json::Value = match serde_wasm_bindgen::from_value(submission) {
+        Ok(value) => value,
+        Err(_) => {
+            return rejected_action_outcome(ActionRejection::new(
+                ActionRejectionCode::InvalidInteractionResponse,
+            ))
+        }
+    };
+    if value.get("type").is_some() {
+        #[cfg(feature = "manual_resolution_local_bootstrap")]
+        {
+            let envelope = serde_json::from_value::<LocalEnvelope>(value.clone());
+            return match envelope {
+                Ok(envelope) if serde_json::to_value(&envelope).ok().as_ref() == Some(&value) => {
+                    match local_continuation_inner(
+                        PlayerId(actor),
+                        envelope,
+                        experimental_worker_realm(),
+                    ) {
+                        Ok(result) => to_js(&result),
+                        Err(error) => JsValue::from_str(&error),
+                    }
+                }
+                Ok(_) | Err(_) => rejected_action_outcome(ActionRejection::new(
+                    ActionRejectionCode::InvalidInteractionResponse,
+                )),
+            };
+        }
+        #[cfg(not(feature = "manual_resolution_local_bootstrap"))]
+        return rejected_action_outcome(ActionRejection::new(
+            ActionRejectionCode::UnsupportedInteractionResponse,
+        ));
+    }
+    let submission: InteractionSubmission = match serde_json::from_value(value) {
         Ok(submission) => submission,
         Err(_) => {
             return rejected_action_outcome(ActionRejection::new(
@@ -2052,7 +2917,12 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
         }
     };
     let actor = PlayerId(actor);
-    match with_state_mut(|state| submit_interaction_with_rejection(state, actor, submission)) {
+    if local_mutation_pending() {
+        return rejected_action_outcome(ActionRejection::new(
+            ActionRejectionCode::ActionNotAllowed,
+        ));
+    }
+    match with_state_mut(|state| submit_compatible_interaction(state, actor, submission)) {
         Ok(Ok(applied)) => {
             record_replay_action(false, actor, applied.action);
             invalidate_ai_proposals();
@@ -2061,6 +2931,23 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
         Ok(Err(rejection)) => rejected_action_outcome(rejection),
         Err(error) => error,
     }
+}
+
+fn submit_compatible_interaction(
+    state: &mut GameState,
+    actor: PlayerId,
+    submission: InteractionSubmission,
+) -> Result<engine::game::interaction::AppliedInteraction, ActionRejection> {
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    if matches!(
+        engine::game::interaction::classify_manual_interaction(state, actor, &submission),
+        Ok(Some(_))
+    ) {
+        return Err(ActionRejection::new(
+            ActionRejectionCode::UnsupportedInteractionResponse,
+        ));
+    }
+    submit_interaction_with_rejection(state, actor, submission)
 }
 
 /// Preview one opaque interaction response without committing. A REFUSED declaration is a
@@ -2648,6 +3535,12 @@ mod viewer_priority_tests {
 
 #[wasm_bindgen]
 pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
+    #[cfg(feature = "manual_resolution_local_bootstrap")]
+    if player_id == 0 && experimental_worker_realm() {
+        if let Some(frame) = local_current_frame(None, &[]) {
+            return to_js(&frame.snapshot);
+        }
+    }
     match with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
@@ -2918,6 +3811,7 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     state.debug_mode = true;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     bind_interaction_session(&mut state);
+    revoke_experimental_local_owner();
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -2953,6 +3847,9 @@ pub fn resume_restored_game_state() -> Result<JsValue, JsValue> {
 fn resume_loaded_stack_automation(
     reset_on_noop: bool,
 ) -> Result<RestoredStackAutomationPresentation, String> {
+    if local_mutation_pending() {
+        return Err("Local continuation pending".into());
+    }
     let resumed = GAME_STATE.with(|cell| {
         let mut state = cell.take().ok_or_else(|| NOT_INITIALIZED_ERR.to_string())?;
         let resumed = resume_restored_stack_automation(&mut state);
@@ -3046,6 +3943,7 @@ fn resume_multiplayer_host_state_inner(
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
     bind_interaction_session(&mut state);
+    revoke_experimental_local_owner();
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
@@ -4024,6 +4922,11 @@ fn llm_failure(error: &phase_llm::LlmError) -> JsValue {
 /// retry; only a successful apply invalidates the authority generation.
 #[wasm_bindgen]
 pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsValue {
+    if local_mutation_pending() {
+        return to_js(&AiProposalSubmission::Rejected {
+            rejection: ActionRejection::new(ActionRejectionCode::ActionNotAllowed),
+        });
+    }
     let action: GameAction = match serde_wasm_bindgen::from_value(action) {
         Ok(action) => action,
         Err(_) => {
@@ -7467,5 +8370,1510 @@ mod settlement_election_host_resume_tests {
             resumed, expected,
             "the resumed host locks and places the same activation"
         );
+    }
+}
+
+/// These tests call the same preparation/install boundaries as the ordinary JS
+/// shells in both feature configurations. Private comparisons never print data.
+#[cfg(test)]
+mod ordinary_initializer_preservation_tests {
+    use super::*;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+
+    pub(super) fn reset() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    pub(super) fn inputs() -> InitializeInputs {
+        InitializeInputs {
+            deck_data: Ok(None),
+            seed: None,
+            format_config: Ok(None),
+            match_config: None,
+            player_count: None,
+            first_player: Some(0),
+        }
+    }
+
+    pub(super) fn load_fixture() {
+        let face = CardFace {
+            name: "Bootstrap Blank Basic".into(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec![],
+            },
+            ..CardFace::default()
+        };
+        let spell = CardFace {
+            name: "Local Boundary Spell".into(),
+            card_type: CardType {
+                core_types: vec![CoreType::Instant],
+                ..CardType::default()
+            },
+            ..CardFace::default()
+        };
+        let entries = BTreeMap::from([
+            (
+                face.name.to_lowercase(),
+                serde_json::to_value(face).unwrap_or_else(|_| panic!("fixture face")),
+            ),
+            (
+                spell.name.to_lowercase(),
+                serde_json::to_value(spell).unwrap_or_else(|_| panic!("fixture spell")),
+            ),
+        ]);
+        let db = CardDatabase::from_json_str(
+            &serde_json::to_string(&entries).unwrap_or_else(|_| panic!("fixture db")),
+        )
+        .unwrap_or_else(|_| panic!("fixture loads"));
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(db)));
+    }
+
+    pub(super) fn limited_inputs() -> InitializeInputs {
+        let deck = PlayerDeckList {
+            main_deck: vec!["Bootstrap Blank Basic".into(); 40],
+            ..Default::default()
+        };
+        InitializeInputs {
+            deck_data: Ok(Some(DeckList {
+                player: deck.clone(),
+                opponent: deck,
+                ..Default::default()
+            })),
+            format_config: Ok(Some(FormatConfig::limited())),
+            ..inputs()
+        }
+    }
+
+    pub(super) fn resident() -> GameState {
+        GAME_STATE.with(|cell| {
+            let state = cell.take();
+            let copy = state.clone().expect("resident installed");
+            cell.set(state);
+            copy
+        })
+    }
+
+    pub(super) struct Snapshot {
+        state: Option<serde_json::Value>,
+        replay: Option<serde_json::Value>,
+        interaction: Option<InteractionSessionId>,
+        cache: Option<Arc<AiSession>>,
+        proposals: (u64, u64, HashMap<String, StoredAiProposal>),
+        multiplayer: bool,
+        #[cfg(feature = "manual_resolution_local_bootstrap")]
+        owner: Option<ExperimentalLocalOwner>,
+    }
+
+    pub(super) fn snapshot() -> Snapshot {
+        let (state, interaction, cache) = GAME_STATE.with(|cell| {
+            let state = cell.take();
+            let cache = state.as_ref().map(|state| {
+                AI_SESSION_CACHE.with(|cell| {
+                    let mut cache = cell.take();
+                    let session = cache.get_or_build(state);
+                    cell.set(cache);
+                    session
+                })
+            });
+            let result = (
+                state.as_ref().map(|state| {
+                    serde_json::to_value(state).unwrap_or_else(|_| panic!("state serializes"))
+                }),
+                state
+                    .as_ref()
+                    .and_then(|state| state.interaction_session_id.clone()),
+                cache,
+            );
+            cell.set(state);
+            result
+        });
+        let replay = REPLAY_LOG.with(|cell| {
+            let log = cell.take();
+            let value = log.as_ref().map(|log| {
+                serde_json::to_value(log).unwrap_or_else(|_| panic!("replay serializes"))
+            });
+            cell.set(log);
+            value
+        });
+        Snapshot {
+            state,
+            replay,
+            interaction,
+            cache,
+            proposals: AI_PROPOSALS.with(|cell| {
+                let mut registry = cell.borrow_mut();
+                if registry.proposals.is_empty() && game_state_present() {
+                    registry.insert(AiDecisionContract {
+                        semantic_owner: PlayerId(0),
+                        authorized_actor: PlayerId(0),
+                        state_revision: 0,
+                        candidates: vec![],
+                    });
+                }
+                (
+                    registry.generation,
+                    registry.serial,
+                    registry.proposals.clone(),
+                )
+            }),
+            multiplayer: is_multiplayer_mode(),
+            #[cfg(feature = "manual_resolution_local_bootstrap")]
+            owner: EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+                let owner = cell.take();
+                let copy = owner.clone();
+                cell.set(owner);
+                copy
+            }),
+        }
+    }
+
+    pub(super) fn preserved(before: Snapshot) {
+        let after = snapshot();
+        assert!(before.state == after.state, "resident preserved");
+        assert!(before.replay == after.replay, "replay preserved");
+        assert!(
+            before.interaction == after.interaction,
+            "interaction preserved"
+        );
+        assert!(before.multiplayer == after.multiplayer, "posture preserved");
+        assert!(
+            before.proposals.0 == after.proposals.0
+                && before.proposals.1 == after.proposals.1
+                && before.proposals.2.len() == after.proposals.2.len()
+                && before.proposals.2.iter().all(|(token, proposal)| after
+                    .proposals
+                    .2
+                    .get(token)
+                    .is_some_and(|other| proposal.generation == other.generation
+                        && proposal.contract.semantic_owner == other.contract.semantic_owner
+                        && proposal.contract.authorized_actor == other.contract.authorized_actor
+                        && proposal.contract.state_revision == other.contract.state_revision
+                        && proposal.contract.candidates.len() == other.contract.candidates.len()
+                        && proposal
+                            .contract
+                            .candidates
+                            .iter()
+                            .zip(&other.contract.candidates)
+                            .all(|(a, b)| a.action == b.action
+                                && a.metadata.semantic_owner == b.metadata.semantic_owner
+                                && a.metadata.actor == b.metadata.actor
+                                && a.metadata.tactical_class == b.metadata.tactical_class))),
+            "proposals preserved"
+        );
+        assert!(
+            match (before.cache, after.cache) {
+                (Some(a), Some(b)) => Arc::ptr_eq(&a, &b),
+                (None, None) => true,
+                _ => false,
+            },
+            "cache preserved"
+        );
+        #[cfg(feature = "manual_resolution_local_bootstrap")]
+        assert!(before.owner == after.owner, "private binding preserved");
+    }
+
+    pub(super) fn failures() -> Vec<InitializeInputs> {
+        let mut malformed_format = limited_inputs();
+        malformed_format.format_config = Err("fixture".into());
+        let mut count = limited_inputs();
+        count.player_count = Some(4);
+        let mut malformed_deck = limited_inputs();
+        malformed_deck.deck_data = Err("fixture".into());
+        let mut player = limited_inputs();
+        player
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck")
+            .player
+            .main_deck[0] = "Absent Fixture Card".into();
+        let mut opponent = limited_inputs();
+        opponent
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck")
+            .opponent
+            .main_deck[0] = "Absent Fixture Card".into();
+        let mut empty = limited_inputs();
+        let deck = empty
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck");
+        deck.player.main_deck.clear();
+        deck.opponent.main_deck.clear();
+        let mut cedh = limited_inputs();
+        cedh.deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck")
+            .ai_difficulties = vec!["CEDH".into()];
+        vec![
+            malformed_format,
+            count,
+            malformed_deck,
+            player,
+            opponent,
+            empty,
+            cedh,
+        ]
+    }
+
+    #[test]
+    fn defaults_are_installed_with_trusted_seed_and_redacted_viewer() {
+        for kind in [InitSessionKind::Local, InitSessionKind::MultiplayerHost] {
+            for count in [2, 4] {
+                reset();
+                let mut input = inputs();
+                input.player_count = Some(count);
+                assert!(
+                    initialize_game_inner(input, kind).is_ok(),
+                    "default install reaches production"
+                );
+                let mut state = resident();
+                assert!(
+                    state.rng_seed == 42 && state.players.len() == usize::from(count),
+                    "resident defaults"
+                );
+                assert!(
+                    state.format_config == FormatConfig::default_for_player_count(count),
+                    "seat-dependent format"
+                );
+                assert!(
+                    state.match_config == MatchConfig::default(),
+                    "match default"
+                );
+                let viewer =
+                    serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+                        &state,
+                        Some(PlayerId(0)),
+                    ))
+                    .unwrap_or_else(|_| panic!("viewer serializes"));
+                assert!(
+                    viewer["state"]["rng_seed"] == 0 && viewer["state"]["rng_word_pos"] == 0,
+                    "viewer redaction"
+                );
+                state.capture_rng_word_pos();
+                let trusted =
+                    serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone()))
+                        .unwrap_or_else(|_| panic!("trusted serializes"));
+                assert!(trusted["state"]["rng_seed"] == 42, "trusted seed authority");
+                REPLAY_LOG.with(|cell| {
+                    let log = cell.take();
+                    assert!(
+                        log.as_ref().is_some_and(|log| log.header.seed == 42),
+                        "replay seed authority"
+                    );
+                    cell.set(log);
+                });
+            }
+        }
+        reset();
+    }
+
+    #[test]
+    fn configured_deck_install_and_all_preparation_refusals_preserve_local_resident() {
+        reset();
+        load_fixture();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "configured install"
+        );
+        let mut cedh_reach = limited_inputs();
+        let deck = cedh_reach
+            .deck_data
+            .as_mut()
+            .unwrap_or_else(|_| panic!("decoded"))
+            .as_mut()
+            .expect("deck");
+        deck.ai_difficulties = vec!["CEDH".into()];
+        deck.player.bracket_tier = engine::game::bracket_estimate::CommanderBracketTier::Cedh;
+        deck.opponent.bracket_tier = engine::game::bracket_estimate::CommanderBracketTier::Cedh;
+        assert!(
+            initialize_game_inner(cedh_reach, InitSessionKind::Local).is_ok(),
+            "cEDH bracket reach"
+        );
+        for (index, input) in failures().into_iter().enumerate() {
+            let before = snapshot();
+            let error =
+                initialize_game_inner(input, InitSessionKind::Local).expect_err("fixture refused");
+            assert!(
+                error["error"] == true && error["reasons"].is_array(),
+                "ordinary refusal envelope"
+            );
+            if index == 6 {
+                assert!(
+                    error["cedh_bracket_violation"] == true,
+                    "typed bracket flag"
+                );
+            }
+            preserved(before);
+        }
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let before = snapshot();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_err(),
+            "missing db refused"
+        );
+        preserved(before);
+        reset();
+    }
+
+    #[test]
+    fn host_preparation_refusals_never_install_or_claim() {
+        reset();
+        load_fixture();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::MultiplayerHost).is_ok(),
+            "host reach"
+        );
+        for input in failures() {
+            clear_game_state();
+            set_multiplayer_mode(false);
+            let before = snapshot();
+            assert!(
+                initialize_game_inner(input, InitSessionKind::MultiplayerHost).is_err(),
+                "host preparation refusal"
+            );
+            preserved(before);
+        }
+        reset();
+    }
+
+    #[test]
+    fn occupied_refusals_are_typed_and_preserve_both_directions() {
+        for kind in [InitSessionKind::Local, InitSessionKind::MultiplayerHost] {
+            reset();
+            load_fixture();
+            assert!(
+                initialize_game_inner(limited_inputs(), kind).is_ok(),
+                "occupied reach"
+            );
+            let before = snapshot();
+            let other = if kind == InitSessionKind::Local {
+                InitSessionKind::MultiplayerHost
+            } else {
+                InitSessionKind::Local
+            };
+            let error =
+                initialize_game_inner(limited_inputs(), other).expect_err("occupied refusal");
+            assert!(error["engine_occupied"] == true, "typed occupied flag");
+            preserved(before);
+        }
+        reset();
+    }
+
+    #[test]
+    fn successful_ordinary_install_invalidates_previous_authority_and_cache() {
+        reset();
+        load_fixture();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "first install"
+        );
+        let before = snapshot();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "rematch installs"
+        );
+        let after = snapshot();
+        assert!(
+            before.interaction != after.interaction,
+            "fresh interaction binding"
+        );
+        assert!(
+            before.proposals.0 != after.proposals.0,
+            "proposal generation invalidated"
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &before.cache.expect("cached before"),
+                &after.cache.expect("cached after")
+            ),
+            "cache invalidated"
+        );
+        #[cfg(feature = "manual_resolution_local_bootstrap")]
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "ordinary never admits"
+        );
+        reset();
+    }
+}
+
+#[cfg(all(test, feature = "manual_resolution_local_bootstrap"))]
+mod local_continuation_tests {
+    use super::ordinary_initializer_preservation_tests::{
+        limited_inputs, load_fixture, reset, resident,
+    };
+    use super::*;
+    use engine::game::scenario::GameScenario;
+    use engine::types::interaction::{InteractionResponse, ManualResolutionDecision};
+
+    fn active() {
+        reset();
+        load_fixture();
+        initialize_experimental_local_game_inner(limited_inputs(), None).expect("real admission");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand(PlayerId(0), "Local Boundary Spell", true)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).commit();
+        let stack_entry_id = runner.state().stack.back().expect("ordinary cast").id;
+        runner
+            .act(GameAction::DesignateManualResolution { stack_entry_id })
+            .expect("designation");
+        runner.act(GameAction::PassPriority).expect("first pass");
+        runner.act(GameAction::PassPriority).expect("Begin");
+        let mut state = runner.state().clone();
+        bind_interaction_authority(
+            &mut state,
+            local_owner().expect("owner").interaction_session,
+        )
+        .expect("same live authority");
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+    }
+
+    fn loss(id: &str, amount: u32) -> LocalOriginalAttempt {
+        let state = resident();
+        let submission = InteractionSubmission {
+            interaction_id: state
+                .active_interaction_slots
+                .iter()
+                .find(|slot| slot.semantic_owner == 0)
+                .expect("active slot")
+                .interaction_id
+                .clone(),
+            response: InteractionResponse::ManualResolution {
+                decision: ManualResolutionDecision::LoseOwnLife { amount },
+            },
+        };
+        LocalOriginalAttempt {
+            context: local_owner().expect("owner").capture(),
+            attempt_id: id.into(),
+            source: engine::game::interaction::manual_interaction_source(
+                &state,
+                PlayerId(0),
+                &submission,
+            )
+            .expect("source lookup")
+            .expect("Manual source"),
+            submission,
+        }
+    }
+
+    fn call(attempt: &LocalOriginalAttempt, operation: &str) -> LocalContinuationResult {
+        let kind = LocalEnvelopeTag::LocalContinuation;
+        let envelope = match operation {
+            "register" => LocalEnvelope::Register {
+                kind,
+                attempt: attempt.clone(),
+            },
+            "apply" => LocalEnvelope::Apply {
+                kind,
+                attempt: attempt.clone(),
+            },
+            "lookup" => LocalEnvelope::Lookup {
+                kind,
+                attempt: attempt.clone(),
+            },
+            _ => panic!("test operation"),
+        };
+        local_continuation_inner(PlayerId(0), envelope, true).expect("live owner boundary")
+    }
+
+    #[test]
+    fn registered_pending_lookup_does_not_apply_and_exact_release_applies_once() {
+        active();
+        let original = loss("held", 2);
+        let before = resident();
+        assert_eq!(
+            call(&original, "register").receipt.unwrap().status,
+            LocalReceiptStatus::Pending
+        );
+        assert!(local_mutation_pending());
+        assert_eq!(
+            call(&original, "lookup").receipt.unwrap().status,
+            LocalReceiptStatus::Pending
+        );
+        assert_eq!(resident(), before, "register/lookup do not reduce");
+        let applied = call(&original, "apply");
+        assert_eq!(
+            applied.receipt.unwrap().status,
+            LocalReceiptStatus::Completed
+        );
+        assert_eq!(resident().players[0].life, 18);
+        assert_eq!(
+            applied
+                .applied_result
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::LifeChanged { amount: -2, .. }))
+                .count(),
+            1
+        );
+        assert!(!local_mutation_pending());
+        assert!(call(&original, "apply").applied_result.is_none());
+        assert!(call(&original, "lookup").applied_result.is_none());
+        assert_eq!(resident().players[0].life, 18);
+        reset();
+    }
+
+    #[test]
+    fn two_fresh_losses_keep_old_receipts_historical_and_current_life_eighteen() {
+        active();
+        let first = loss("one", 1);
+        call(&first, "register");
+        call(&first, "apply");
+        assert_eq!(resident().players[0].life, 19);
+        let second = loss("two", 1);
+        assert_ne!(
+            first.submission.interaction_id,
+            second.submission.interaction_id
+        );
+        call(&second, "register");
+        call(&second, "apply");
+        let historical = call(&first, "lookup");
+        assert_eq!(
+            historical.receipt.unwrap().status,
+            LocalReceiptStatus::Completed
+        );
+        assert!(historical.applied_result.is_none());
+        assert_eq!(
+            historical.current.unwrap().snapshot["state"]["state"]["players"][0]["life"],
+            18
+        );
+        assert_eq!(resident().players[0].life, 18);
+        reset();
+    }
+
+    #[test]
+    fn completed_original_resends_after_restore_remain_historical_and_current_stays_eighteen() {
+        active();
+        let first = loss("before-restore-one", 1);
+        call(&first, "register");
+        let first_result = call(&first, "apply").receipt.unwrap().result.unwrap();
+        let second = loss("before-restore-two", 1);
+        call(&second, "register");
+        call(&second, "apply");
+        let before = resident();
+        let checkpoint =
+            serde_json::to_string(&TrustedGameStateEnvelope::capture(before.clone())).unwrap();
+        let old_context = local_owner().unwrap().capture();
+        let restored = local_restore(old_context.clone(), &checkpoint).unwrap();
+        let fresh_context = restored.current.unwrap().context;
+        assert_ne!(
+            fresh_context.interaction_session_id,
+            old_context.interaction_session_id
+        );
+        assert_eq!(
+            (
+                fresh_context.restore_epoch,
+                fresh_context.adapter_generation
+            ),
+            (1, 11)
+        );
+        assert_eq!(
+            resident().manual_resolution_binding(),
+            before.manual_resolution_binding()
+        );
+        for operation in ["register", "apply", "lookup"] {
+            let historical = call(&first, operation);
+            let receipt = historical.receipt.unwrap();
+            assert_eq!(receipt.status, LocalReceiptStatus::Completed);
+            assert_eq!(receipt.attempt, first);
+            assert_eq!(receipt.result, Some(first_result.clone()));
+            assert!(historical.applied_result.is_none());
+            assert_eq!(
+                historical.current.unwrap().snapshot["state"]["state"]["players"][0]["life"],
+                18
+            );
+        }
+        let mut changed_original = first.clone();
+        changed_original.submission.response = InteractionResponse::ManualResolution {
+            decision: ManualResolutionDecision::LoseOwnLife { amount: 2 },
+        };
+        for operation in ["register", "apply", "lookup"] {
+            let refused = call(&changed_original, operation);
+            assert_eq!(
+                refused.receipt.unwrap().status,
+                LocalReceiptStatus::Indeterminate
+            );
+            assert!(refused.applied_result.is_none());
+        }
+        assert_eq!(
+            call(&first, "lookup").receipt.unwrap().status,
+            LocalReceiptStatus::Completed
+        );
+        assert_eq!(resident().players[0].life, 18);
+        reset();
+    }
+
+    #[test]
+    fn trusted_startup_installs_once_at_zero_ten_without_events_or_shuffled_replay() {
+        active();
+        let before = resident();
+        let checkpoint =
+            serde_json::to_string(&TrustedGameStateEnvelope::capture(before.clone())).unwrap();
+        let result =
+            initialize_experimental_local_game_inner(limited_inputs(), Some(&checkpoint)).unwrap();
+        assert!(result.events.is_empty() && result.log_entries.is_empty());
+        let initial = local_owner().unwrap().capture();
+        assert_eq!((initial.restore_epoch, initial.adapter_generation), (0, 10));
+        assert_eq!(
+            resident().manual_resolution_binding(),
+            before.manual_resolution_binding()
+        );
+        assert_eq!(
+            resident().resolving_stack_entry,
+            before.resolving_stack_entry
+        );
+        assert_eq!(resident().players[0].life, 20);
+        assert!(REPLAY_LOG.with(|cell| {
+            let log = cell.take();
+            let absent = log.is_none();
+            cell.set(log);
+            absent
+        }));
+        let restored = local_restore(initial.clone(), &checkpoint).unwrap();
+        assert!(restored.receipt.is_none() && restored.applied_result.is_none());
+        let frame = restored.current.unwrap();
+        assert_eq!(
+            (
+                frame.context.restore_epoch,
+                frame.context.adapter_generation
+            ),
+            (1, 11)
+        );
+        assert_eq!(frame.context.owner_lineage, initial.owner_lineage);
+        assert_ne!(
+            frame.context.interaction_session_id,
+            initial.interaction_session_id
+        );
+        assert_eq!(
+            resident().resolving_stack_entry,
+            before.resolving_stack_entry
+        );
+        let fresh = loss("fresh-after-startup-restore", 2);
+        call(&fresh, "register");
+        assert_eq!(
+            call(&fresh, "apply").receipt.unwrap().status,
+            LocalReceiptStatus::Completed
+        );
+        assert_eq!(resident().players[0].life, 18);
+        reset();
+    }
+
+    #[test]
+    fn invalid_trusted_startup_preserves_resident_owner_receipts_and_replay() {
+        active();
+        let held = loss("preserved-on-startup-error", 2);
+        call(&held, "register");
+        let checkpoint =
+            serde_json::to_string(&TrustedGameStateEnvelope::capture(resident())).unwrap();
+        let raw = serde_json::to_string(&resident()).unwrap();
+        let mut unknown = serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap();
+        unknown["unexpected"] = serde_json::json!(true);
+        let mut corrupt = serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap();
+        corrupt["state"]["resolving_stack_entry"] = serde_json::Value::Null;
+        for invalid in [
+            "invalid".to_string(),
+            raw,
+            unknown.to_string(),
+            corrupt.to_string(),
+        ] {
+            let before = super::ordinary_initializer_preservation_tests::snapshot();
+            let receipts_before = LOCAL_RECEIPTS.with(|cell| {
+                let receipts = cell.take();
+                let value = serde_json::to_value(receipts.values().collect::<Vec<_>>()).unwrap();
+                cell.set(receipts);
+                value
+            });
+            assert!(
+                initialize_experimental_local_game_inner(limited_inputs(), Some(&invalid)).is_err()
+            );
+            super::ordinary_initializer_preservation_tests::preserved(before);
+            let receipts_after = LOCAL_RECEIPTS.with(|cell| {
+                let receipts = cell.take();
+                let value = serde_json::to_value(receipts.values().collect::<Vec<_>>()).unwrap();
+                cell.set(receipts);
+                value
+            });
+            assert_eq!(receipts_after, receipts_before);
+            assert_eq!(
+                call(&held, "lookup").receipt.unwrap().status,
+                LocalReceiptStatus::Pending
+            );
+        }
+        assert_eq!(
+            call(&held, "apply").receipt.unwrap().status,
+            LocalReceiptStatus::Completed
+        );
+        reset();
+    }
+
+    #[test]
+    fn admitted_paid_manual_replay_uses_truthful_ordinary_header_and_seeks() {
+        reset();
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr,
+            TargetFilter,
+        };
+        use engine::types::card::CardFace;
+        use engine::types::card_type::{CardType, CoreType};
+        use engine::types::game_state::{AutoPassRequest, TurnBoundary};
+        use engine::types::zones::Zone;
+
+        let spell = |name: &str, effect| CardFace {
+            name: name.into(),
+            mana_cost: ManaCost::generic(1),
+            card_type: CardType {
+                core_types: vec![CoreType::Instant],
+                ..CardType::default()
+            },
+            abilities: vec![AbilityDefinition::new(AbilityKind::Spell, effect)],
+            ..CardFace::default()
+        };
+        let faces = [
+            spell(
+                "Replay Self Loss",
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: Some(TargetFilter::Controller),
+                },
+            ),
+            spell(
+                "Replay Next Play",
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+            CardFace {
+                mana_cost: ManaCost::zero(),
+                ..spell("Replay Response", Effect::NoOp)
+            },
+            CardFace {
+                name: "Replay Mana Land".into(),
+                card_type: CardType {
+                    core_types: vec![CoreType::Land],
+                    ..CardType::default()
+                },
+                abilities: vec![AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap)],
+                ..CardFace::default()
+            },
+        ];
+        let database = Arc::new(
+            CardDatabase::from_json_str(
+                &serde_json::to_string(
+                    &faces
+                        .iter()
+                        .map(|face| (face.name.to_lowercase(), face))
+                        .collect::<BTreeMap<_, _>>(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::clone(&database)));
+        let mut input = limited_inputs();
+        input.seed = Some(117);
+        let deck = input.deck_data.as_mut().unwrap().as_mut().unwrap();
+        deck.player.main_deck = [
+            vec!["Replay Self Loss".into(); 13],
+            vec!["Replay Next Play".into(); 13],
+            vec!["Replay Mana Land".into(); 14],
+        ]
+        .concat();
+        deck.opponent.main_deck = vec!["Replay Response".into(); 40];
+        initialize_experimental_local_game_inner(input, None).unwrap();
+
+        let ordinary = |actor, action: GameAction| {
+            with_state_mut(|state| {
+                let result = apply_with_rejection(state, actor, action.clone()).unwrap();
+                record_replay_action(false, actor, action);
+                result
+            })
+            .unwrap()
+        };
+        for _ in 0..30 {
+            let state = resident();
+            if state.phase == engine::types::phase::Phase::PreCombatMain
+                && matches!(
+                    state.waiting_for,
+                    WaitingFor::Priority {
+                        player: PlayerId(0)
+                    }
+                )
+            {
+                break;
+            }
+            let actor = state.waiting_for.acting_players()[0];
+            let (actions, _, _) = legal_actions_full(&state);
+            let action = actions
+                .into_iter()
+                .find(|action| {
+                    matches!(
+                        action,
+                        GameAction::MulliganDecision {
+                            choice: engine::types::actions::MulliganChoice::Keep
+                        }
+                    )
+                })
+                .unwrap_or(GameAction::PassPriority);
+            ordinary(actor, action);
+        }
+        let state = resident();
+        assert_eq!(state.phase, engine::types::phase::Phase::PreCombatMain);
+        let hand_object = |name: &str| {
+            *state.players[0]
+                .hand
+                .iter()
+                .find(|id| state.objects[id].name == name)
+                .expect("deterministic ordinary opening hand contains this card")
+        };
+        let source_id = hand_object("Replay Self Loss");
+        let next_id = hand_object("Replay Next Play");
+        let land_id = hand_object("Replay Mana Land");
+        let (actions, _, _) = legal_actions_full(&state);
+        ordinary(PlayerId(0), actions.into_iter().find(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == land_id)).unwrap());
+        let (_, _, by_object) = legal_actions_full(&resident());
+        ordinary(
+            PlayerId(0),
+            by_object[&land_id]
+                .iter()
+                .find(|action| {
+                    matches!(
+                        action,
+                        GameAction::TapLandForMana { .. } | GameAction::ActivateManaSource { .. }
+                    )
+                })
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(resident().players[0].mana_pool.total(), 2);
+        ordinary(
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilTurnBoundary {
+                    until: TurnBoundary::EndOfCurrentTurn,
+                },
+            },
+        );
+        let (actions, _, _) = legal_actions_full(&resident());
+        ordinary(
+            PlayerId(1),
+            actions
+                .into_iter()
+                .find(|action| matches!(action, GameAction::CastSpell { .. }))
+                .unwrap(),
+        );
+        ordinary(PlayerId(1), GameAction::PassPriority);
+        let state = resident();
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "source actor's ordinary auto-pass is enabled and paused by the opponent response before selection"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        let view =
+            engine::game::interaction::derive_viewer_interaction(&state, &filtered, PlayerId(0));
+        let submission = view
+            .opportunities
+            .into_iter()
+            .find_map(|opportunity| {
+                let engine::types::interaction::InteractionOpportunityResponse::ExactChoices {
+                    choices,
+                } = opportunity.response
+                else {
+                    return None;
+                };
+                choices.into_iter().find_map(|choice| {
+                    let submission = InteractionSubmission {
+                        interaction_id: opportunity.interaction_id.clone(),
+                        response: InteractionResponse::Choose {
+                            choice_id: choice.id,
+                        },
+                    };
+                    (matches!(
+                        engine::game::interaction::classify_manual_interaction(
+                            &state,
+                            PlayerId(0),
+                            &submission
+                        ),
+                        Ok(Some(
+                            engine::game::interaction::ManualInteractionKind::CastIntent
+                        ))
+                    ) && engine::game::interaction::manual_interaction_source(
+                        &state,
+                        PlayerId(0),
+                        &submission,
+                    )
+                    .unwrap()
+                    .is_some_and(|source| source.source_id == source_id.0))
+                    .then_some(submission)
+                })
+            })
+            .expect("real engine opaque Manual intent");
+        let source =
+            engine::game::interaction::manual_interaction_source(&state, PlayerId(0), &submission)
+                .unwrap()
+                .unwrap();
+        assert_eq!(source.source_id, source_id.0);
+        let original = LocalOriginalAttempt {
+            context: local_owner().unwrap().capture(),
+            attempt_id: "manual-cast-replay".into(),
+            submission,
+            source,
+        };
+        let initial_log = export_replay_log().unwrap();
+        let initial: ReplayLog = serde_json::from_str(&initial_log).unwrap();
+        let mut playback = ReplayPlayer::load(initial, Some(&database)).unwrap();
+        assert_eq!(
+            playback.seek(playback.len()).unwrap().players,
+            state.players,
+            "recorded header and ordinary actions reconstruct the actual admitted board"
+        );
+        assert_eq!(
+            call(&original, "register").receipt.unwrap().status,
+            LocalReceiptStatus::Pending
+        );
+        assert_eq!(
+            call(&original, "apply").receipt.unwrap().status,
+            LocalReceiptStatus::Completed
+        );
+        assert!(
+            resident().manual_resolution_binding().is_some(),
+            "ordinary cast actually transferred the Manual intent"
+        );
+        assert_eq!(resident().players[0].mana_pool.total(), 1);
+        assert!(call(&original, "apply").applied_result.is_none());
+        let after_cast: ReplayLog = serde_json::from_str(&export_replay_log().unwrap()).unwrap();
+        call(&original, "register");
+        call(&original, "lookup");
+        assert_eq!(
+            serde_json::to_string(&after_cast).unwrap(),
+            export_replay_log().unwrap(),
+            "duplicate/register/lookup append zero actions"
+        );
+        for _ in 0..4 {
+            if matches!(resident().waiting_for, WaitingFor::ManualResolution { .. }) {
+                break;
+            }
+            let actor = resident().waiting_for.acting_players()[0];
+            ordinary(actor, GameAction::PassPriority);
+        }
+        let active = resident();
+        assert!(matches!(
+            active.waiting_for,
+            WaitingFor::ManualResolution { .. }
+        ));
+        assert_eq!(
+            active.players[0].life, 20,
+            "Begin has not run the automatic body"
+        );
+        assert!(
+            !active
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == source_id),
+            "Begin has removed this occurrence while retaining the ordinary response"
+        );
+        assert_eq!(active.stack.len(), 1);
+        let carrier = active.resolving_stack_entry.clone().unwrap();
+        let begin_index = serde_json::from_str::<ReplayLog>(&export_replay_log().unwrap())
+            .unwrap()
+            .actions
+            .len() as u32;
+        let life = loss("replay-life", 2);
+        call(&life, "register");
+        let applied_life = call(&life, "apply").applied_result.unwrap();
+        assert_eq!(
+            applied_life
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::LifeChanged {
+                        player_id: PlayerId(0),
+                        amount: -2,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(applied_life.events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { source_id: id, kind: engine::types::ability::EffectKind::LoseLife, .. } if *id == source_id)).count(), 1);
+        let current = resident();
+        let view = engine::game::interaction::derive_viewer_interaction(
+            &current,
+            &filter_state_for_viewer(&current, PlayerId(0)),
+            PlayerId(0),
+        );
+        let opportunity = &view.opportunities[0];
+        let engine::types::interaction::InteractionOpportunityResponse::Schema {
+            candidates, ..
+        } = &opportunity.response
+        else {
+            panic!("Manual Finish schema");
+        };
+        let submission = InteractionSubmission {
+            interaction_id: opportunity.interaction_id.clone(),
+            response: InteractionResponse::ManualResolution {
+                decision: ManualResolutionDecision::Finish {
+                    choice_id: candidates[0].id.clone(),
+                },
+            },
+        };
+        let finish = LocalOriginalAttempt {
+            context: local_owner().unwrap().capture(),
+            attempt_id: "replay-finish".into(),
+            source: engine::game::interaction::manual_interaction_source(
+                &current,
+                PlayerId(0),
+                &submission,
+            )
+            .unwrap()
+            .unwrap(),
+            submission,
+        };
+        call(&finish, "register");
+        let finished = call(&finish, "apply").applied_result.unwrap();
+        assert_eq!(finished.events.iter().filter(|event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == carrier.id)).count(), 1);
+        assert_eq!(resident().objects[&source_id].zone, Zone::Graveyard);
+        assert_eq!(resident().players[0].life, 18);
+        for _ in 0..4 {
+            if matches!(
+                resident().waiting_for,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            ) {
+                break;
+            }
+            ordinary(
+                resident().waiting_for.acting_players()[0],
+                GameAction::PassPriority,
+            );
+        }
+        let (actions, _, _) = legal_actions_full(&resident());
+        ordinary(PlayerId(0), actions.into_iter().find(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == next_id)).unwrap());
+        for _ in 0..4 {
+            if resident().objects[&next_id].zone == Zone::Graveyard {
+                break;
+            }
+            ordinary(
+                resident().waiting_for.acting_players()[0],
+                GameAction::PassPriority,
+            );
+        }
+        let live = resident();
+        assert_eq!(live.players[0].life, 21);
+        assert_eq!(live.players[0].mana_pool.total(), 0);
+        let owner = local_owner();
+        let receipts = LOCAL_RECEIPTS.with(|cell| {
+            let receipts = cell.take();
+            let copy = receipts.clone();
+            cell.set(receipts);
+            copy
+        });
+        let exported = export_replay_log().unwrap();
+        let log: ReplayLog = serde_json::from_str(&exported).unwrap();
+        assert_eq!(log.format_version, Some(4));
+        assert_eq!(
+            log.actions
+                .iter()
+                .filter(|action| matches!(action.kind, RecordedActionKind::ManualCastIntent { .. }))
+                .count(),
+            1
+        );
+        assert!(!log
+            .actions
+            .iter()
+            .any(|action| matches!(action.action, GameAction::DesignateManualResolution { .. })));
+        load_replay_for_playback(&exported).unwrap();
+        REPLAY_PLAYER.with(|cell| {
+            let mut player = cell.take().unwrap();
+            let end = player.len();
+            let replayed = player.seek(end).unwrap();
+            assert_eq!(replayed.players, live.players);
+            assert_eq!(replayed.objects[&source_id].zone, Zone::Graveyard);
+            assert_eq!(replayed.objects[&next_id].zone, Zone::Graveyard);
+            assert!(replayed.resolving_stack_entry.is_none());
+            let replayed_begin = player.seek(begin_index).unwrap();
+            assert_eq!(replayed_begin.players[0].life, 20);
+            assert_eq!(replayed_begin.resolving_stack_entry, Some(carrier));
+            assert!(matches!(
+                replayed_begin.waiting_for,
+                WaitingFor::ManualResolution { .. }
+            ));
+            player.seek(0).unwrap();
+            assert_eq!(player.seek(end).unwrap().players, live.players);
+            cell.set(Some(player));
+        });
+        assert_eq!(resident(), live, "playback never mutates the resident");
+        assert!(local_owner() == owner);
+        assert!(LOCAL_RECEIPTS.with(|cell| {
+            let current = cell.take();
+            let same = current.len() == receipts.len()
+                && receipts.iter().all(|(key, receipt)| {
+                    current.get(key).is_some_and(|value| {
+                        serde_json::to_value(value).unwrap()
+                            == serde_json::to_value(receipt).unwrap()
+                    })
+                });
+            cell.set(current);
+            same
+        }));
+        let end = log.actions.len() as u32;
+        for fault in ["incarnation", "actor", "card", "unsupported"] {
+            let mut invalid = log.clone();
+            let marked = invalid
+                .actions
+                .iter_mut()
+                .find(|action| matches!(action.kind, RecordedActionKind::ManualCastIntent { .. }))
+                .unwrap();
+            match fault {
+                "incarnation" => {
+                    marked.kind = RecordedActionKind::ManualCastIntent {
+                        source: engine::types::identifiers::ObjectIncarnationRef::of(
+                            ObjectId(original.source.source_id),
+                            original.source.source_incarnation + 1,
+                        ),
+                    }
+                }
+                "actor" => marked.actor = PlayerId(1),
+                "card" => {
+                    let GameAction::CastSpell { card_id, .. } = &mut marked.action else {
+                        unreachable!();
+                    };
+                    *card_id = live.objects[&land_id].card_id;
+                }
+                "unsupported" => {
+                    marked.action = GameAction::CastSpell {
+                        object_id: land_id,
+                        card_id: live.objects[&land_id].card_id,
+                        targets: Vec::new(),
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                    };
+                    marked.kind = RecordedActionKind::ManualCastIntent {
+                        source: engine::types::identifiers::ObjectIncarnationRef::of(
+                            land_id,
+                            live.objects[&land_id].incarnation,
+                        ),
+                    };
+                }
+                _ => unreachable!(),
+            }
+            let mut invalid = ReplayPlayer::load(invalid, Some(&database)).unwrap();
+            assert!(
+                invalid.seek(end).is_err(),
+                "invalid {fault} marker must refuse before applying its cast"
+            );
+            assert_eq!(resident(), live);
+        }
+        let mut missing_marker = log;
+        missing_marker
+            .actions
+            .iter_mut()
+            .for_each(|action| action.kind = RecordedActionKind::Submitted);
+        let mut wrong = ReplayPlayer::load(missing_marker, Some(&database)).unwrap();
+        let automatic = wrong.seek(begin_index).unwrap();
+        assert_eq!(automatic.players[0].life, 18, "the same header and prior actions succeed; only the omitted intent runs the automatic S body");
+        assert!(!matches!(
+            automatic.waiting_for,
+            WaitingFor::ManualResolution { .. }
+        ));
+        assert!(automatic.resolving_stack_entry.is_none());
+        assert!(wrong.seek(end).is_err(), "removing only the marker runs automatic S and desynchronizes the later Manual operation");
+        reset();
+    }
+
+    #[test]
+    fn fresh_bare_manual_refuses_and_equivalent_envelope_succeeds() {
+        active();
+        let original = loss("admitted", 2);
+        let mut state = resident();
+        let before = state.clone();
+        assert!(submit_compatible_interaction(
+            &mut state,
+            PlayerId(0),
+            original.submission.clone()
+        )
+        .is_err());
+        assert_eq!(state, before);
+        call(&original, "register");
+        assert_eq!(
+            call(&original, "apply").receipt.unwrap().status,
+            LocalReceiptStatus::Completed
+        );
+        assert_eq!(resident().players[0].life, 18);
+        reset();
+    }
+
+    #[test]
+    fn certified_absence_closes_late_delivery_and_revocation_retires_pending() {
+        active();
+        let absent = loss("never-reached", 2);
+        assert_eq!(
+            call(&absent, "lookup").receipt.unwrap().status,
+            LocalReceiptStatus::NotApplied
+        );
+        assert_eq!(
+            call(&absent, "register").receipt.unwrap().status,
+            LocalReceiptStatus::NotApplied
+        );
+        assert!(call(&absent, "apply").applied_result.is_none());
+        let held = loss("retired", 2);
+        call(&held, "register");
+        clear_game_state();
+        assert!(!local_mutation_pending());
+        assert!(local_continuation_inner(
+            PlayerId(0),
+            LocalEnvelope::Apply {
+                kind: LocalEnvelopeTag::LocalContinuation,
+                attempt: held
+            },
+            true
+        )
+        .is_err());
+        reset();
+    }
+}
+
+#[cfg(all(test, feature = "manual_resolution_local_bootstrap"))]
+mod experimental_local_bootstrap_tests {
+    use super::ordinary_initializer_preservation_tests::{
+        failures, inputs, limited_inputs, load_fixture, preserved, reset, resident, snapshot,
+    };
+    use super::*;
+
+    fn admit() {
+        load_fixture();
+        assert!(
+            initialize_experimental_local_game_inner(limited_inputs(), None).is_ok(),
+            "experimental production install"
+        );
+        assert!(
+            experimental_local_actor_inner() == Some(0),
+            "installed LocalP0 admitted"
+        );
+    }
+
+    #[test]
+    fn admission_is_explicit_and_verification_never_mints() {
+        reset();
+        assert!(experimental_local_actor_inner().is_none(), "empty verifier");
+        assert!(
+            initialize_game_inner(inputs(), InitSessionKind::Local).is_ok(),
+            "ordinary reach"
+        );
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "ordinary verifier cannot enroll"
+        );
+        admit();
+        let before = snapshot();
+        assert!(
+            experimental_local_actor_inner() == Some(0),
+            "repeat verification"
+        );
+        preserved(before);
+        reset();
+    }
+
+    #[test]
+    fn failed_bootstrap_preserves_ordinary_and_experimental_residents() {
+        for experimental in [false, true] {
+            reset();
+            load_fixture();
+            if experimental {
+                admit();
+            } else {
+                assert!(
+                    initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+                    "ordinary resident"
+                );
+            }
+            for input in failures() {
+                let before = snapshot();
+                assert!(
+                    initialize_experimental_local_game_inner(input, None).is_err(),
+                    "experimental preparation refusal"
+                );
+                preserved(before);
+                assert!(
+                    experimental_local_actor_inner() == experimental.then_some(0),
+                    "old admission retained"
+                );
+            }
+            CARD_DB.with(|cell| *cell.borrow_mut() = None);
+            let before = snapshot();
+            assert!(
+                initialize_experimental_local_game_inner(limited_inputs(), None).is_err(),
+                "missing db refusal"
+            );
+            preserved(before);
+        }
+        reset();
+    }
+
+    #[test]
+    fn verifier_checks_actual_resident_seat_session_and_posture() {
+        reset();
+        admit();
+        let state = resident();
+        GAME_STATE.with(|cell| {
+            let mut changed = state.clone();
+            changed.players.retain(|player| player.id != PlayerId(0));
+            cell.set(Some(changed));
+        });
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "missing installed seat"
+        );
+        GAME_STATE.with(|cell| {
+            let mut changed = state.clone();
+            changed.interaction_session_id = None;
+            cell.set(Some(changed));
+        });
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "wrong interaction binding"
+        );
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        assert!(
+            experimental_local_actor_inner() == Some(0),
+            "same resident restores verification"
+        );
+        set_multiplayer_mode(true);
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "multiplayer revokes"
+        );
+        set_multiplayer_mode(false);
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "posture release cannot remint"
+        );
+        reset();
+    }
+
+    #[test]
+    fn checked_restore_failure_preserves_and_success_revokes() {
+        reset();
+        admit();
+        let before = snapshot();
+        assert!(
+            restore_game_state_inner("invalid").is_err(),
+            "checked restore refuses"
+        );
+        preserved(before);
+        let mut state = resident();
+        state.capture_rng_word_pos();
+        let save = serde_json::to_string(&TrustedGameStateEnvelope::capture(state.clone()))
+            .unwrap_or_else(|_| panic!("trusted save"));
+        assert!(
+            restore_game_state_inner(&save).is_ok(),
+            "checked restore installs"
+        );
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "restore has no experimental admission"
+        );
+        reset();
+    }
+
+    #[test]
+    fn ordinary_supersession_clear_and_host_cannot_admit() {
+        reset();
+        admit();
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::Local).is_ok(),
+            "ordinary rematch"
+        );
+        assert!(
+            experimental_local_actor_inner().is_none(),
+            "ordinary supersession revokes"
+        );
+        admit();
+        clear_game_state();
+        assert!(experimental_local_actor_inner().is_none(), "clear revokes");
+        assert!(
+            initialize_game_inner(limited_inputs(), InitSessionKind::MultiplayerHost).is_ok(),
+            "host installs"
+        );
+        let before = snapshot();
+        let error = initialize_experimental_local_game_inner(limited_inputs(), None)
+            .expect_err("host refuses bootstrap");
+        assert!(error["engine_occupied"] == true, "host refusal typed");
+        preserved(before);
+        reset();
+    }
+
+    #[test]
+    fn private_binding_is_absent_from_save_viewer_and_replay() {
+        reset();
+        admit();
+        let owner = EXPERIMENTAL_LOCAL_OWNER.with(|cell| {
+            let owner = cell.take();
+            let copy = owner.clone().expect("private owner");
+            cell.set(owner);
+            copy
+        });
+        let mut state = resident();
+        state.capture_rng_word_pos();
+        let save = serde_json::to_string(&TrustedGameStateEnvelope::capture(state.clone()))
+            .unwrap_or_else(|_| panic!("save"));
+        let viewer = serde_json::to_string(&engine::game::derived_views::ClientGameStateRef::wrap(
+            &state,
+            Some(PlayerId(1)),
+        ))
+        .unwrap_or_else(|_| panic!("viewer"));
+        let replay = REPLAY_LOG.with(|cell| {
+            let log = cell.take();
+            let text = serde_json::to_string(log.as_ref().expect("recording"))
+                .unwrap_or_else(|_| panic!("replay"));
+            cell.set(log);
+            text
+        });
+        for text in [save, viewer, replay] {
+            assert!(
+                !text.contains(&owner.session) && !text.contains(&owner.ticket),
+                "private binding not serialized"
+            );
+        }
+        reset();
     }
 }

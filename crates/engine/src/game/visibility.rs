@@ -80,6 +80,8 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         },
         // Keep this complete rather than using a catch-all: new pause states
         // must explicitly decide whether they carry paid-cast authority.
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution { .. } => {}
         WaitingFor::Priority { .. }
         | WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }
@@ -1271,6 +1273,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         Some(viewer) => crate::game::payment_transaction::project_for_viewer(state, viewer),
         None => crate::game::payment_transaction::project_without_viewer(state),
     };
+    #[cfg(feature = "manual_resolution_prototype")]
+    {
+        filtered.manual_resolution_state = None;
+    }
     let viewer_knows = |object_id: ObjectId| {
         viewer.is_some_and(|viewer| state.viewer_knows_card_identity(viewer, object_id))
     };

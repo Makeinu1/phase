@@ -25,6 +25,8 @@ const {
   loadActiveGame,
   loadDraftRun,
   inspectActiveQuickDraftLifecycle,
+  localContinuationSubscribe,
+  localContinuationUnsubscribe,
   nativeAdapterInitialize,
   nativeAdapters,
   multiplayerDraftGetState,
@@ -118,9 +120,12 @@ const {
   }
   const nativeAdapters: WebSocketAdapter[] = [];
 
+  const localContinuationUnsubscribe = vi.fn();
+  const localContinuationSubscribe = vi.fn((_publisher: unknown) => localContinuationUnsubscribe);
   class WasmAdapter {
     cardDbLoaded = true;
     initialize = vi.fn(async () => {});
+    localContinuation = vi.fn(() => ({ subscribe: localContinuationSubscribe }));
     resetGameState = vi.fn();
   }
   const wasmAdapters: InstanceType<typeof WasmAdapter>[] = [];
@@ -189,6 +194,8 @@ const {
     inspectActiveQuickDraftLifecycle: vi.fn(async () => null as {
       id: string; setCode: string; phase?: string; currentGameId?: string;
     } | null),
+    localContinuationSubscribe,
+    localContinuationUnsubscribe,
     nativeAdapterInitialize,
     nativeAdapters,
     multiplayerDraftGetState,
@@ -295,6 +302,7 @@ vi.mock("../../game/controllers/gameLoopController", () => ({
 }));
 
 vi.mock("../../game/dispatch", () => ({
+  createLocalContinuationPublisher: vi.fn(() => vi.fn()),
   dispatchAction: vi.fn(),
   processRemoteUpdate: vi.fn(),
 }));
@@ -355,6 +363,7 @@ import { buildLegalAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { clearPromptOverlayState } from "../../game/sessionCleanup";
 import { createGameLoopController } from "../../game/controllers/gameLoopController";
+import { createLocalContinuationPublisher } from "../../game/dispatch";
 import { loadGame } from "../../stores/gameStore";
 
 const UNAVAILABLE = "This draft run is unavailable. End Run to draft again.";
@@ -465,6 +474,143 @@ describe("GameProvider native AI routing", () => {
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
     gameStoreState.gameState = null;
+  });
+
+  describe("P1 native fixture startup", () => {
+    beforeEach(() => {
+      vi.stubGlobal("fetch", vi.fn());
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    // These keys come from the finite native emitter. Checkpoint strings here
+    // test the production startup handoff, not native restore or WASM execution.
+    it.each([
+      ["1a.B", "1a", "B"],
+      ["5b.owner.B", "5b", "B"],
+      ["5b.controlled-player.B", "5b", "B"],
+      ["5b.paid-buyback.K0", "5b", "K0"],
+      ["9a.life.K1", "9a", "K1"],
+      ["9d.finish.applied.K4", "9d", "K4"],
+      ["11c.S.B", "11c", "B"],
+      ["11c.N.B", "11c", "B"],
+      ["11c.V.B", "11c", "B"],
+      ["1c.first.K2", "1c", "K2"],
+      ["8-R4.K3", "8-R4", "K3"],
+      ["8-S1.K4", "8-S1", "K4"],
+    ])("accepts native fixture key %s through Local startup", async (key, familyVariant, position) => {
+      const checkpoint = `native-checkpoint:${key}`;
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ version: 1, cases: { [key]: { familyVariant, position, checkpoint } } }),
+      } as Response);
+      const onNoDeck = vi.fn();
+      const mounted = render(
+        <GameProvider gameId="p1-fixture" mode="local" manualFixture={key} onNoDeck={onNoDeck}>
+          <div />
+        </GameProvider>,
+      );
+
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+      const adapter = wasmAdapters[0];
+      expect(fetch).toHaveBeenCalledExactlyOnceWith("/p1-integration-fixtures/trusted-game-states.json");
+      expect(gameStoreState.initGame.mock.calls[0][1]).toBe(adapter);
+      expect(gameStoreState.initGame.mock.calls[0].slice(4)).toEqual([
+        2, undefined, 0, "strict", { kind: "experimentalLocal", checkpoint },
+      ]);
+      await waitFor(() => expect(createGameLoopController).toHaveBeenCalledExactlyOnceWith({ mode: "local", playerCount: 2 }));
+      expect(adapter.localContinuation).toHaveBeenCalledOnce();
+      expect(createLocalContinuationPublisher).toHaveBeenCalledExactlyOnceWith(adapter);
+      expect(localContinuationSubscribe).toHaveBeenCalledExactlyOnceWith(
+        vi.mocked(createLocalContinuationPublisher).mock.results[0].value,
+      );
+      expect(vi.mocked(createGameLoopController).mock.results[0].value.start).toHaveBeenCalledOnce();
+      expect(onNoDeck).not.toHaveBeenCalled();
+      expect(ensureNativeEngine).not.toHaveBeenCalled();
+
+      mounted.unmount();
+      expect(localContinuationUnsubscribe).toHaveBeenCalledOnce();
+      expect(vi.mocked(createGameLoopController).mock.results[0].value.dispose).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ["wrong family", "2a.B", { familyVariant: "1a", position: "B", checkpoint: "checkpoint" }],
+      ["wrong qualified family", "5b.owner.B", { familyVariant: "5c", position: "B", checkpoint: "checkpoint" }],
+      ["wrong position", "1a.B", { familyVariant: "1a", position: "K1", checkpoint: "checkpoint" }],
+      ["wrong qualified position", "9a.life.K1", { familyVariant: "9a", position: "K2", checkpoint: "checkpoint" }],
+      ["unsupported position", "1a.K9", { familyVariant: "1a", position: "K9", checkpoint: "checkpoint" }],
+      ["missing separator", "B", { familyVariant: "B", position: "B", checkpoint: "checkpoint" }],
+      ["empty family", ".B", { familyVariant: "", position: "B", checkpoint: "checkpoint" }],
+      ["empty qualifier", "1a..B", { familyVariant: "1a", position: "B", checkpoint: "checkpoint" }],
+      ["empty first qualifier", "1a..owner.B", { familyVariant: "1a", position: "B", checkpoint: "checkpoint" }],
+      ["empty last qualifier", "1a.owner..B", { familyVariant: "1a", position: "B", checkpoint: "checkpoint" }],
+      ["empty checkpoint", "1a.B", { familyVariant: "1a", position: "B", checkpoint: "" }],
+      ["missing checkpoint", "1a.B", { familyVariant: "1a", position: "B" }],
+      ["wrong checkpoint type", "1a.B", { familyVariant: "1a", position: "B", checkpoint: 1 }],
+      ["missing family", "1a.B", { position: "B", checkpoint: "checkpoint" }],
+      ["wrong family type", "1a.B", { familyVariant: 1, position: "B", checkpoint: "checkpoint" }],
+      ["missing position", "1a.B", { familyVariant: "1a", checkpoint: "checkpoint" }],
+      ["wrong position type", "1a.B", { familyVariant: "1a", position: 1, checkpoint: "checkpoint" }],
+      ["missing case", "1a.B", null],
+      ["wrong case type", "1a.B", "checkpoint"],
+    ])("refuses %s before fixture initialization", async (_label, key, fixture) => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true, json: async () => ({ version: 1, cases: { [key]: fixture } }),
+      } as Response);
+      const onNoDeck = vi.fn();
+      render(<GameProvider gameId="p1-invalid" mode="local" manualFixture={key} onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(onNoDeck).toHaveBeenCalledOnce());
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(localContinuationSubscribe).not.toHaveBeenCalled();
+      expect(createGameLoopController).not.toHaveBeenCalled();
+    });
+
+    it.each(["unknown", "inherited"])("refuses an %s fixture key before initialization", async (kind) => {
+      const key = "1a.owner.B";
+      const fixture = { familyVariant: "1a", position: "B", checkpoint: "checkpoint" };
+      const cases = kind === "inherited" ? Object.create({ [key]: fixture }) : { "1a.B": fixture };
+      vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ version: 1, cases }) } as Response);
+      const onNoDeck = vi.fn();
+      render(<GameProvider gameId="p1-absent" mode="local" manualFixture={key} onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(onNoDeck).toHaveBeenCalledOnce());
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(createGameLoopController).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      null, {}, { version: 2, cases: {} }, { version: "1", cases: {} },
+      { version: 1 }, { version: 1, cases: null }, { version: 1, cases: [] }, { version: 1, cases: "cases" },
+    ])("refuses malformed fixture bundle %j before initialization", async (bundle) => {
+      vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => bundle } as Response);
+      const onNoDeck = vi.fn();
+      render(<GameProvider gameId="p1-bundle" mode="local" manualFixture="1a.B" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(onNoDeck).toHaveBeenCalledOnce());
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(createGameLoopController).not.toHaveBeenCalled();
+    });
+
+    it.each([null, ""])("refuses missing fixture selection %j before fetching", async (manualFixture) => {
+      const onNoDeck = vi.fn();
+      render(<GameProvider gameId="p1-required" mode="local" manualFixture={manualFixture} onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(onNoDeck).toHaveBeenCalledOnce());
+      expect(fetch).not.toHaveBeenCalled();
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    });
+
+    it.each(["ai", "online", "spectate", "p2p-host", "p2p-join"] as const)(
+      "refuses fixture admission in %s mode before fetching",
+      async (mode) => {
+        const onNoDeck = vi.fn();
+        render(<GameProvider gameId="p1-wrong-mode" mode={mode} manualFixture="1a.B" onNoDeck={onNoDeck}><div /></GameProvider>);
+        await waitFor(() => expect(onNoDeck).toHaveBeenCalledOnce());
+        expect(fetch).not.toHaveBeenCalled();
+        expect(gameStoreState.initGame).not.toHaveBeenCalled();
+        expect(ensureNativeEngine).not.toHaveBeenCalled();
+        expect(createGameLoopController).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it.each([

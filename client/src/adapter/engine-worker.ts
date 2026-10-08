@@ -4,6 +4,7 @@
  * The main thread communicates via postMessage with typed request/response messages.
  * This worker owns the authoritative game state — the main thread never loads WASM directly.
  */
+import * as wasmNamespace from "@wasm/engine";
 import init, {
   ping,
   take_last_panic_message,
@@ -64,6 +65,10 @@ import {
   type AiActionProposal,
   type GameAction,
   type GameEvent,
+  type LocalCapture,
+  type LocalOriginalAttempt,
+  type LocalContinuationEnvelope,
+  type LocalContinuationResult,
 } from "./types";
 import type {
   InteractionPreviewRequest,
@@ -97,8 +102,11 @@ type EngineRequest =
       playerCount?: number;
       firstPlayer?: number;
     }
+  | { type: "initializeExperimentalLocalGame"; id: number; deckData?: unknown; seed?: number;
+      formatConfig?: unknown; matchConfig?: unknown; playerCount?: number; firstPlayer?: number; trustedCheckpoint?: string }
+  | { type: "experimentalLocalActor"; id: number }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
-  | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
+  | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission | LocalContinuationEnvelope }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
@@ -106,7 +114,7 @@ type EngineRequest =
   | { type: "getLegalActions"; id: number }
   | { type: "getSnapshot"; id: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
-  | { type: "getViewerSnapshot"; id: number; viewerId: number }
+  | { type: "getViewerSnapshot"; id: number; viewerId: number; localContinuation?: true }
   | { type: "getViewerTransitionSnapshot"; id: number; viewerId: number; events: GameEvent[] }
   | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
   | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
@@ -177,6 +185,80 @@ type EngineResponse =
 // ── State ────────────────────────────────────────────────────────────────
 
 let cardDbLoaded = false;
+let localContext: LocalCapture | null = null;
+let localLifecycle = 0;
+let localFrameSequence = 0;
+let localPending: LocalOriginalAttempt | null = null;
+const localApplies = new Map<string, { lifecycle: number; waiters: { id: number; done: () => void }[] }>();
+
+function invalidateLocal(): void {
+  localLifecycle += 1;
+  localContext = null;
+  localPending = null;
+  localFrameSequence = 0;
+}
+
+function committedResult(id: number, data: Record<string, unknown>, revoke = false): void {
+  if (revoke) invalidateLocal();
+  if (localContext) localFrameSequence += 1;
+  result(id, data);
+}
+
+function isLocalEnvelope(submission: InteractionSubmission | LocalContinuationEnvelope): submission is LocalContinuationEnvelope {
+  return "type" in submission && submission.type === "localContinuation";
+}
+
+function localOutcome(id: number, outcome: unknown, restored = false): LocalContinuationResult | null {
+  if (typeof outcome === "string") { error(id, outcome); return null; }
+  if (isActionOutcome(outcome)) {
+    if (outcome.status === "rejected") rejectionError(id, outcome.rejection);
+    else malformedOutcomeError(id);
+    return null;
+  }
+  if (outcome === null || typeof outcome !== "object" || !("type" in outcome) || outcome.type !== "localContinuation") {
+    malformedOutcomeError(id); return null;
+  }
+  const reply = outcome as LocalContinuationResult;
+  if (restored) { localLifecycle += 1; localPending = null; }
+  if (localContext && (restored || reply.appliedResult)) localFrameSequence += 1;
+  if (reply.current) {
+    reply.current.frameSequence = localFrameSequence;
+    localContext = reply.current.context;
+  }
+  if (reply.receipt?.status === "pending") localPending = reply.receipt.attempt;
+  else if (reply.receipt && reply.receipt.status !== "indeterminate"
+    && localPending && JSON.stringify(localPending) === JSON.stringify(reply.receipt.attempt)) localPending = null;
+  result(id, reply);
+  return reply;
+}
+
+function queueLocalApply(msg: Extract<EngineRequest, { type: "submitInteraction" }>, envelope: Extract<LocalContinuationEnvelope, { attempt: LocalOriginalAttempt }>): Promise<void> {
+  const lookup = submit_interaction_js(msg.actor, { ...envelope, operation: "lookup" }) as unknown;
+  if (lookup === null || typeof lookup !== "object" || !("type" in lookup) || lookup.type !== "localContinuation"
+    || (lookup as LocalContinuationResult).receipt?.status !== "pending") {
+    localOutcome(msg.id, lookup);
+    return Promise.resolve();
+  }
+  const key = `${envelope.attempt.context.ownerLineage}:${envelope.attempt.attemptId}`;
+  return new Promise((done) => {
+    const existing = localApplies.get(key);
+    if (existing) { existing.waiters.push({ id: msg.id, done }); return; }
+    const queued = { lifecycle: localLifecycle, waiters: [{ id: msg.id, done }] };
+    localApplies.set(key, queued);
+    queueMicrotask(() => {
+      localApplies.delete(key);
+      // The exact closure is fenced before any native call. Native custody
+      // independently checks the immutable original and current private owner.
+      for (const waiter of queued.waiters) {
+        try {
+          if (queued.lifecycle !== localLifecycle) error(waiter.id, "Local continuation lifecycle changed");
+          else localOutcome(waiter.id, submit_interaction_js(msg.actor, envelope));
+        } catch (failure) { error(waiter.id, failure instanceof Error ? failure.message : String(failure)); }
+        waiter.done();
+      }
+    });
+  });
+}
 
 function respond(msg: EngineResponse): void {
   self.postMessage(msg);
@@ -228,13 +310,17 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
   const msg = e.data;
 
   try {
+    const blocked = localPending && ["submitAction", "submitAiActionProposal", "resumeRestoredGameState", "loadCardDb", "loadCardDbFromUrl"].includes(msg.type);
+    if (blocked) { error(msg.id, "Local continuation pending"); return; }
     switch (msg.type) {
       case "init": {
+        const lifecycle = localLifecycle;
         if (__ENGINE_WASM_URL__) {
           await init({ module_or_path: __ENGINE_WASM_URL__ });
         } else {
           await init();
         }
+        if (lifecycle !== localLifecycle) throw new Error("Local continuation lifecycle changed");
         result(msg.id, null);
         break;
       }
@@ -247,12 +333,14 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "loadCardDbFromUrl": {
+        const lifecycle = localLifecycle;
         const resp = await fetch(__CARD_DATA_URL__);
         if (!resp.ok)
           throw new Error(
             `Failed to load card-data.json (${resp.status})`,
           );
         const text = await resp.text();
+        if (lifecycle !== localLifecycle || localPending) throw new Error("Local continuation lifecycle changed");
         const count = load_card_database(text);
         cardDbLoaded = true;
         result(msg.id, count);
@@ -329,6 +417,46 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "initializeExperimentalLocalGame": {
+        const allowed = new Set(["type", "id", "deckData", "seed", "formatConfig", "matchConfig", "playerCount", "firstPlayer", "trustedCheckpoint"]);
+        if (Array.isArray(msg) || (Object.getPrototypeOf(msg) !== null && Object.getPrototypeOf(msg) !== Object.prototype)
+          || Reflect.ownKeys(msg).some((key) => typeof key !== "string" || !allowed.has(key))) {
+          error(msg.id, "Invalid experimental Local request");
+          break;
+        }
+        const namespace = wasmNamespace as unknown as Record<string, unknown>;
+        const bootstrap = namespace.initialize_experimental_local_game;
+        if (typeof bootstrap !== "function") {
+          error(msg.id, "Experimental Local bootstrap unavailable");
+          break;
+        }
+        if (!cardDbLoaded && msg.deckData) {
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
+          break;
+        }
+        const request: Record<string, unknown> = { ...msg };
+        delete request.type;
+        delete request.id;
+        const gameResult = bootstrap(request);
+        const failure = classifyInitFailure(gameResult);
+        if (failure) {
+          initFailureError(msg.id, failure);
+          break;
+        }
+        invalidateLocal();
+        localContext = gameResult.localContinuationContext ?? null;
+        if (localContext) localFrameSequence = 1;
+        result(msg.id, { events: gameResult.events ?? [], log_entries: gameResult.log_entries ?? [], localContinuationContext: localContext,
+          ...(localContext ? { frameSequence: localFrameSequence } : {}) });
+        break;
+      }
+
+      case "experimentalLocalActor": {
+        const verify = (wasmNamespace as unknown as Record<string, unknown>).experimental_local_actor;
+        result(msg.id, typeof verify === "function" && verify() === 0 ? 0 : null);
+        break;
+      }
+
       case "initializeGame": {
         if (!cardDbLoaded && msg.deckData) {
           error(
@@ -350,10 +478,10 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           initFailureError(msg.id, failure);
           break;
         }
-        result(msg.id, {
+        committedResult(msg.id, {
           events: gameResult.events ?? [],
           log_entries: gameResult.log_entries ?? [],
-        });
+        }, true);
         break;
       }
 
@@ -381,10 +509,10 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           initFailureError(msg.id, failure);
           break;
         }
-        result(msg.id, {
+        committedResult(msg.id, {
           events: gameResult.events ?? [],
           log_entries: gameResult.log_entries ?? [],
-        });
+        }, true);
         break;
       }
 
@@ -406,7 +534,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
-        result(msg.id, {
+        committedResult(msg.id, {
           events: actionResult.events ?? [],
           log_entries: actionResult.log_entries ?? [],
         });
@@ -414,6 +542,15 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitInteraction": {
+        if (isLocalEnvelope(msg.submission)) {
+          if (msg.submission.operation === "apply") {
+            await queueLocalApply(msg, msg.submission);
+          } else {
+            localOutcome(msg.id, submit_interaction_js(msg.actor, msg.submission), msg.submission.operation === "restore");
+          }
+          break;
+        }
+        if (localPending) { error(msg.id, "Local continuation pending"); break; }
         const outcome = submit_interaction_js(msg.actor, msg.submission);
         if (typeof outcome === "string") {
           error(msg.id, outcome);
@@ -428,7 +565,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
-        result(msg.id, {
+        committedResult(msg.id, {
           events: actionResult.events ?? [],
           log_entries: actionResult.log_entries ?? [],
         });
@@ -541,7 +678,14 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           error(msg.id, "NOT_INITIALIZED: get_viewer_snapshot_js returned null");
           break;
         }
-        result(msg.id, r);
+        if (msg.localContinuation) {
+          const verify = (wasmNamespace as unknown as Record<string, unknown>).experimental_local_actor;
+          if (!localContext || msg.viewerId !== 0 || typeof verify !== "function" || verify() !== 0) {
+            error(msg.id, "Authenticated Local continuation unavailable"); break;
+          }
+          result(msg.id, { type: "localContinuation", receipt: null, appliedResult: null,
+            current: { context: localContext, frameSequence: localFrameSequence, snapshot: { ...r, events: [] } } });
+        } else result(msg.id, r);
         break;
       }
 
@@ -641,18 +785,21 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           msg.proposal.actor,
           msg.proposal.action,
         );
+        if (localContext && outcome?.status === "applied") localFrameSequence += 1;
         result(msg.id, outcome);
         break;
       }
 
       case "restoreState": {
         restore_game_state(msg.stateJson);
+        invalidateLocal();
         result(msg.id, null);
         break;
       }
 
       case "resumeRestoredGameState": {
         const presentation = resume_restored_game_state();
+        if (localContext && presentation.outcome !== "noop") localFrameSequence += 1;
         result(msg.id, {
           presentation,
           snapshot: {
@@ -665,6 +812,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "resumeMultiplayerHostState": {
         const presentation = resume_multiplayer_host_state(msg.stateJson);
+        invalidateLocal();
         result(msg.id, {
           presentation,
           snapshot: {
@@ -683,12 +831,14 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "resetGame": {
         clear_game_state();
+        invalidateLocal();
         result(msg.id, null);
         break;
       }
 
       case "setMultiplayerMode": {
         set_multiplayer_mode(msg.enabled);
+        if (msg.enabled) invalidateLocal();
         result(msg.id, null);
         break;
       }

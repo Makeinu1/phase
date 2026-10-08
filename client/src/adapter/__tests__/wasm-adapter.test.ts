@@ -13,6 +13,11 @@ import { EngineWorkerClient } from "../engine-worker-client";
 import type {
   InteractionPreview,
   InteractionPreviewRequest,
+  InteractionChoiceId,
+  InteractionId,
+  InteractionSessionId,
+  InteractionSubmission,
+  ManualResolutionSource,
 } from "../generated/interaction";
 import type {
   AiActionProposal,
@@ -20,9 +25,14 @@ import type {
   EngineAdapter,
   GameEvent,
   SubmitResult,
+  LocalCapture,
+  LocalOriginalAttempt,
+  LocalContinuationEnvelope,
+  LocalContinuationResult,
 } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState, gameStateFactory } from "../../test/factories/gameStateFactory";
+import { useGameStore } from "../../stores/gameStore";
 
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
@@ -75,6 +85,8 @@ const mockWorkerClient = {
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   canonicalCardNames: vi.fn().mockResolvedValue([]),
+  initializeExperimentalLocalGame: vi.fn().mockResolvedValue({ events: [], log_entries: [] }),
+  experimentalLocalActor: vi.fn().mockResolvedValue(0),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -82,6 +94,8 @@ const mockWorkerClient = {
     .fn()
     .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
   submitInteraction: vi.fn().mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  submitLocalContinuation: vi.fn(),
+  readLocalCurrent: vi.fn(),
   previewManaPayment: vi.fn().mockResolvedValue([]),
   previewInteraction: vi.fn(),
   resolveAll: vi.fn().mockResolvedValue({ items_resolved: 0 }),
@@ -98,6 +112,7 @@ const mockWorkerClient = {
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+  getSnapshot: vi.fn(),
   getViewerTransitionSnapshot: vi.fn(),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
@@ -1372,7 +1387,7 @@ describe("WasmAdapter.previewInteraction", () => {
 /** Every `type` literal `EngineWorkerClient` posts through `request()`, typed or untyped. */
 function postedMessageTypes(source: string): string[] {
   return Array.from(
-    source.matchAll(/this\.request\b[^(]*\(\s*\{\s*type:\s*"([A-Za-z0-9_]+)"/g),
+    source.matchAll(/this\.request\b[^(]*\(\s*\{\s*(?:\.\.\.\s*[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)?type:\s*"([A-Za-z0-9_]+)"/g),
     (m) => m[1],
   );
 }
@@ -1436,6 +1451,8 @@ describe("worker message lockstep", () => {
     expect(verdict.walkedAll).toBe(true);
     expect(verdict.reach).toEqual(["previewInteraction", "submitInteraction"]);
     expect(verdict.missing).toEqual([]);
+    expect(postedMessageTypes(clientSource)).toContain("initializeExperimentalLocalGame");
+    expect(handledMessageTypes(workerSource)).toContain("initializeExperimentalLocalGame");
   });
 
   const handledFirst = handledMessageTypes(workerSource)[0];
@@ -1453,30 +1470,43 @@ describe("worker message lockstep", () => {
   it.each([
     [
       "a worker case misspelled relative to the posted literal",
-      () => ({
-        client: clientSource,
-        worker: workerSource.replace(`case "${handledFirst}":`, `case "${handledFirst}Xx":`),
-      }),
+      () => {
+        expect(postedMessageTypes(clientSource)).toContain("initializeExperimentalLocalGame");
+        expect(handledMessageTypes(workerSource)).toContain("initializeExperimentalLocalGame");
+        return {
+          client: clientSource,
+          worker: workerSource.replace('case "initializeExperimentalLocalGame":', 'case "initializeExperimentalLocalGameXx":'),
+          walkedAll: true,
+          missing: ["initializeExperimentalLocalGame"],
+        };
+      },
     ],
     [
       "an untyped post with no worker case",
       () => ({
         client: `${clientSource}\nvoid this.request({ type: "ghostUntypedMessage" });\n`,
         worker: workerSource,
+        walkedAll: true,
+        missing: ["ghostUntypedMessage"],
       }),
     ],
     [
       "a posted type equal to a case in an unrelated switch",
-      () => ({
-        client: `${clientSource}\nvoid this.request<void>({ type: "${outsideDispatch}" });\n`,
-        worker: workerSource,
-      }),
+      () => {
+        expect(outsideDispatch).toBeDefined();
+        expect(handledMessageTypes(workerSource)).not.toContain(outsideDispatch);
+        return {
+          client: `${clientSource}\nvoid this.request<void>({ type: "${outsideDispatch}" });\n`,
+          worker: workerSource,
+          walkedAll: true,
+          missing: [outsideDispatch],
+        };
+      },
     ],
     [
       "a case reachable only inside a nested switch",
-      () => ({
-        client: `${clientSource}\nvoid this.request<void>({ type: "nestedGhost" });\n`,
-        worker: insertIntoDispatchBody(
+      () => {
+        const worker = insertIntoDispatchBody(
           workerSource,
           [
             "",
@@ -1489,33 +1519,62 @@ describe("worker message lockstep", () => {
             "        break;",
             "      }",
           ].join("\n"),
-        ),
-      }),
+        );
+        expect(handledMessageTypes(worker)).toContain("nestedGhostOuter");
+        expect(handledMessageTypes(worker)).not.toContain("nestedGhost");
+        return {
+          client: `${clientSource}\nvoid this.request<void>({ type: "nestedGhost" });\n`,
+          worker,
+          walkedAll: true,
+          missing: ["nestedGhost"],
+        };
+      },
     ],
     [
       "a request call site the extractor cannot read",
-      () => ({
-        client: `${clientSource}\nvoid this.request<void>(unreadableMessage);\n`,
-        worker: workerSource,
-      }),
+      () => {
+        const client = `${clientSource}\nvoid this.request<void>(unreadableMessage);\n`;
+        expect(postedMessageTypes(client)).toEqual(postedMessageTypes(clientSource));
+        expect(requestCallSites(client)).toBe(requestCallSites(clientSource) + 1);
+        const singleSpread = `${clientSource}\nvoid this.request<void>({ ...payload, type: "previewInteraction" });\n`;
+        expect(lockstepVerdict(singleSpread, workerSource)).toEqual({
+          walkedAll: true, reach: ["previewInteraction", "submitInteraction"], missing: [],
+        });
+        const multipleSpreads = `${clientSource}\nvoid this.request<void>({ ...payload, ...extra, type: "previewInteraction" });\n`;
+        expect(postedMessageTypes(multipleSpreads)).toEqual(postedMessageTypes(clientSource));
+        expect(requestCallSites(multipleSpreads)).toBe(requestCallSites(clientSource) + 1);
+        const multipleVerdict = lockstepVerdict(multipleSpreads, workerSource);
+        expect(multipleVerdict).toEqual({
+          walkedAll: false, reach: ["previewInteraction", "submitInteraction"], missing: [],
+        });
+        expect(isGreen(multipleVerdict)).toBe(false);
+        return { client, worker: workerSource, walkedAll: false, missing: [] };
+      },
     ],
     [
       "a request-prefixed identifier paired with an unreadable call site",
-      () => ({
-        client:
+      () => {
+        const client =
           `${clientSource}\n` +
           `this.requestQueue.push({ type: "${handledFirst}" });\n` +
-          `void this.request<void>(hiddenMessage);\n`,
-        worker: workerSource,
-      }),
+          `void this.request<void>(hiddenMessage);\n`;
+        expect(postedMessageTypes(client)).toEqual(postedMessageTypes(clientSource));
+        expect(requestCallSites(client)).toBe(requestCallSites(clientSource) + 1);
+        return { client, worker: workerSource, walkedAll: false, missing: [] };
+      },
     ],
   ])("refuses %s", (_name, mutate) => {
-    const { client, worker } = mutate();
+    const { client, worker, walkedAll, missing } = mutate();
 
     // A mutation that changed nothing would pass as a silent no-op, so the control asserts it
     // landed before it asserts what it produced.
     expect(client !== clientSource || worker !== workerSource).toBe(true);
-    expect(isGreen(lockstepVerdict(client, worker))).toBe(false);
+    const verdict = lockstepVerdict(client, worker);
+    expect(verdict.reach).toEqual(["previewInteraction", "submitInteraction"]);
+    expect(verdict.walkedAll).toBe(walkedAll);
+    expect(verdict.missing).toEqual(missing);
+    for (const type of missing) expect(postedMessageTypes(client)).toContain(type);
+    expect(isGreen(verdict)).toBe(false);
   });
 });
 
@@ -1598,5 +1657,457 @@ describe("worker preview envelope", () => {
 
     await expect(pending).resolves.toEqual(answer);
     client.dispose();
+  });
+});
+
+
+describe("WasmAdapter experimental Local ownership", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWorkerClient.initializeExperimentalLocalGame.mockResolvedValue({ events: [], log_entries: [] });
+    mockWorkerClient.experimentalLocalActor.mockResolvedValue(0);
+    mockWorkerClient.initializeGame.mockResolvedValue({ events: [], log_entries: [] });
+  });
+  it("requires successful bootstrap and native verification on the retained Worker", async () => {
+    const adapter = new WasmAdapter(); await adapter.initialize();
+    await expect(adapter.experimentalLocalActor()).resolves.toBeNull();
+    await adapter.initializeExperimentalLocalGame({ seed: 42 });
+    expect(mockWorkerClient.initializeExperimentalLocalGame).toHaveBeenCalledWith({ seed: 42 });
+    await expect(adapter.experimentalLocalActor()).resolves.toBe(0);
+    mockWorkerClient.experimentalLocalActor.mockResolvedValueOnce(null as unknown as number);
+    await expect(adapter.initializeExperimentalLocalGame({ seed: 43 })).rejects.toThrow("admission unavailable");
+    await expect(adapter.experimentalLocalActor()).resolves.toBeNull(); adapter.dispose();
+  });
+  it("preserves failed bootstrap ownership and revokes successful ordinary supersession", async () => {
+    const adapter = new WasmAdapter(); await adapter.initialize(); await adapter.initializeExperimentalLocalGame({ seed: 42 });
+    mockWorkerClient.initializeExperimentalLocalGame.mockRejectedValueOnce(new Error("refused"));
+    await expect(adapter.initializeExperimentalLocalGame({ seed: 43 })).rejects.toThrow("refused");
+    await expect(adapter.experimentalLocalActor()).resolves.toBe(0);
+    await adapter.initializeGame(); await expect(adapter.experimentalLocalActor()).resolves.toBeNull(); adapter.dispose();
+  });
+  it("rejects caller extras and envelope fields before any bootstrap", async () => {
+    const adapter = new WasmAdapter(); await adapter.initialize();
+    for (const key of ["type", "id", "actor", "authenticatedActor", "owner", "session", "ticket", "enrollment", "worker", "unknown"]) {
+      await expect(adapter.initializeExperimentalLocalGame({ seed: 42, [key]: 0 })).rejects.toThrow("Invalid experimental Local request");
+    }
+    for (const request of [new Date(), new Map(), new (class {})()]) {
+      await expect(adapter.initializeExperimentalLocalGame(request as never)).rejects.toThrow("Invalid experimental Local request");
+    }
+    expect(mockWorkerClient.initializeExperimentalLocalGame).not.toHaveBeenCalled(); adapter.dispose();
+  });
+  it("loads the typed CardDB and passes startup checkpoint once to the admitted initializer", async () => {
+    const adapter = new WasmAdapter(); await adapter.initialize();
+    const request = { seed: 42, trustedCheckpoint: '{"state":{},"precast_shortcut_runtime":null}' };
+    await adapter.initializeExperimentalLocalGame(request);
+    expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+    expect(mockWorkerClient.initializeExperimentalLocalGame).toHaveBeenCalledExactlyOnceWith(request);
+    expect(mockWorkerClient.restoreState).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+  it("refuses the main-thread fallback before calling experimental WASM", async () => {
+    vi.mocked(EngineWorkerClient).mockImplementationOnce(() => { throw new Error("worker unavailable"); });
+    const adapter = new WasmAdapter(); await adapter.initialize();
+    await expect(adapter.initializeExperimentalLocalGame({ seed: 42 })).rejects.toThrow("dedicated Worker");
+    await expect(adapter.experimentalLocalActor()).resolves.toBeNull();
+    expect(mockWorkerClient.initializeExperimentalLocalGame).not.toHaveBeenCalled(); adapter.dispose();
+  });
+});
+
+describe("WasmAdapter Local continuation original receipts (mock Worker client)", () => {
+  const context: LocalCapture = { ownerLineage: "owner.fixture", interactionSessionId: "session.fixture" as InteractionSessionId, restoreEpoch: 0, adapterGeneration: 0 };
+  const source: ManualResolutionSource = { actor: 0, sourceId: 40, sourceIncarnation: 2, stackEntryId: 44, castTurnJournalIndex: 0, cardId: 1, name: "Fixture" };
+  const submission = (frame: string): InteractionSubmission => ({ interactionId: frame as InteractionId,
+    response: { type: "manualResolution", data: { decision: { type: "loseOwnLife", data: { amount: 1 } } } } });
+  const frame = (life: number, frameSequence: number, capture = context): LocalContinuationResult["current"] => {
+    const state = buildGameState(); state.players[0]!.life = life;
+    state.derived = { ...state.derived, manual_resolution: { source, phase: "open", interactionId: "frame.1" as InteractionId, minLifeLoss: 1, maxLifeLoss: life } };
+    return { context: capture, frameSequence, snapshot: { state, actions: [], autoPassRecommended: false, events: [],
+      viewerInteraction: { actor: 0, opportunities: [{ interactionId: "frame.1" as InteractionId, response: { type: "schema", data: { candidates: [] } } }] } as never } };
+  };
+  const response = (attempt: LocalOriginalAttempt | null, status: "pending" | "completed", life: number, sequence: number, applied = false, capture = context, result: SubmitResult = { events: [], log_entries: [] }): LocalContinuationResult => ({
+    type: "localContinuation", receipt: attempt ? { attempt, status, result: status === "completed" ? result : null, rejection: null } : null,
+    current: frame(life, sequence, capture), appliedResult: applied ? result : null,
+  });
+  const lossResult = (total: number): SubmitResult => ({
+    events: [{ type: "LifeChanged", data: { player_id: 0, amount: -1, new_total: total } }],
+    log_entries: [{ seq: 0, turn: 1, phase: "PreCombatMain", category: "Life", segments: [{ type: "Number", value: total }] }],
+  });
+  async function admitted() {
+    const adapter = new WasmAdapter(); await adapter.initialize(); await adapter.initializeExperimentalLocalGame({ seed: 42 });
+    const capability = adapter.localContinuation()!; await capability.readCurrent(); return { adapter, capability };
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWorkerClient.initializeExperimentalLocalGame.mockResolvedValue({ events: [], log_entries: [], localContinuationContext: context });
+    mockWorkerClient.experimentalLocalActor.mockResolvedValue(0);
+    mockWorkerClient.readLocalCurrent.mockResolvedValue(response(null, "completed", 20, 1));
+    mockWorkerClient.submitLocalContinuation.mockReset();
+    useGameStore.setState({ gameState: null, lastCommittedSeq: 0, eventHistory: [], logHistory: [], nextLogSeq: 0 });
+  });
+
+  const retainPublications = (capability: NonNullable<ReturnType<WasmAdapter["localContinuation"]>>) => capability.subscribe((publication) => {
+    if (!publication.engineSnapshot || !publication.current) return;
+    useGameStore.getState().commitEngineSnapshot(publication.engineSnapshot, {
+      events: publication.appliedResult?.events ?? [],
+      logEntries: publication.appliedResult?.log_entries ?? [],
+    });
+  });
+
+  it.each(["life", "finish"] as const)("looks up the retained hand cast after a watchdog snapshot clears it and a later %s attempt becomes unresolved", async (operation) => {
+    const handSource = { ...source, stackEntryId: null, castTurnJournalIndex: null };
+    const handInput: InteractionSubmission = { interactionId: "hand.frame" as InteractionId,
+      response: { type: "choose", data: { choiceId: "manual.hand.choice" as InteractionChoiceId } } };
+    const bodyInput: InteractionSubmission = operation === "life" ? submission("body.frame")
+      : { interactionId: "body.frame" as InteractionId, response: { type: "manualResolution",
+        data: { decision: { type: "finish", data: { choiceId: "finish.choice" as InteractionChoiceId } } } } };
+    let hand!: LocalOriginalAttempt;
+    let body!: LocalOriginalAttempt;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      if (envelope.attempt.submission.interactionId === handInput.interactionId) hand ??= envelope.attempt;
+      else body ??= envelope.attempt;
+      if (envelope.operation === "register") return response(envelope.attempt, "pending", 20, 1);
+      if (envelope.operation === "apply") throw new Error("ACK lost after application");
+      return response(envelope.attempt, "completed", body ? 19 : 20, body ? 3 : 2);
+    });
+    const { adapter, capability } = await admitted();
+    expect((await capability.submitInteraction(handInput, handSource)).receipt?.status).toBe("indeterminate");
+    expect((await adapter.getSnapshot()).state.players[0]!.life).toBe(20);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.at(-1)![1]).toMatchObject({ operation: "lookup", attempt: hand });
+    expect((await capability.readCurrent()).receipt).toBeNull();
+    expect((await capability.submitInteraction(bodyInput, source)).receipt?.status).toBe("indeterminate");
+    const recovered = await capability.lookupInteraction(handInput);
+    expect(recovered.receipt?.attempt).toBe(hand);
+    expect(recovered.receipt?.status).toBe("completed");
+    expect(recovered.engineSnapshot!.state.players[0]!.life).toBe(19);
+    expect(recovered.appliedResult).toBeNull();
+    // Historical hand lookup must neither select nor clear the body request.
+    expect((await capability.readCurrent()).receipt?.attempt).toBe(body);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.filter(([, envelope]) => envelope.operation === "apply")).toHaveLength(2);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual([
+      "register", "apply", "lookup", "register", "apply", "lookup", "lookup",
+    ]);
+    adapter.dispose();
+  });
+
+  it("does not capture a missing submission or accept a different receipt during exact lookup", async () => {
+    let original!: LocalOriginalAttempt;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      if (envelope.operation === "register") return response(original, "pending", 20, 1);
+      if (envelope.operation === "apply") throw new Error("ACK lost");
+      return response({ ...original, attemptId: "different-original" }, "completed", 19, 2, false, context, lossResult(19));
+    });
+    const { adapter, capability } = await admitted();
+    const input = submission("frame.1");
+    await capability.submitInteraction(input, source);
+    const callsBeforeLookup = mockWorkerClient.submitLocalContinuation.mock.calls.length;
+    expect((await capability.lookupInteraction({ ...input })).receipt).toBeNull();
+    expect(mockWorkerClient.submitLocalContinuation).toHaveBeenCalledTimes(callsBeforeLookup);
+    const wrongReceipt = await capability.lookupInteraction(input);
+    expect(wrongReceipt.receipt).toMatchObject({ attempt: original, status: "indeterminate" });
+    expect(wrongReceipt.appliedResult).toBeNull();
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.at(-1)![1]).toEqual({ type: "localContinuation", operation: "lookup", attempt: original });
+    adapter.dispose();
+  });
+
+  it("keeps exact hand lookup historical after trusted rekey and unknown after revocation and new admission", async () => {
+    const input: InteractionSubmission = { interactionId: "hand.frame" as InteractionId,
+      response: { type: "choose", data: { choiceId: "manual.hand.choice" as InteractionChoiceId } } };
+    const nextContext = { ...context, interactionSessionId: "session.restored" as InteractionSessionId, restoreEpoch: 1, adapterGeneration: 1 };
+    let original!: LocalOriginalAttempt;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") return response(null, "completed", 18, 3, false, nextContext);
+      original ??= envelope.attempt;
+      if (envelope.operation === "register") return response(envelope.attempt, "pending", 20, 1);
+      if (envelope.operation === "apply") throw new Error("ACK lost");
+      return response(envelope.attempt, "completed", 18, 3, false, nextContext, lossResult(19));
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    await capability.submitInteraction(input, { ...source, stackEntryId: null, castTurnJournalIndex: null });
+    await capability.restore("trusted.fixture");
+    const historical = await capability.lookupInteraction(input);
+    expect(historical.receipt?.attempt).toBe(original);
+    expect(historical.receipt?.status).toBe("completed");
+    expect(historical.engineSnapshot!.state.players[0]!.life).toBe(18);
+    expect(historical.appliedResult).toBeNull();
+    expect(original.context).toEqual(context);
+    expect(useGameStore.getState().eventHistory).toHaveLength(0);
+    expect(useGameStore.getState().logHistory).toHaveLength(0);
+    await adapter.restoreState(buildGameState());
+    await adapter.initializeExperimentalLocalGame({ seed: 42 });
+    const replacement = adapter.localContinuation()!;
+    expect(replacement).not.toBe(capability);
+    const callsBeforeLookup = mockWorkerClient.submitLocalContinuation.mock.calls.length;
+    const revoked = await capability.lookupInteraction(input);
+    expect(revoked.receipt).toMatchObject({ attempt: original, status: "indeterminate" });
+    expect(revoked.current).toBeNull();
+    expect((await replacement.lookupInteraction(input)).receipt).toBeNull();
+    expect(mockWorkerClient.submitLocalContinuation).toHaveBeenCalledTimes(callsBeforeLookup);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("reconciles an ACK-lost cast or body submission by exact original lookup without sending apply again", async () => {
+    let original!: LocalOriginalAttempt;
+    let applications = 0;
+    const result = lossResult(19);
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      if (envelope.operation === "apply") { applications += 1; throw new Error("ACK lost after application"); }
+      return response(envelope.attempt, applications === 0 ? "pending" : "completed", applications === 0 ? 20 : 19, applications === 0 ? 1 : 2, false, context, result);
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    const input = submission("frame.1");
+    expect((await capability.submitInteraction(input, source)).receipt?.status).toBe("indeterminate");
+    expect(original.submission).toEqual(input); expect(original.submission).not.toBe(input);
+    expect(Object.isFrozen(original.context)).toBe(true);
+    const [recovered, duplicateLookup] = await Promise.all([capability.readCurrent(), capability.readCurrent()]);
+    expect(recovered.receipt?.status).toBe("completed");
+    expect(recovered.engineSnapshot?.state.players[0]!.life).toBe(19);
+    expect(recovered.appliedResult).toEqual(result);
+    expect(duplicateLookup.appliedResult).toBeNull();
+    expect((await capability.submitInteraction(input, source)).appliedResult).toBeNull();
+    expect(useGameStore.getState().eventHistory).toEqual(result.events);
+    expect(useGameStore.getState().logHistory).toHaveLength(1);
+    expect(useGameStore.getState().gameState!.players[0]!.life).toBe(19);
+    expect(applications).toBe(1);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "apply", "lookup", "lookup", "register"]);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.every(([actor, envelope]) => actor === 0 && envelope.attempt === original)).toBe(true);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("keeps the current frame when a delayed original receipt repeats an already observed older sequence", async () => {
+    let release!: (reply: LocalContinuationResult) => void;
+    let first!: LocalOriginalAttempt;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      first ??= envelope.attempt;
+      if (envelope.operation === "register") return response(envelope.attempt, "pending", envelope.attempt === first ? 20 : 19, envelope.attempt === first ? 1 : 2);
+      if (envelope.operation === "lookup") return response(first, "completed", 19, 2);
+      if (envelope.attempt === first) return new Promise<LocalContinuationResult>((resolve) => { release = resolve; });
+      return response(envelope.attempt, "completed", 18, 3, true);
+    });
+    const { adapter, capability } = await admitted();
+    const delayed = capability.submitInteraction(submission("frame.1"), source);
+    await Promise.resolve(); await Promise.resolve();
+    const firstReceipt = await capability.readCurrent();
+    const second = await capability.submitInteraction(submission("frame.2"), source);
+    release(response(first, "completed", 19, 2, true));
+    const historical = await delayed;
+    expect(firstReceipt.engineSnapshot!.seq).toBeLessThan(second.engineSnapshot!.seq);
+    expect(historical.engineSnapshot!.seq).toBe(second.engineSnapshot!.seq);
+    expect(historical.engineSnapshot!.state.players[0]!.life).toBe(18);
+    expect(historical.receipt?.attempt).toBe(first);
+    expect(historical.receipt?.status).toBe("completed");
+    expect(historical.appliedResult).toBeNull();
+    expect(second.engineSnapshot!.state.players[0]!.life).toBe(18);
+    adapter.dispose();
+  });
+
+  it("keeps Local frame retention finite through many revisions and repeats only the latest stamp", async () => {
+    const { adapter, capability } = await admitted();
+    const retainedMapEntries = () => Object.values(adapter).reduce((count, value) => count + (value instanceof Map ? value.size : 0), 0);
+    const baselineEntries = retainedMapEntries();
+    let latest = (await capability.readCurrent()).engineSnapshot!;
+    for (let sequence = 2; sequence <= 512; sequence += 1) {
+      mockWorkerClient.readLocalCurrent.mockResolvedValueOnce(response(null, "completed", 18, sequence));
+      const next = await adapter.getSnapshot();
+      expect(next.seq).toBeGreaterThan(latest.seq);
+      latest = next;
+    }
+    expect(retainedMapEntries()).toBe(baselineEntries);
+    mockWorkerClient.readLocalCurrent.mockResolvedValueOnce(response(null, "completed", 18, 512));
+    expect((await adapter.getSnapshot()).seq).toBe(latest.seq);
+    mockWorkerClient.readLocalCurrent.mockResolvedValueOnce(response(null, "completed", 20, 1));
+    expect(await adapter.getSnapshot()).toEqual(latest);
+    expect(mockWorkerClient.submitLocalContinuation).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("keeps ordinary arrival stamps fresh without retaining or consulting Local frame history", async () => {
+    const { adapter, capability } = await admitted();
+    mockWorkerClient.readLocalCurrent.mockResolvedValueOnce(response(null, "completed", 18, 1000));
+    const local = await adapter.getSnapshot();
+    await adapter.initializeGame();
+    const baselineEntries = Object.values(adapter).reduce((count, value) => count + (value instanceof Map ? value.size : 0), 0);
+    let latest = local.seq;
+    for (let index = 0; index < 512; index += 1) {
+      // Even an older Worker still supplying an incidental authority stamp
+      // must not change the ordinary arrival-order contract.
+      mockWorkerClient.getSnapshot.mockResolvedValueOnce({ state: buildGameState(), legalResult: { actions: [] }, frameSequence: index % 2 });
+      const snapshot = await adapter.getSnapshot();
+      expect(snapshot.seq).toBeGreaterThan(latest);
+      latest = snapshot.seq;
+    }
+    expect(Object.values(adapter).reduce((count, value) => count + (value instanceof Map ? value.size : 0), 0)).toBe(baselineEntries);
+    await expect(capability.readCurrent()).rejects.toThrow("unavailable");
+    // A different admission can start its private authority counter at one.
+    await adapter.initializeExperimentalLocalGame({ seed: 43 });
+    const replacement = adapter.localContinuation()!;
+    expect(replacement).not.toBe(capability);
+    const first = (await replacement.readCurrent()).engineSnapshot!;
+    expect(first.state.players[0]!.life).toBe(20);
+    expect(first.seq).toBeGreaterThan(latest);
+    adapter.dispose();
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, undefined])("does not mint a current stamp for malformed Local sequence %s", async (sequence) => {
+    const { adapter } = await admitted();
+    const latest = await adapter.getSnapshot();
+    mockWorkerClient.readLocalCurrent.mockResolvedValueOnce(response(null, "completed", 18, sequence as number));
+    expect(await adapter.getSnapshot()).toEqual(latest);
+    adapter.dispose();
+  });
+
+  it("publishes a late first loss history once while the real store keeps the later life-eighteen frame", async () => {
+    let release!: (reply: LocalContinuationResult) => void;
+    let first!: LocalOriginalAttempt;
+    const firstResult = lossResult(19);
+    const secondResult = lossResult(18);
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      first ??= envelope.attempt;
+      if (envelope.operation === "register") return response(envelope.attempt, "pending", envelope.attempt === first ? 20 : 19, envelope.attempt === first ? 1 : 2);
+      if (envelope.operation === "lookup") return response(first, "completed", 18, 3, false, context, firstResult);
+      if (envelope.attempt === first) return new Promise<LocalContinuationResult>((resolve) => { release = resolve; });
+      return response(envelope.attempt, "completed", 18, 3, true, context, secondResult);
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    const firstInput = submission("frame.1");
+    const delayed = capability.submitInteraction(firstInput, source);
+    await Promise.resolve(); await Promise.resolve();
+    const second = await capability.submitInteraction(submission("frame.2"), source);
+    release(response(first, "completed", 19, 2, true, context, firstResult));
+    const historical = await delayed;
+    expect(historical.receipt?.result).toEqual(firstResult);
+    expect(historical.appliedResult).toEqual(firstResult);
+    expect(historical.engineSnapshot?.seq).toBe(second.engineSnapshot!.seq);
+    expect(historical.engineSnapshot?.state.players[0]!.life).toBe(18);
+    expect(useGameStore.getState().gameState!.players[0]!.life).toBe(18);
+    expect(useGameStore.getState().lastCommittedSeq).toBe(second.engineSnapshot!.seq);
+    expect(useGameStore.getState().eventHistory).toEqual([...secondResult.events, ...firstResult.events]);
+    expect(useGameStore.getState().logHistory.map((entry) => entry.segments)).toEqual([secondResult.log_entries![0]!.segments, firstResult.log_entries![0]!.segments]);
+    // A duplicate delivery uses the same captured attempt and contributes no
+    // second transition, even when its original result is still successful.
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      expect(envelope.attempt).toBe(first);
+      expect(envelope.operation).toBe("register");
+      return response(first, "completed", 18, 3, false, context, firstResult);
+    });
+    expect((await capability.submitInteraction(firstInput, source)).appliedResult).toBeNull();
+    expect(useGameStore.getState().eventHistory).toHaveLength(2);
+    expect(useGameStore.getState().logHistory).toHaveLength(2);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("delivers the same original apply once when registration succeeded but its ACK was lost", async () => {
+    let original!: LocalOriginalAttempt;
+    let applications = 0;
+    const result = lossResult(19);
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      expect(envelope.attempt).toBe(original);
+      if (envelope.operation === "register" && applications === 0) throw new Error("ACK lost after registration");
+      if (envelope.operation === "apply") applications += 1;
+      return response(original, "completed", 19, 2, envelope.operation === "apply", context, result);
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    const input = submission("frame.1");
+    expect((await capability.submitInteraction(input, source)).receipt?.status).toBe("completed");
+    expect((await capability.submitInteraction(input, source)).appliedResult).toBeNull();
+    expect(applications).toBe(1);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "apply", "register"]);
+    expect(useGameStore.getState().eventHistory).toEqual(result.events);
+    expect(useGameStore.getState().logHistory).toHaveLength(1);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("preserves native not-applied certification when registration never reached custody", async () => {
+    let original!: LocalOriginalAttempt;
+    let certified = false;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      expect(envelope.attempt).toBe(original);
+      if (envelope.operation === "register" && !certified) throw new Error("registration never arrived");
+      if (envelope.operation === "apply") certified = true;
+      return { ...response(original, "pending", 20, 1), receipt: { attempt: original, status: "not-applied", result: null, rejection: null } };
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    const input = submission("frame.1");
+    expect((await capability.submitInteraction(input, source)).receipt?.status).toBe("not-applied");
+    expect((await capability.submitInteraction(input, source)).receipt?.status).toBe("not-applied");
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "apply", "register"]);
+    expect(useGameStore.getState().gameState!.players[0]!.life).toBe(20);
+    expect(useGameStore.getState().eventHistory).toHaveLength(0);
+    expect(useGameStore.getState().logHistory).toHaveLength(0);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("keeps a retagged receipt unknown until lookup returns the exact original result", async () => {
+    let original!: LocalOriginalAttempt;
+    const result = lossResult(19);
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      if (envelope.operation === "register") return response(original, "pending", 20, 1);
+      if (envelope.operation === "apply") return response({ ...original, attemptId: "retagged" }, "completed", 19, 2, true, context, result);
+      return response(original, "completed", 19, 2, false, context, result);
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    expect((await capability.submitInteraction(submission("frame.1"), source)).receipt?.status).toBe("indeterminate");
+    expect(useGameStore.getState().eventHistory).toHaveLength(0);
+    expect(useGameStore.getState().logHistory).toHaveLength(0);
+    const recovered = await capability.readCurrent();
+    expect(recovered.receipt?.attempt).toBe(original);
+    expect(recovered.receipt?.status).toBe("completed");
+    expect(useGameStore.getState().eventHistory).toEqual(result.events);
+    expect(useGameStore.getState().logHistory).toHaveLength(1);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "apply", "lookup"]);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("keeps the original body attempt across trusted rekey and revokes the held capability on public restore", async () => {
+    let original!: LocalOriginalAttempt;
+    const originalResult = lossResult(19);
+    const nextContext = { ...context, interactionSessionId: "session.restored" as InteractionSessionId, restoreEpoch: 1, adapterGeneration: 1 };
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") return response(null, "completed", 18, 3, false, nextContext);
+      original ??= envelope.attempt;
+      if (envelope.operation === "register") return response(envelope.attempt, "pending", 20, 1);
+      if (envelope.operation === "apply") throw new Error("ACK lost");
+      return response(envelope.attempt, "completed", 18, 3, false, nextContext, originalResult);
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    const port = capability.commandPortFactory({ stackEntryId: 44, sourceObjectId: 40, adapterGeneration: 0 });
+    await port.submitManualResolutionCommand({ binding: { interactionId: "frame.1" as InteractionId, adapterGeneration: 0 },
+      command: { type: "lose-life", stackEntryId: 44, sourceObjectId: 40, affectedPlayerId: 0, amount: 1 } });
+    const frozen = port.getUnresolvedManualResolutionRequest()!;
+    expect(original.context).toEqual(context);
+    await capability.restore("trusted.fixture");
+    expect(adapter.localContinuation()).toBe(capability);
+    expect(await port.reconcileManualResolution(frozen)).toMatchObject({ status: "completed" });
+    const lookup = mockWorkerClient.submitLocalContinuation.mock.calls.at(-1)![1];
+    expect(lookup.operation).toBe("lookup"); expect(lookup.attempt).toBe(original);
+    expect(lookup.attempt.context.restoreEpoch).toBe(0);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.filter(([, envelope]) => envelope.operation === "apply")).toHaveLength(1);
+    expect(useGameStore.getState().eventHistory).toHaveLength(0);
+    expect(useGameStore.getState().logHistory).toHaveLength(0);
+    expect(useGameStore.getState().gameState!.players[0]!.life).toBe(18);
+    await adapter.restoreState(buildGameState());
+    expect(adapter.localContinuation()).toBeNull();
+    await expect(capability.readCurrent()).rejects.toThrow("unavailable");
+    unsubscribe(); adapter.dispose();
   });
 });

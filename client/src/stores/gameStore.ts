@@ -10,6 +10,7 @@ import type {
   GameLogEntry,
   GameState,
   LegalActionsResult,
+  LocalCapture,
   ManaCost,
   MatchConfig,
   ObjectAction,
@@ -28,6 +29,7 @@ import { reportStructuredActionRejection } from "../game/actionRejectionReporter
 import { getPlayerId } from "../hooks/usePlayerId";
 import { captureTrustedCheckpoint, loadCheckpoints, saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
+import i18n from "../i18n";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
 export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "endContinuousEffectOffers" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "activationBlockReasons" | "stuckDiagnostic" | "viewerInteraction"> {
@@ -211,6 +213,8 @@ interface GameStoreState {
    * changes for a fresh init/resume/reset even when the adapter and id are
    * reused. Transient: never persisted or restored from engine snapshots. */
   gameSessionGeneration: number;
+  /** Presentation reset fences; authority and attempt identity remain adapter-owned. */
+  localContinuationContext: Pick<LocalCapture, "restoreEpoch" | "adapterGeneration"> | null;
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
@@ -331,6 +335,7 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
     initialSave?: "best-effort" | "strict",
+    startup?: { kind: "experimentalLocal"; checkpoint: string },
   ) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
@@ -456,6 +461,7 @@ async function seedResumedServerGame(
       turnCheckpoints: [],
       rewindTargets: [],
       restoredStackAutomation: resumed?.presentation ?? null,
+      localContinuationContext: null,
     },
   });
 }
@@ -472,6 +478,7 @@ const initialState: GameStoreState = {
   nextLogSeq: 0,
   adapter: null,
   gameSessionGeneration: nextGameSessionGeneration(),
+  localContinuationContext: null,
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
@@ -546,7 +553,7 @@ export const useGameStore = create<GameStore>()(
       return accepted;
     },
 
-    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer, initialSave = "best-effort") => {
+    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer, initialSave = "best-effort", startup) => {
       // Clear the display-only stack-pacing tracker so a fast-churning end to a
       // prior game can't bleed stale resolution rate into this game's opening
       // pacing (rematch started within the throughput window).
@@ -558,8 +565,26 @@ export const useGameStore = create<GameStore>()(
       // action dispatcher has no adapter yet.
       set({ adapter });
       let initResult;
+      let initialLocalPublication;
       try {
-        initResult = await adapter.initializeGame(
+        if (startup?.kind === "experimentalLocal") {
+          if (!adapter.initializeExperimentalLocalGame || !adapter.experimentalLocalActor) {
+            throw new Error(i18n.t("game:manualResolution.startupAdmissionUnavailable"));
+          }
+          initResult = await adapter.initializeExperimentalLocalGame({
+            deckData, formatConfig, playerCount, matchConfig, firstPlayer,
+            trustedCheckpoint: startup.checkpoint,
+          });
+          if (await adapter.experimentalLocalActor() !== 0) {
+            throw new Error(i18n.t("game:manualResolution.startupAdmissionUnavailable"));
+          }
+          const continuation = adapter.localContinuation?.();
+          if (!continuation) throw new Error(i18n.t("game:manualResolution.startupAdmissionUnavailable"));
+          initialLocalPublication = await continuation.readCurrent();
+          if (!initialLocalPublication.engineSnapshot || !initialLocalPublication.current) {
+            throw new Error(i18n.t("game:manualResolution.startupFixtureUnavailable"));
+          }
+        } else initResult = await adapter.initializeGame(
           deckData,
           formatConfig,
           playerCount,
@@ -575,7 +600,7 @@ export const useGameStore = create<GameStore>()(
       // Fetched AFTER the engine is initialized, so this snapshot is
       // newest-by-construction under the global counter — it always passes the
       // gate, and it drops any leftover in-flight commit from a prior match.
-      const snapshot = await adapter.getSnapshot();
+      const snapshot = initialLocalPublication?.engineSnapshot ?? await adapter.getSnapshot();
       const state = snapshot.state;
       if (initialSave === "strict") {
         try {
@@ -585,7 +610,7 @@ export const useGameStore = create<GameStore>()(
           throw error;
         }
       }
-      const initLogEntries = (initResult.log_entries ?? []).map((entry, i) => ({
+      const initLogEntries = (startup ? [] : initResult.log_entries ?? []).map((entry, i) => ({
         ...entry,
         seq: i,
       }));
@@ -594,7 +619,7 @@ export const useGameStore = create<GameStore>()(
       // when the engine rolled (random starter); empty for an explicit
       // play/draw choice. `current_starting_player` is the engine's pick — never
       // recomputed from the rolls on the frontend.
-      const initEvents = initResult.events ?? [];
+      const initEvents = startup ? [] : initResult.events ?? [];
       // The engine emits a single StartingPlayerContest event (round structure +
       // winner) at the head of the game-start batch when it ran a roll-off
       // (random starter); absent for an explicit play/draw choice.
@@ -610,6 +635,12 @@ export const useGameStore = create<GameStore>()(
           gameId,
           adapter,
           gameSessionGeneration: nextGameSessionGeneration(),
+          localContinuationContext: initialLocalPublication?.current
+            ? {
+                restoreEpoch: initialLocalPublication.current.context.restoreEpoch,
+                adapterGeneration: initialLocalPublication.current.context.adapterGeneration,
+              }
+            : null,
           events: [],
           eventHistory: [],
           logHistory: initLogEntries,
@@ -648,6 +679,7 @@ export const useGameStore = create<GameStore>()(
           turnCheckpoints: savedCheckpoints,
           rewindTargets: [],
           restoredStackAutomation: resumed?.presentation ?? null,
+          localContinuationContext: null,
         },
       });
       await saveAuthoritativeGame(gameId, adapter, snapshot.state);
@@ -760,6 +792,7 @@ export const useGameStore = create<GameStore>()(
           events: [],
           stateHistory: stateHistory.slice(0, -1),
           restoredStackAutomation: null,
+          localContinuationContext: null,
         },
       });
     },

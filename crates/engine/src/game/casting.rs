@@ -27730,6 +27730,8 @@ pub fn handle_cancel_cast(
     pending: &PendingCast,
     _events: &mut Vec<GameEvent>,
 ) {
+    #[cfg(feature = "manual_resolution_prototype")]
+    state.clear_manual_resolution_source(pending.object_id);
     state.cancelled_casts.push(pending.object_id);
 
     // CR 601.2 + CR 733.1: Backing out of a cast reverses every choice and

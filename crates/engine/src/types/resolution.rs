@@ -3689,6 +3689,11 @@ impl ResolutionStack {
 /// every draw frame to carry its result owner explicitly, including `null`.
 pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 4;
 
+/// Opt-in Manual custody/Begin wire. Version 6 is written only with its
+/// typed payload; designation-only version 5 cannot prove a completed Begin.
+/// Older and feature-disabled readers reject this version.
+const MANUAL_RESOLUTION_WIRE_VERSION: u64 = 6;
+
 /// Historical full-state resolution wire version accepted only for migration.
 ///
 /// The reader accepts v1 saves and converts them to typed frames; the writer
@@ -3879,7 +3884,9 @@ fn validate_draw_sequence_delivery_owner_fields(
             frame.delivery_owner,
             DrawSequenceDeliveryOwnerPresence::Present(_)
         );
-        if version == RESOLUTION_STATE_WIRE_VERSION && !has_delivery_owner {
+        if (version == RESOLUTION_STATE_WIRE_VERSION || version == MANUAL_RESOLUTION_WIRE_VERSION)
+            && !has_delivery_owner
+        {
             return Err(format!(
                 "resolution_state_version {version} draw sequence frame is missing required delivery_owner"
             ));
@@ -4210,6 +4217,8 @@ impl ResolutionStateWire {
     }
 
     fn to_value(&self) -> Result<Value, String> {
+        #[cfg(feature = "manual_resolution_prototype")]
+        self.state.validate_manual_resolution_state()?;
         let frames = canonicalize_legacy_resolution_state(&self.state)?;
         frames
             .validate(&self.state.waiting_for)
@@ -4221,9 +4230,21 @@ impl ResolutionStateWire {
             .ok_or_else(|| "GameState must serialize as a JSON object".to_string())?;
         object.remove("resolution_stack");
         remove_resolution_wire_fields(object);
+        #[cfg(feature = "manual_resolution_prototype")]
+        let wire_version = if self.state.manual_resolution_state.is_some()
+            || matches!(
+                self.state.waiting_for,
+                crate::types::game_state::WaitingFor::ManualResolution { .. }
+            ) {
+            MANUAL_RESOLUTION_WIRE_VERSION
+        } else {
+            RESOLUTION_STATE_WIRE_VERSION
+        };
+        #[cfg(not(feature = "manual_resolution_prototype"))]
+        let wire_version = RESOLUTION_STATE_WIRE_VERSION;
         object.insert(
             "resolution_state_version".to_string(),
-            Value::from(RESOLUTION_STATE_WIRE_VERSION),
+            Value::from(wire_version),
         );
         object.insert(
             "resolution_frames".to_string(),
@@ -4251,6 +4272,26 @@ impl ResolutionStateWire {
                 })?
         };
 
+        // Manual state changes how a pending spell reaches its terminal
+        // boundary. A reader that does not understand the designation must
+        // reject it even when the payload claims to use an older wire
+        // version; silently ignoring an unknown field could resume the spell
+        // through the ordinary automatic resolver after restore.
+        if value
+            .get("manual_resolution_designation")
+            .is_some_and(|marker| !marker.is_null())
+        {
+            return Err("legacy Manual designation has no Begin/custody proof".into());
+        }
+        let has_manual_designation = value
+            .get("manual_resolution_state")
+            .is_some_and(|designation| !designation.is_null());
+        if has_manual_designation && version != MANUAL_RESOLUTION_WIRE_VERSION {
+            return Err(
+                "manual-resolution designation requires resolution_state_version 6".to_string(),
+            );
+        }
+
         let decode_mode = match version {
             LEGACY_RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV1,
             LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION => {
@@ -4260,12 +4301,27 @@ impl ResolutionStateWire {
                 GameStateDecodeMode::ResolutionWireV3
             }
             RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
+            #[cfg(feature = "manual_resolution_prototype")]
+            MANUAL_RESOLUTION_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV6,
             _ => {
                 return Err(format!(
                     "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
+        #[cfg(feature = "manual_resolution_prototype")]
+        {
+            if (version == MANUAL_RESOLUTION_WIRE_VERSION) != has_manual_designation {
+                return Err(
+                    "manual-resolution state requires resolution_state_version 6 and an exact designation"
+                        .to_string(),
+                );
+            }
+        }
+        #[cfg(not(feature = "manual_resolution_prototype"))]
+        if version == MANUAL_RESOLUTION_WIRE_VERSION {
+            return Err("manual-resolution persistence is unavailable in this build".to_string());
+        }
         if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
         }
@@ -4281,7 +4337,8 @@ impl ResolutionStateWire {
             GameStateDecodeMode::ResolutionWireV1 => LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
             GameStateDecodeMode::ResolutionWireV2
             | GameStateDecodeMode::ResolutionWireV3
-            | GameStateDecodeMode::ResolutionWireV4 => &[],
+            | GameStateDecodeMode::ResolutionWireV4
+            | GameStateDecodeMode::ResolutionWireV6 => &[],
             GameStateDecodeMode::PersistedRaw
             | GameStateDecodeMode::TrustedEnvelope
             | GameStateDecodeMode::DirectCurrentRaw => {
@@ -4482,7 +4539,8 @@ impl ResolutionStateWire {
             }
             GameStateDecodeMode::ResolutionWireV2
             | GameStateDecodeMode::ResolutionWireV3
-            | GameStateDecodeMode::ResolutionWireV4 => {
+            | GameStateDecodeMode::ResolutionWireV4
+            | GameStateDecodeMode::ResolutionWireV6 => {
                 crate::types::game_state::reconcile_persisted_zone_change_occurrences(
                     &mut value,
                     &[],

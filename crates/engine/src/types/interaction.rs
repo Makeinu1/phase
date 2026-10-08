@@ -492,10 +492,18 @@ pub enum ConfirmSemantics {
 #[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
 pub enum InteractionActionCode {
     PassPriority,
+    #[cfg(feature = "manual_resolution_prototype")]
+    DesignateManualResolution,
+    #[cfg(feature = "manual_resolution_prototype")]
+    FinishManualResolution,
+    #[cfg(feature = "manual_resolution_prototype")]
+    ManualLifeLoss,
     ChooseMeldPair,
     ChooseEntryAttackTarget,
     PlayLand,
     CastSpell,
+    #[cfg(feature = "manual_resolution_prototype")]
+    CastSpellManual,
     Foretell,
     ActivateAbility,
     DeclareAttackers,
@@ -769,6 +777,14 @@ pub enum InteractionPresentationSurface {
         /// Opaque deterministic identity for the exact action payload.
         action_id: Option<InteractionActionId>,
     },
+    #[cfg(feature = "manual_resolution_prototype")]
+    ManualCast {
+        availability: ManualCastAvailability,
+    },
+    #[cfg(feature = "manual_resolution_prototype")]
+    ManualSource {
+        source: ManualResolutionSource,
+    },
     Player {
         role: InteractionRoleCode,
         index: Option<u32>,
@@ -1017,6 +1033,14 @@ pub enum InteractionResponseSpec {
     Number {
         min: u32,
         max: u32,
+        confirm: ConfirmSemantics,
+    },
+    /// Native-only manual-resolution decision. `candidates` contains the exact Finish action;
+    /// the bounded amount branch is materialized by the engine from this same interaction.
+    #[cfg(feature = "manual_resolution_prototype")]
+    ManualResolution {
+        min_life_loss: u32,
+        max_life_loss: u32,
         confirm: ConfirmSemantics,
     },
     /// CR 732.2a: the loop-shortcut declaration. `count` is the picker's window and
@@ -1485,6 +1509,11 @@ pub enum InteractionResponse {
     Number {
         value: u32,
     },
+    /// Native-only response union for the experimental manual-resolution prompt.
+    #[cfg(feature = "manual_resolution_prototype")]
+    ManualResolution {
+        decision: ManualResolutionDecision,
+    },
     Shortcut {
         decision: InteractionShortcutDecision,
         pins: Vec<InteractionShortcutPin>,
@@ -1492,6 +1521,105 @@ pub enum InteractionResponse {
     ShortcutReply {
         reply: InteractionShortcutReply,
     },
+}
+
+/// Public source context only; these values never grant mutation authority.
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct ManualResolutionSource {
+    pub actor: u8,
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub source_id: u64,
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub source_incarnation: u64,
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number | null"))]
+    pub stack_entry_id: Option<u64>,
+    pub cast_turn_journal_index: Option<u32>,
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub card_id: u64,
+    pub name: String,
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum ManualResolutionPhase {
+    Casting,
+    Armed,
+    Open,
+    TerminalChildPending,
+    Closed,
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct ManualResolutionView {
+    pub source: ManualResolutionSource,
+    pub phase: ManualResolutionPhase,
+    pub interaction_id: Option<InteractionId>,
+    pub min_life_loss: Option<u32>,
+    pub max_life_loss: Option<u32>,
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum ManualCastUnsupportedReason {
+    OutsideOwnedControlledHandSpell,
+    ResolutionHook,
+    AnotherManualResolution,
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum ManualCastAvailability {
+    Supported {
+        choice_id: InteractionChoiceId,
+        source: ManualResolutionSource,
+    },
+    Unsupported {
+        reason: ManualCastUnsupportedReason,
+    },
+}
+
+/// One explicit operation offered by the native manual-resolution prompt.
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum ManualResolutionDecision {
+    Finish { choice_id: InteractionChoiceId },
+    LoseOwnLife { amount: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

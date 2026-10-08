@@ -35,6 +35,8 @@ use crate::types::game_state::{
     PayCostKind, PileSide, PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+#[cfg(feature = "manual_resolution_prototype")]
+use crate::types::interaction::ManualResolutionDecision;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
     InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
@@ -159,6 +161,8 @@ enum HumanResponseModel {
     DirectChoices,
     SideboardPartition,
     NumberRange(NumberResponseAction),
+    #[cfg(feature = "manual_resolution_prototype")]
+    ManualResolution,
     LoopShortcut,
 }
 
@@ -287,6 +291,8 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::UntapChoice { .. } => HumanResponseModel::DirectChoices,
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution { .. } => HumanResponseModel::ManualResolution,
         WaitingFor::BetweenGamesSideboard { .. } => HumanResponseModel::SideboardPartition,
         WaitingFor::ManaPayment { .. } | WaitingFor::ManaSourceSelection { .. } => {
             HumanResponseModel::DirectChoices
@@ -396,6 +402,12 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::UnlessPayment { .. }
         | WaitingFor::CombatTaxPayment { .. } => (
+            InteractionWaitingForCode::Choose,
+            None,
+            Some(InteractionSlotKind::Single),
+        ),
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution { .. } => (
             InteractionWaitingForCode::Choose,
             None,
             Some(InteractionSlotKind::Single),
@@ -2261,6 +2273,19 @@ fn direct_choice_projection(
     semantic_owner: PlayerId,
 ) -> Result<Option<DirectChoiceProjection>, InteractionReasonCode> {
     let actions = match waiting_for {
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution {
+            player,
+            stack_entry_id,
+            ..
+        } => {
+            if *player != semantic_owner {
+                return Err(InteractionReasonCode::InvalidAuthorityState);
+            }
+            vec![GameAction::FinishManualResolution {
+                stack_entry_id: *stack_entry_id,
+            }]
+        }
         WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -4202,7 +4227,11 @@ fn selection_projection(
     }
 
     Ok(match waiting_for {
-        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. } => None,
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution { .. } => None,
+        WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
+            => None,
         WaitingFor::OpeningHandBottomCards { pending, .. } => pending
             .iter()
             .find(|entry| entry.player == semantic_owner)
@@ -5622,6 +5651,10 @@ fn project_action_payload(
     surfaces: &mut Vec<InteractionPresentationSurface>,
 ) {
     match action {
+        #[cfg(feature = "manual_resolution_prototype")]
+        GameAction::DesignateManualResolution { .. }
+        | GameAction::FinishManualResolution { .. }
+        | GameAction::ApplyManualLifeLoss { .. } => {}
         GameAction::PassPriority
         | GameAction::CancelCast
         | GameAction::BackToManaPayment
@@ -6503,6 +6536,14 @@ fn project_prompt_payload(
 fn action_code(action: &GameAction) -> InteractionActionCode {
     match action {
         GameAction::PassPriority => InteractionActionCode::PassPriority,
+        #[cfg(feature = "manual_resolution_prototype")]
+        GameAction::DesignateManualResolution { .. } => {
+            InteractionActionCode::DesignateManualResolution
+        }
+        #[cfg(feature = "manual_resolution_prototype")]
+        GameAction::FinishManualResolution { .. } => InteractionActionCode::FinishManualResolution,
+        #[cfg(feature = "manual_resolution_prototype")]
+        GameAction::ApplyManualLifeLoss { .. } => InteractionActionCode::ManualLifeLoss,
         GameAction::ChooseMeldPair { .. } => InteractionActionCode::ChooseMeldPair,
         GameAction::ChooseEntryAttackTarget { .. } => {
             InteractionActionCode::ChooseEntryAttackTarget
@@ -6761,6 +6802,30 @@ fn actor_candidates(
             });
         }
     }
+    #[cfg(feature = "manual_resolution_prototype")]
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.manual_resolution_state.is_none()
+    {
+        for entry in &state.stack {
+            if state
+                .manual_resolution_binding_for_entry(semantic_owner, entry)
+                .is_some()
+            {
+                if candidates.len() == MAX_INTERACTION_LIST_LEN {
+                    return Err(InteractionReasonCode::PayloadTooLarge);
+                }
+                candidates.push(CandidateAction {
+                    action: GameAction::DesignateManualResolution {
+                        stack_entry_id: entry.id,
+                    },
+                    metadata: ActionMetadata::for_actor(
+                        Some(semantic_owner),
+                        TacticalClass::Utility,
+                    ),
+                });
+            }
+        }
+    }
     candidates.sort_by(|a, b| a.action.cmp_stable(&b.action));
     Ok(candidates)
 }
@@ -6772,17 +6837,100 @@ fn is_escape_action(action: &GameAction) -> bool {
 fn exact_choices(
     interaction_id: &InteractionId,
     candidates: &[CandidateAction],
+    authoritative_state: &GameState,
     filtered_state: &GameState,
 ) -> Vec<InteractionChoice> {
-    candidates
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| InteractionChoice {
+    let mut choices = Vec::new();
+    #[cfg(not(feature = "manual_resolution_prototype"))]
+    let _ = authoritative_state;
+    for (index, candidate) in candidates.iter().enumerate() {
+        #[allow(unused_mut)]
+        let mut surfaces = action_surfaces(&candidate.action, filtered_state);
+        #[cfg(feature = "manual_resolution_prototype")]
+        if let GameAction::CastSpell { object_id, .. } = candidate.action {
+            let actor = candidate
+                .metadata
+                .actor
+                .unwrap_or(filtered_state.active_player);
+            let availability =
+                match authoritative_state.manual_cast_unavailable_reason(actor, object_id) {
+                    Some(reason) => {
+                        crate::types::interaction::ManualCastAvailability::Unsupported { reason }
+                    }
+                    None => {
+                        let object = filtered_state
+                            .objects
+                            .get(&object_id)
+                            .expect("visible hand cast candidate has its source");
+                        crate::types::interaction::ManualCastAvailability::Supported {
+                            choice_id: interaction_choice_id(interaction_id, 'm', index),
+                            source: crate::types::interaction::ManualResolutionSource {
+                                actor: actor.0,
+                                source_id: object_id.0,
+                                source_incarnation: object.incarnation,
+                                stack_entry_id: None,
+                                cast_turn_journal_index: None,
+                                card_id: object.card_id.0,
+                                name: object.name.clone(),
+                            },
+                        }
+                    }
+                };
+            surfaces.push(InteractionPresentationSurface::ManualCast {
+                availability: availability.clone(),
+            });
+            if matches!(
+                availability,
+                crate::types::interaction::ManualCastAvailability::Supported { .. }
+            ) {
+                let mut manual_surfaces = surfaces.clone();
+                for surface in &mut manual_surfaces {
+                    if let InteractionPresentationSurface::Action { code, .. } = surface {
+                        *code = InteractionActionCode::CastSpellManual;
+                    }
+                }
+                choices.push(InteractionChoice {
+                    id: interaction_choice_id(interaction_id, 'm', index),
+                    surfaces: manual_surfaces,
+                    status: InteractionChoiceStatus::Available,
+                });
+            }
+        }
+        #[cfg(feature = "manual_resolution_prototype")]
+        if let GameAction::DesignateManualResolution { stack_entry_id } = candidate.action {
+            if let Some(entry) = authoritative_state
+                .stack
+                .iter()
+                .find(|entry| entry.id == stack_entry_id)
+            {
+                if let Some(binding) =
+                    authoritative_state.manual_resolution_binding_for_entry(entry.controller, entry)
+                {
+                    if let Some(object) = filtered_state.objects.get(&binding.source.object_id) {
+                        surfaces.push(InteractionPresentationSurface::ManualSource {
+                            source: crate::types::interaction::ManualResolutionSource {
+                                actor: binding.actor.0,
+                                source_id: binding.source.object_id.0,
+                                source_incarnation: binding.source.incarnation,
+                                stack_entry_id: Some(binding.stack_entry_id.0),
+                                cast_turn_journal_index: Some(
+                                    binding.cast_occurrence.turn_journal_index,
+                                ),
+                                card_id: object.card_id.0,
+                                name: object.name.clone(),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        choices.push(InteractionChoice {
             id: interaction_choice_id(interaction_id, 'c', index),
-            surfaces: action_surfaces(&candidate.action, filtered_state),
+            surfaces,
             status: InteractionChoiceStatus::Available,
-        })
-        .collect()
+        });
+    }
+    choices
 }
 
 fn direct_choices(
@@ -8351,6 +8499,50 @@ fn opportunity_for_slot(
                 InteractionAvailability::InputRequired,
             )
         }
+        #[cfg(feature = "manual_resolution_prototype")]
+        HumanResponseModel::ManualResolution => {
+            let projection = match direct_choice_projection(
+                &filtered_state.waiting_for,
+                filtered_state,
+                semantic_owner,
+            ) {
+                Ok(Some(projection)) => projection,
+                Ok(None) => unreachable!("manual-resolution model requires a Finish candidate"),
+                Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
+            };
+            let choices = direct_choices(&slot.interaction_id, &projection, filtered_state);
+            (
+                InteractionOpportunity {
+                    interaction_id: slot.interaction_id.clone(),
+                    response: InteractionOpportunityResponse::Schema {
+                        spec: InteractionResponseSpec::ManualResolution {
+                            min_life_loss: 1,
+                            max_life_loss: i32::MAX as u32,
+                            confirm: ConfirmSemantics::Explicit,
+                        },
+                        candidates: choices,
+                    },
+                    surfaces: vec![
+                        InteractionPresentationSurface::Summary {
+                            code: InteractionSummaryCode::Decision,
+                        },
+                        InteractionPresentationSurface::Amount {
+                            min: 1,
+                            max: i32::MAX as u32,
+                            total: None,
+                        },
+                    ],
+                    progress: InteractionProgress {
+                        selected: 0,
+                        minimum: 1,
+                        maximum: Some(1),
+                        aggregate: None,
+                        confirmable: false,
+                    },
+                },
+                InteractionAvailability::InputRequired,
+            )
+        }
         HumanResponseModel::DirectChoices => {
             let projection = match direct_choice_projection(
                 &filtered_state.waiting_for,
@@ -8744,7 +8936,12 @@ fn opportunity_for_slot(
                     Ok(candidates) => candidates,
                     Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
                 };
-            let choices = exact_choices(&slot.interaction_id, &candidates, filtered_state);
+            let choices = exact_choices(
+                &slot.interaction_id,
+                &candidates,
+                authoritative_state,
+                filtered_state,
+            );
             let opportunity = InteractionOpportunity {
                 interaction_id: slot.interaction_id.clone(),
                 response: InteractionOpportunityResponse::ExactChoices { choices },
@@ -9097,6 +9294,8 @@ fn attachment_fans_for_slot(
         | HumanResponseModel::SideboardPartition
         | HumanResponseModel::NumberRange(_)
         | HumanResponseModel::LoopShortcut => Vec::new(),
+        #[cfg(feature = "manual_resolution_prototype")]
+        HumanResponseModel::ManualResolution => Vec::new(),
     };
     attachment_fans_for_object_choices(filtered_state, &slot.interaction_id, model, object_choices)
 }
@@ -9397,6 +9596,22 @@ fn bound_outbound_surface(
     budget: &mut OutboundBudget,
 ) -> Result<(), InteractionReasonCode> {
     match surface {
+        #[cfg(feature = "manual_resolution_prototype")]
+        InteractionPresentationSurface::ManualSource { source } => {
+            budget.string(&source.name)?;
+        }
+        #[cfg(feature = "manual_resolution_prototype")]
+        InteractionPresentationSurface::ManualCast { availability } => {
+            if let crate::types::interaction::ManualCastAvailability::Supported {
+                choice_id,
+                source,
+            } = availability
+            {
+                budget.string(choice_id.as_str())?;
+                budget.string(&source.name)?;
+            }
+        }
+
         InteractionPresentationSurface::Object {
             reference, name, ..
         } => {
@@ -9572,6 +9787,8 @@ fn bound_outbound_spec(
         | InteractionResponseSpec::Text { .. }
         | InteractionResponseSpec::DeckPartition { .. }
         | InteractionResponseSpec::Number { .. } => {}
+        #[cfg(feature = "manual_resolution_prototype")]
+        InteractionResponseSpec::ManualResolution { .. } => {}
     }
     Ok(())
 }
@@ -9620,6 +9837,11 @@ fn bound_outbound_response(
                 }
             }
         }
+        #[cfg(feature = "manual_resolution_prototype")]
+        InteractionResponse::ManualResolution { decision } => match decision {
+            ManualResolutionDecision::Finish { choice_id } => budget.string(choice_id.as_str())?,
+            ManualResolutionDecision::LoseOwnLife { .. } => {}
+        },
         InteractionResponse::Text { value } => budget.string(value)?,
         InteractionResponse::Number { .. } | InteractionResponse::ShortcutReply { .. } => {}
     }
@@ -9744,6 +9966,11 @@ fn validate_response_bounds(response: &InteractionResponse) -> Result<(), Intera
             }
             Ok(())
         }
+        #[cfg(feature = "manual_resolution_prototype")]
+        InteractionResponse::ManualResolution { decision } => match decision {
+            ManualResolutionDecision::Finish { choice_id } => bound_string(choice_id.as_str()),
+            ManualResolutionDecision::LoseOwnLife { .. } => Ok(()),
+        },
         InteractionResponse::Number { .. } | InteractionResponse::ShortcutReply { .. } => Ok(()),
     }
 }
@@ -10399,6 +10626,61 @@ fn materialize_direct_choice_response(
             minimum: 1,
             maximum: Some(1),
             aggregate: None,
+            confirmable: true,
+        },
+    ))
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+fn materialize_manual_resolution_response(
+    interaction_id: &InteractionId,
+    waiting_for: &WaitingFor,
+    semantic_owner: PlayerId,
+    response: &InteractionResponse,
+) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
+    let WaitingFor::ManualResolution {
+        player,
+        stack_entry_id,
+    } = waiting_for
+    else {
+        return Err(InteractionReasonCode::InvalidAuthorityState);
+    };
+    if *player != semantic_owner {
+        return Err(InteractionReasonCode::InvalidAuthorityState);
+    }
+    let (action, aggregate) = match response {
+        InteractionResponse::ManualResolution {
+            decision: ManualResolutionDecision::Finish { choice_id },
+        } if *choice_id == interaction_choice_id(interaction_id, 'p', 0) => (
+            GameAction::FinishManualResolution {
+                stack_entry_id: *stack_entry_id,
+            },
+            None,
+        ),
+        InteractionResponse::ManualResolution {
+            decision: ManualResolutionDecision::Finish { .. },
+        } => return Err(InteractionReasonCode::UnknownChoice),
+        InteractionResponse::ManualResolution {
+            decision: ManualResolutionDecision::LoseOwnLife { amount },
+        } if (1..=i32::MAX as u32).contains(amount) => (
+            GameAction::ApplyManualLifeLoss {
+                stack_entry_id: *stack_entry_id,
+                amount: *amount,
+            },
+            Some(*amount as i32),
+        ),
+        InteractionResponse::ManualResolution { .. } => {
+            return Err(InteractionReasonCode::ConstraintUnsatisfied)
+        }
+        _ => return Err(InteractionReasonCode::MalformedResponse),
+    };
+    Ok((
+        action,
+        InteractionProgress {
+            selected: 1,
+            minimum: 1,
+            maximum: Some(1),
+            aggregate,
             confirmable: true,
         },
     ))
@@ -11187,6 +11469,15 @@ fn materialize_response(
                 .ok_or(InteractionReasonCode::UnsupportedResponse)?;
             return materialize_number_response(projection, response);
         }
+        #[cfg(feature = "manual_resolution_prototype")]
+        HumanResponseModel::ManualResolution => {
+            return materialize_manual_resolution_response(
+                interaction_id,
+                &filtered_state.waiting_for,
+                semantic_owner,
+                response,
+            );
+        }
         HumanResponseModel::LoopShortcut => {
             let projection = loop_shortcut_projection(&filtered_state.waiting_for)?;
             let WaitingFor::LoopShortcut {
@@ -11256,7 +11547,15 @@ fn materialize_response(
     let action = candidates
         .iter()
         .enumerate()
-        .find(|(index, _)| interaction_choice_id(interaction_id, 'c', *index) == *choice_id)
+        .find(|(index, candidate)| {
+            let _ = candidate;
+            if interaction_choice_id(interaction_id, 'c', *index) == *choice_id { return true; }
+            #[cfg(feature = "manual_resolution_prototype")]
+            if interaction_choice_id(interaction_id, 'm', *index) == *choice_id {
+                return matches!(candidate.action, GameAction::CastSpell { object_id, .. } if authoritative_state.manual_cast_unavailable_reason(semantic_owner, object_id).is_none());
+            }
+            false
+        })
         .map(|(_, candidate)| candidate.action.clone())
         .ok_or(InteractionReasonCode::UnknownChoice)?;
     Ok((action, InteractionProgress::default()))
@@ -11325,6 +11624,26 @@ pub fn preview_interaction(
             Err(reason) => return rejected(reason, InteractionProgress::default()),
         };
     let mut projected = state.clone();
+    #[cfg(feature = "manual_resolution_prototype")]
+    if manual_cast_intent_source(
+        &projected,
+        actor,
+        &InteractionSubmission {
+            interaction_id: request.interaction_id.clone(),
+            response: request.response.clone(),
+        },
+        &action,
+    )
+    .and_then(|source| match source {
+        Some(source) => {
+            install_manual_cast_intent_for_action(&mut projected, actor, source, &action)
+        }
+        None => Ok(()),
+    })
+    .is_err()
+    {
+        return rejected(InteractionReasonCode::InvalidAuthorityState, progress);
+    }
     match apply_interaction_for_simulation(&mut projected, actor, semantic_owner, action) {
         Ok(_) => InteractionPreview {
             request_id: request.request_id.clone(),
@@ -11434,6 +11753,186 @@ pub fn resolve_interaction_response(
     Ok(action)
 }
 
+#[cfg(feature = "manual_resolution_prototype")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualInteractionKind {
+    CastIntent,
+    Designation,
+    LifeLoss,
+    Finish,
+}
+
+/// Engine-owned classification of the resolved opaque choice. A Manual cast
+/// uses the ordinary `Choose` response and materializes ordinary `CastSpell`.
+#[cfg(feature = "manual_resolution_prototype")]
+pub fn classify_manual_interaction(
+    state: &GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+) -> Result<Option<ManualInteractionKind>, InteractionSubmitError> {
+    let action = resolve_interaction_response(state, actor, submission)?;
+    let kind = match action {
+        GameAction::DesignateManualResolution { .. } => Some(ManualInteractionKind::Designation),
+        GameAction::ApplyManualLifeLoss { .. } => Some(ManualInteractionKind::LifeLoss),
+        GameAction::FinishManualResolution { .. } => Some(ManualInteractionKind::Finish),
+        GameAction::CastSpell { .. } => {
+            let InteractionResponse::Choose { choice_id } = &submission.response else {
+                return Ok(None);
+            };
+            let owner = PlayerId(
+                slot_for_submission(state, actor, &submission.interaction_id)
+                    .map_err(|code| InteractionSubmitError { code })?
+                    .semantic_owner,
+            );
+            let candidates =
+                actor_candidates(state, owner).map_err(|code| InteractionSubmitError { code })?;
+            candidates
+                .iter()
+                .enumerate()
+                .any(|(index, candidate)| {
+                    candidate.action == action
+                        && interaction_choice_id(&submission.interaction_id, 'm', index)
+                            == *choice_id
+                })
+                .then_some(ManualInteractionKind::CastIntent)
+        }
+        _ => None,
+    };
+    Ok(kind)
+}
+
+/// Public identity context for an authenticated Manual submission, recomputed
+/// from the engine's opaque choice. It is display/correlation data only.
+#[cfg(feature = "manual_resolution_prototype")]
+pub fn manual_interaction_source(
+    state: &GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+) -> Result<Option<crate::types::interaction::ManualResolutionSource>, InteractionSubmitError> {
+    if classify_manual_interaction(state, actor, submission)?.is_none() {
+        return Ok(None);
+    }
+    let action = resolve_interaction_response(state, actor, submission)?;
+    let source = match action {
+        GameAction::CastSpell { object_id, .. } => {
+            let object = state
+                .objects
+                .get(&object_id)
+                .ok_or(InteractionSubmitError {
+                    code: InteractionReasonCode::InvalidAuthorityState,
+                })?;
+            crate::types::interaction::ManualResolutionSource {
+                actor: actor.0,
+                source_id: object_id.0,
+                source_incarnation: object.incarnation,
+                stack_entry_id: None,
+                cast_turn_journal_index: None,
+                card_id: object.card_id.0,
+                name: object.name.clone(),
+            }
+        }
+        GameAction::DesignateManualResolution { stack_entry_id } => {
+            let entry = state
+                .stack
+                .iter()
+                .find(|entry| entry.id == stack_entry_id)
+                .ok_or(InteractionSubmitError {
+                    code: InteractionReasonCode::InvalidAuthorityState,
+                })?;
+            let binding = state
+                .manual_resolution_binding_for_entry(actor, entry)
+                .ok_or(InteractionSubmitError {
+                    code: InteractionReasonCode::InvalidAuthorityState,
+                })?;
+            let object =
+                state
+                    .objects
+                    .get(&binding.source.object_id)
+                    .ok_or(InteractionSubmitError {
+                        code: InteractionReasonCode::InvalidAuthorityState,
+                    })?;
+            crate::types::interaction::ManualResolutionSource {
+                actor: actor.0,
+                source_id: binding.source.object_id.0,
+                source_incarnation: binding.source.incarnation,
+                stack_entry_id: Some(binding.stack_entry_id.0),
+                cast_turn_journal_index: Some(binding.cast_occurrence.turn_journal_index),
+                card_id: object.card_id.0,
+                name: object.name.clone(),
+            }
+        }
+        GameAction::ApplyManualLifeLoss { .. } | GameAction::FinishManualResolution { .. } => {
+            return Ok(super::derived_views::manual_resolution_source(state));
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(source))
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+fn manual_cast_intent_source(
+    state: &GameState,
+    actor: PlayerId,
+    submission: &InteractionSubmission,
+    action: &GameAction,
+) -> Result<Option<crate::types::identifiers::ObjectIncarnationRef>, InteractionSubmitError> {
+    if classify_manual_interaction(state, actor, submission)?
+        != Some(ManualInteractionKind::CastIntent)
+    {
+        return Ok(None);
+    }
+    let GameAction::CastSpell { object_id, .. } = action else {
+        return Err(InteractionSubmitError {
+            code: InteractionReasonCode::InvalidAuthorityState,
+        });
+    };
+    let object = state.objects.get(object_id).ok_or(InteractionSubmitError {
+        code: InteractionReasonCode::InvalidAuthorityState,
+    })?;
+    let source =
+        crate::types::identifiers::ObjectIncarnationRef::of(*object_id, object.incarnation);
+    Ok(Some(source))
+}
+
+/// Common prepayment validation for authenticated live choices and replay
+/// reconstruction. Playback supplies no interaction or transport credential.
+#[cfg(feature = "manual_resolution_prototype")]
+pub(crate) fn install_manual_cast_intent_for_action(
+    state: &mut GameState,
+    actor: PlayerId,
+    source: crate::types::identifiers::ObjectIncarnationRef,
+    action: &GameAction,
+) -> Result<(), InteractionSubmitError> {
+    let GameAction::CastSpell {
+        object_id, card_id, ..
+    } = action
+    else {
+        return Err(InteractionSubmitError {
+            code: InteractionReasonCode::InvalidAuthorityState,
+        });
+    };
+    if source.object_id != *object_id
+        || !state.objects.get(object_id).is_some_and(|object| {
+            object.incarnation == source.incarnation && object.card_id == *card_id
+        })
+    {
+        return Err(InteractionSubmitError {
+            code: InteractionReasonCode::InvalidAuthorityState,
+        });
+    }
+    if state
+        .manual_cast_unavailable_reason(actor, *object_id)
+        .is_some()
+    {
+        return Err(InteractionSubmitError {
+            code: InteractionReasonCode::InvalidAuthorityState,
+        });
+    }
+    state.manual_resolution_state =
+        Some(crate::types::game_state::ManualResolutionState::Casting { actor, source });
+    Ok(())
+}
+
 /// Hidden engine-only submission entry point. The opaque interaction and choice
 /// IDs are looked up against current trusted state, authorization is rechecked,
 /// projection is recomputed from a viewer-filtered clone, and the materialized
@@ -11450,9 +11949,24 @@ pub fn submit_interaction(
     // slot per pending decision, and it has already succeeded once here.
     let semantic_owner =
         PlayerId(slot_for_submission(state, actor, &submission.interaction_id)?.semantic_owner);
+    #[cfg(feature = "manual_resolution_prototype")]
+    let before_intent = match manual_cast_intent_source(state, actor, &submission, &action)? {
+        Some(source) => {
+            let before = state.clone();
+            install_manual_cast_intent_for_action(state, actor, source, &action)?;
+            Some(before)
+        }
+        None => None,
+    };
     let result = apply_interaction(state, actor, semantic_owner, action.clone()).map_err(
-        |_error: EngineError| InteractionSubmitError {
-            code: InteractionReasonCode::ReducerRejected,
+        |_error: EngineError| {
+            #[cfg(feature = "manual_resolution_prototype")]
+            if let Some(before_intent) = before_intent {
+                *state = before_intent;
+            }
+            InteractionSubmitError {
+                code: InteractionReasonCode::ReducerRejected,
+            }
         },
     )?;
     Ok(AppliedInteraction { action, result })
@@ -11472,7 +11986,29 @@ pub fn submit_interaction_with_rejection(
             .map_err(action_rejection_for_interaction_reason)?
             .semantic_owner,
     );
-    let result = apply_interaction_with_rejection(state, actor, semantic_owner, action.clone())?;
+    #[cfg(feature = "manual_resolution_prototype")]
+    let before_intent = match manual_cast_intent_source(state, actor, &submission, &action)
+        .map_err(|error| action_rejection_for_interaction_reason(error.code))?
+    {
+        Some(source) => {
+            let before = state.clone();
+            install_manual_cast_intent_for_action(state, actor, source, &action)
+                .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
+            Some(before)
+        }
+        None => None,
+    };
+    let result =
+        match apply_interaction_with_rejection(state, actor, semantic_owner, action.clone()) {
+            Ok(result) => result,
+            Err(error) => {
+                #[cfg(feature = "manual_resolution_prototype")]
+                if let Some(before_intent) = before_intent {
+                    *state = before_intent;
+                }
+                return Err(error);
+            }
+        };
     Ok(AppliedInteraction { action, result })
 }
 

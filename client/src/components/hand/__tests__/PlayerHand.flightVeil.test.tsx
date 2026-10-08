@@ -1,13 +1,18 @@
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction } from "../../../adapter/types.ts";
+import type { InteractionChoiceId } from "../../../adapter/generated/interaction";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
 import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
 import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { handFanVerticalMetrics } from "../handFanPresentation.ts";
-import { PlayerHand } from "../PlayerHand.tsx";
+import { PlayerHand, type ManualHandCastController } from "../PlayerHand.tsx";
+
+const { dispatchActionMock } = vi.hoisted(() => ({ dispatchActionMock: vi.fn() }));
+vi.mock("../../../game/dispatch.ts", () => ({ dispatchAction: dispatchActionMock }));
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: () => ({
@@ -69,6 +74,8 @@ afterEach(() => {
   cleanup();
   useAnimationStore.getState().clearQueue();
   useGameStore.setState({ gameState: null, spellCosts: {}, legalActionsByObject: {} });
+  useUiStore.setState({ debugInteractionMode: false, pendingAbilityChoice: null });
+  dispatchActionMock.mockClear();
 });
 
 describe.each(surfaces)("PlayerHand flight veil: $name", ({ id, selector, remove }) => {
@@ -145,5 +152,51 @@ describe("PlayerHand flight veil: per-object keying", () => {
     );
     expect(fanCard!.style.visibility).toBe("hidden");
     expect(handCard!.style.visibility).toBe("");
+  });
+});
+
+describe("PlayerHand shared manual controller", () => {
+  function controller(): ManualHandCastController {
+    return { availabilityFor: (objectId) => objectId === HAND_CARD ? { type: "supported", data: {
+      choiceId: "native-manual-choice" as InteractionChoiceId,
+      source: { actor: 0, sourceId: HAND_CARD, sourceIncarnation: 9, stackEntryId: null,
+        castTurnJournalIndex: null, cardId: 1, name: "Hand Card" },
+    } } : null,
+    submit: vi.fn().mockResolvedValue(undefined), attempt: null, message: null,
+    lookupBusy: false, checkStatus: vi.fn().mockResolvedValue(undefined) };
+  }
+
+  beforeEach(() => {
+    const state = useGameStore.getState().gameState!;
+    useGameStore.setState({ gameMode: "local", waitingFor: state.waiting_for,
+      legalActionsByObject: { [HAND_CARD]: [castSpell(HAND_CARD)] } });
+  });
+
+  it("keeps desktop selection local and delegates its explicit Manual choice", () => {
+    const manualCast = controller();
+    render(<PlayerHand manualCast={manualCast} />);
+    fireEvent.click(screen.getByRole("button", { name: "Hand Card", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Resolution options for Hand Card" }));
+    expect(screen.getByText(/Its automatic spell body will be skipped/)).toBeInTheDocument();
+    expect(manualCast.submit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cast with manual resolution" }));
+    expect(manualCast.submit).toHaveBeenCalledExactlyOnceWith(HAND_CARD);
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps desktop ordinary choice on its existing dispatch and shows the shared original status", () => {
+    const manualCast = controller();
+    const { rerender } = render(<PlayerHand manualCast={manualCast} />);
+    fireEvent.click(screen.getByRole("button", { name: "Hand Card", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Resolution options for Hand Card" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cast normally" }));
+    expect(dispatchActionMock).toHaveBeenCalledExactlyOnceWith(castSpell(HAND_CARD));
+    expect(manualCast.submit).not.toHaveBeenCalled();
+
+    manualCast.attempt = { objectId: GRAVEYARD_CARD, cardName: "Original Spell", status: "indeterminate" };
+    rerender(<PlayerHand manualCast={manualCast} />);
+    expect(screen.getByRole("status").parentElement).toHaveTextContent("Original Spell");
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
+    expect(manualCast.checkStatus).toHaveBeenCalledExactlyOnceWith();
   });
 });
