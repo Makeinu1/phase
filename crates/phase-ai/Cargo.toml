@@ -34,6 +34,7 @@ same-file = "1"
 
 [features]
 tune = ["rayon"]
+manual_resolution_prototype = ["engine/manual_resolution_prototype"]
 # Scenario-backed benchmark binaries are opt-in: build them with
 # `cargo check -p phase-ai --features scenario-benches --bin combat-priority-bench --bin attack-scaling-bench`.
 scenario-benches = ["engine/test-support"]

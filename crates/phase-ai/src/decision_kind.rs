@@ -238,6 +238,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
         | WaitingFor::EntryControllerChoice { .. } => DecisionKind::ActivateAbility,
+        #[cfg(feature = "manual_resolution_prototype")]
+        WaitingFor::ManualResolution { .. } => DecisionKind::ManualResolution,
     }
 }
 

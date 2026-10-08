@@ -179,6 +179,12 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::CastSpellAsMadness { .. }
         | GameAction::CastPreparedCopy { .. }
         | GameAction::CastParadigmCopy { .. } => false,
+        // Native manual-resolution controls are human-owned, not cast or
+        // activation candidates that earn discard credit.
+        #[cfg(feature = "manual_resolution_prototype")]
+        GameAction::DesignateManualResolution { .. }
+        | GameAction::FinishManualResolution { .. }
+        | GameAction::ApplyManualLifeLoss { .. } => false,
         // Every remaining action: not a spell cast or ability activation, so it
         // cannot discard its controller a card as part of the candidate itself.
         // Enumerated rather than wildcarded so a newly added `GameAction` fails

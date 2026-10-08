@@ -15,7 +15,10 @@ crate-type = ["cdylib"]
 
 [features]
 # Manual commands are admitted only through the authenticated Local envelope.
-manual_resolution_local_bootstrap = ["engine/manual_resolution_prototype"]
+manual_resolution_local_bootstrap = [
+    "engine/manual_resolution_prototype",
+    "phase-ai/manual_resolution_prototype",
+]
 
 [dependencies]
 engine = { path = "../engine", package = "phase-engine" }
