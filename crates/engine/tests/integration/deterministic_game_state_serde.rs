@@ -1051,7 +1051,14 @@ fn discover_file(discovered: &mut BTreeMap<String, DiscoveredOwner>, file: &str,
                     .last()
                     .is_some_and(|segment| segment.ident == "declare_game_state") =>
             {
-                let synthetic = format!("struct GameState {{ {} }}", item.mac.tokens);
+                // `declare_game_state!` uses `@cfg(meta)` as a macro-only
+                // field prefix; expose it as an ordinary cfg attribute for
+                // this syntax-based census.
+                let fields = item.mac.tokens.to_string().replace(
+                    "@ cfg (feature = \"manual_resolution_prototype\")",
+                    "#[cfg(feature = \"manual_resolution_prototype\")]",
+                );
+                let synthetic = format!("struct GameState {{ {fields} }}");
                 let game_state: syn::ItemStruct = syn::parse_str(&synthetic)
                     .unwrap_or_else(|error| panic!("parse declare_game_state fields: {error}"));
                 discover_fields(discovered, file, "GameState", None, &game_state.fields);
