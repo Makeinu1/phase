@@ -1144,14 +1144,16 @@ function GamePageContent({
   const manualOwnedView = manualView?.source.actor === playerId && perspectivePlayerId === playerId;
   const manualStackEntryId = manualView?.source.stackEntryId;
   const manualSourceObjectId = manualView?.source.sourceId;
+  const localAdapterGeneration = localContext?.adapterGeneration;
+  const localRestoreEpoch = localContext?.restoreEpoch;
   const manualPort = useMemo(() => {
-    if (!continuation || !localContext || !manualOwnedView || manualStackEntryId == null || manualSourceObjectId == null) return null;
+    if (!continuation || localAdapterGeneration == null || !manualOwnedView || manualStackEntryId == null || manualSourceObjectId == null) return null;
     return continuation.commandPortFactory({
       stackEntryId: manualStackEntryId as ObjectId,
       sourceObjectId: manualSourceObjectId as ObjectId,
-      adapterGeneration: localContext.adapterGeneration,
+      adapterGeneration: localAdapterGeneration,
     });
-  }, [continuation, localContext?.adapterGeneration, localContext?.restoreEpoch, manualOwnedView, manualStackEntryId, manualSourceObjectId]);
+  }, [continuation, localAdapterGeneration, localRestoreEpoch, manualOwnedView, manualStackEntryId, manualSourceObjectId]);
   const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
   const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
   const [aiDecisionReceipt, setAiDecisionReceipt] = useState<AiDecisionDiagnosticReceipt | null>(null);

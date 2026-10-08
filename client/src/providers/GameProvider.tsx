@@ -1561,7 +1561,7 @@ export function GameProvider({
             || !("cases" in bundle) || !bundle.cases || typeof bundle.cases !== "object" || Array.isArray(bundle.cases)) {
             throw new Error(tRef.current("manualResolution.startupInvalidFixture"));
           }
-          const fixture: unknown = Object.hasOwn(bundle.cases, manualFixture)
+          const fixture: unknown = Object.prototype.hasOwnProperty.call(bundle.cases, manualFixture)
             ? (bundle.cases as Record<string, unknown>)[manualFixture] : null;
           const fixtureKeyParts = manualFixture.split(".");
           if (!fixture || typeof fixture !== "object"

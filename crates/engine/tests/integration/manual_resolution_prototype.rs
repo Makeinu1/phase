@@ -2101,14 +2101,17 @@ mod enabled_baseline_tests {
                                 keyword: keyword.clone(),
                             }
                         };
-                        runner.state_mut().add_transient_continuous_effect(
-                            source,
-                            p0,
-                            Duration::UntilEndOfTurn,
-                            TargetFilter::SpecificObject { id: stack_entry_id },
-                            vec![modification],
-                            None,
-                        );
+                        runner
+                            .state_mut()
+                            .add_transient_continuous_effect(
+                                source,
+                                p0,
+                                Duration::UntilEndOfTurn,
+                                TargetFilter::SpecificObject { id: stack_entry_id },
+                                vec![modification],
+                                None,
+                            )
+                            .expect("the fixture's duration begins");
                     }
                     let object = &runner.state().objects[&stack_entry_id];
                     assert_eq!(object.zone, Zone::Stack);
@@ -2228,14 +2231,17 @@ mod enabled_baseline_tests {
                 }
                 let mut runner = GameRunner::from_state(baseline.clone());
                 if apply_effect {
-                    runner.state_mut().add_transient_continuous_effect(
-                        source,
-                        p0,
-                        Duration::UntilEndOfTurn,
-                        TargetFilter::SpecificObject { id: stack_entry_id },
-                        vec![modification.clone().expect("grant or removal case")],
-                        None,
-                    );
+                    runner
+                        .state_mut()
+                        .add_transient_continuous_effect(
+                            source,
+                            p0,
+                            Duration::UntilEndOfTurn,
+                            TargetFilter::SpecificObject { id: stack_entry_id },
+                            vec![modification.clone().expect("grant or removal case")],
+                            None,
+                        )
+                        .expect("the fixture's duration begins");
                 }
                 assert_eq!(
                     runner.state().objects[&stack_entry_id].keywords,
@@ -2297,16 +2303,19 @@ mod enabled_baseline_tests {
             .expect("candidate is on stack")
             .id;
         for source in sources {
-            runner.state_mut().add_transient_continuous_effect(
-                source,
-                p0,
-                Duration::UntilEndOfTurn,
-                TargetFilter::SpecificObject { id: decoy_entry },
-                vec![ContinuousModification::AddKeyword {
-                    keyword: Keyword::Rebound,
-                }],
-                None,
-            );
+            runner
+                .state_mut()
+                .add_transient_continuous_effect(
+                    source,
+                    p0,
+                    Duration::UntilEndOfTurn,
+                    TargetFilter::SpecificObject { id: decoy_entry },
+                    vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Rebound,
+                    }],
+                    None,
+                )
+                .expect("the fixture's duration begins");
         }
         let baseline = runner.state().clone();
         for affected in [decoy_entry, stack_entry_id] {
@@ -2443,16 +2452,19 @@ mod enabled_baseline_tests {
         let baseline = runner.state().clone();
         let valid_wire = serde_json::to_value(PersistedGameState::capture(baseline.clone()))
             .expect("valid manual wait serializes before the grant");
-        runner.state_mut().add_transient_continuous_effect(
-            source,
-            p0,
-            Duration::UntilEndOfTurn,
-            TargetFilter::SpecificObject { id: stack_entry_id },
-            vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Rebound,
-            }],
-            None,
-        );
+        runner
+            .state_mut()
+            .add_transient_continuous_effect(
+                source,
+                p0,
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: stack_entry_id },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Rebound,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         assert!(!runner.state().objects[&stack_entry_id]
             .keywords
             .contains(&Keyword::Rebound));

@@ -175,7 +175,7 @@ describe("PlayerHand shared manual controller", () => {
   it("keeps desktop selection local and delegates its explicit Manual choice", () => {
     const manualCast = controller();
     render(<PlayerHand manualCast={manualCast} />);
-    fireEvent.click(screen.getByRole("button", { name: "Hand Card", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Hand Card" }));
     fireEvent.click(screen.getByRole("button", { name: "Resolution options for Hand Card" }));
     expect(screen.getByText(/Its automatic spell body will be skipped/)).toBeInTheDocument();
     expect(manualCast.submit).not.toHaveBeenCalled();
@@ -187,7 +187,7 @@ describe("PlayerHand shared manual controller", () => {
   it("keeps desktop ordinary choice on its existing dispatch and shows the shared original status", () => {
     const manualCast = controller();
     const { rerender } = render(<PlayerHand manualCast={manualCast} />);
-    fireEvent.click(screen.getByRole("button", { name: "Hand Card", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Hand Card" }));
     fireEvent.click(screen.getByRole("button", { name: "Resolution options for Hand Card" }));
     fireEvent.click(screen.getByRole("button", { name: "Cast normally" }));
     expect(dispatchActionMock).toHaveBeenCalledExactlyOnceWith(castSpell(HAND_CARD));

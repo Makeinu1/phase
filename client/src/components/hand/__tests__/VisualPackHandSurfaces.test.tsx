@@ -50,12 +50,23 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: vi.fn(),
 }));
 vi.mock("../../../hooks/useCardHover.ts", () => ({
-  useCardHover: vi.fn(() => ({ handlers: {}, firedRef: { current: false } })),
+  useCardHover: vi.fn(() => hoverResult()),
 }));
 
 const mockUseCardImage = vi.mocked(useCardImage);
 const mockUseCardBackImage = vi.mocked(useCardBackImage);
 const mockUseCardHover = vi.mocked(useCardHover);
+
+function hoverResult(firedRef = { current: false }): ReturnType<typeof useCardHover> {
+  return {
+    handlers: {
+      "data-card-hover": true,
+      onPointerDown: vi.fn(), onPointerMove: vi.fn(), onPointerUp: vi.fn(),
+      onPointerCancel: vi.fn(), onPointerLeave: vi.fn(), onContextMenu: vi.fn(),
+    },
+    firedRef,
+  };
+}
 
 function secretOpponent(): GameObject {
   return buildGameObject({
@@ -393,7 +404,7 @@ describe("GamePage shared manual hand entry", () => {
       useUiStore.setState({ mobileHandOpen: false, debugInteractionMode: false, pendingAbilityChoice: null, enchantmentsDialogPlayer: null });
     });
     mockUseCardImage.mockReturnValue({ src: "hand-card.png", isLoading: false, isRotated: false, isFlip: false });
-    mockUseCardHover.mockImplementation(() => ({ handlers: {}, firedRef: { current: false } }));
+    mockUseCardHover.mockImplementation(() => hoverResult());
   });
 
   afterEach(() => {
@@ -448,7 +459,7 @@ describe("GamePage shared manual hand entry", () => {
   it("threads the same native offer and submit callback into desktop selection", async () => {
     mobile.value = false;
     render(page());
-    fireEvent.click(screen.getByRole("button", { name: source.name, exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: source.name }));
     fireEvent.click(screen.getByRole("button", { name: `Resolution options for ${source.name}` }));
     expect(screen.getByText(/Its automatic spell body will be skipped/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cast with manual resolution" }));
@@ -505,7 +516,7 @@ describe("GamePage shared manual hand entry", () => {
     await screen.findByRole("button", { name: "Check status" });
     expect(screen.getByRole("button", { name: "Cast normally" })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Close", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
     openDrawer(container);
     const fresh = offers();
     fresh.opportunities[0].interactionId = "later-fresh-interaction" as InteractionId;
@@ -578,7 +589,7 @@ describe("GamePage shared manual hand entry", () => {
 
   it("keeps long-press preview and debug clicks ahead of manual selection", () => {
     const held = { current: true };
-    mockUseCardHover.mockImplementation(() => ({ handlers: {}, firedRef: held }));
+    mockUseCardHover.mockImplementation(() => hoverResult(held));
     const { container } = render(page());
     openDrawer(container);
     tap(source.name);

@@ -1773,7 +1773,7 @@ describe("WasmAdapter Local continuation original receipts (mock Worker client)"
     const { adapter, capability } = await admitted();
     expect((await capability.submitInteraction(handInput, handSource)).receipt?.status).toBe("indeterminate");
     expect((await adapter.getSnapshot()).state.players[0]!.life).toBe(20);
-    expect(mockWorkerClient.submitLocalContinuation.mock.calls.at(-1)![1]).toMatchObject({ operation: "lookup", attempt: hand });
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.slice(-1)[0]![1]).toMatchObject({ operation: "lookup", attempt: hand });
     expect((await capability.readCurrent()).receipt).toBeNull();
     expect((await capability.submitInteraction(bodyInput, source)).receipt?.status).toBe("indeterminate");
     const recovered = await capability.lookupInteraction(handInput);
@@ -1808,7 +1808,7 @@ describe("WasmAdapter Local continuation original receipts (mock Worker client)"
     const wrongReceipt = await capability.lookupInteraction(input);
     expect(wrongReceipt.receipt).toMatchObject({ attempt: original, status: "indeterminate" });
     expect(wrongReceipt.appliedResult).toBeNull();
-    expect(mockWorkerClient.submitLocalContinuation.mock.calls.at(-1)![1]).toEqual({ type: "localContinuation", operation: "lookup", attempt: original });
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.slice(-1)[0]![1]).toEqual({ type: "localContinuation", operation: "lookup", attempt: original });
     adapter.dispose();
   });
 
@@ -2098,7 +2098,7 @@ describe("WasmAdapter Local continuation original receipts (mock Worker client)"
     await capability.restore("trusted.fixture");
     expect(adapter.localContinuation()).toBe(capability);
     expect(await port.reconcileManualResolution(frozen)).toMatchObject({ status: "completed" });
-    const lookup = mockWorkerClient.submitLocalContinuation.mock.calls.at(-1)![1];
+    const lookup = mockWorkerClient.submitLocalContinuation.mock.calls.slice(-1)[0]![1];
     expect(lookup.operation).toBe("lookup"); expect(lookup.attempt).toBe(original);
     expect(lookup.attempt.context.restoreEpoch).toBe(0);
     expect(mockWorkerClient.submitLocalContinuation.mock.calls.filter(([, envelope]) => envelope.operation === "apply")).toHaveLength(1);
