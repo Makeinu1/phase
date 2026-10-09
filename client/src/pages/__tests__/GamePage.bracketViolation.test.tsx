@@ -66,6 +66,7 @@ const {
     gameState: null as unknown,
     gameMode: null as unknown,
     waitingFor: null as unknown,
+    localContinuationContext: null as unknown,
     activationBlockReasons: {} as Record<string, Array<{ ability_index: number; type: string }>>,
   },
 }));
@@ -164,6 +165,7 @@ vi.mock("../../stores/gameStore", async () => ({
         gameState: storeOverrides.gameState,
         gameMode: storeOverrides.gameMode,
         waitingFor: storeOverrides.waitingFor,
+        localContinuationContext: storeOverrides.localContinuationContext,
         legalActions: [],
         endContinuousEffectOffers: [],
         autoPassRecommended: false,
@@ -213,11 +215,13 @@ vi.mock("../../stores/gameStore", async () => ({
 // importing the real module.
 vi.mock("../../stores/multiplayerStore", () => ({
   useMultiplayerStore: mockUseMultiplayerStore,
+  getPlayerDisplayName: (seat: number, myId?: number) => seat === myId ? "You" : `Opp ${seat + 1}`,
   FORMAT_DEFAULTS: new Proxy({}, { get: (_target, key) => ({ format: String(key) }) }),
 }));
 
 vi.mock("../../hooks/usePlayerId", () => ({
   usePlayerId: () => 0,
+  getPlayerId: () => 0,
   usePerspectivePlayerId: () => 0,
   useCanActForWaitingState: mockCanActForWaitingState,
   // useTurnStatus (reached via the mounted <TurnStatusLine/>) also imports
@@ -258,11 +262,14 @@ vi.mock("../../components/hud/HUD", () => ({
 
 vi.mock("../../components/board/GameBoard", () => ({
   GameBoard: (props: Record<string, unknown>) => {
+    const selection = props.manualPlayerAreaSelection as { playerName: string; onSelect: () => void } | null;
     return (
       <div
         data-layout={String(props.effectiveMultiplayerBoardLayout)}
         data-testid="game-board-layout"
-      />
+      >
+        {selection && <button onClick={selection.onSelect}>{selection.playerName} manual area</button>}
+      </div>
     );
   },
 }));
@@ -453,6 +460,7 @@ beforeEach(() => {
   storeOverrides.gameState = null;
   storeOverrides.gameMode = null;
   storeOverrides.waitingFor = null;
+  storeOverrides.localContinuationContext = null;
   storeOverrides.activationBlockReasons = {};
   useUiStore.setState({ pendingAbilityChoice: null });
   mockIsMobile.mockReturnValue(false);
@@ -467,6 +475,28 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe("GamePage Manual own-area identity", () => {
+  it("names the own selectable area and selected target as You without multiplayer names", () => {
+    const state = gameStateFactory.withPlayers(0, 1).build();
+    storeOverrides.gameState = { ...state, derived: { ...state.derived, manual_resolution: {
+      source: { actor: 0, sourceId: 1, sourceIncarnation: 1, stackEntryId: 1,
+        castTurnJournalIndex: 0, cardId: 1, name: "Self Loss" },
+      phase: "open", interactionId: "manual-own", minLifeLoss: 1, maxLifeLoss: null,
+    } } };
+    storeOverrides.gameMode = "local";
+    storeOverrides.waitingFor = state.waiting_for;
+    storeOverrides.localContinuationContext = { adapterGeneration: 1, restoreEpoch: 0 };
+    const port = { submitManualResolutionCommand: vi.fn(), reconcileManualResolution: vi.fn(),
+      getUnresolvedManualResolutionRequest: () => null };
+    const continuation = { commandPortFactory: () => port };
+    storeOverrides.adapter = { localContinuation: () => continuation };
+    renderGamePage("/game/manual-test?mode=local");
+    fireEvent.click(screen.getByRole("button", { name: "You manual area" }));
+    expect(screen.getByText("You", { selector: 'span.font-semibold' })).toBeInTheDocument();
+    expect(screen.queryByText("Opp 1 manual area")).not.toBeInTheDocument();
+  });
 });
 
 describe("GamePage — cEDH bracket-violation blocking modal", () => {

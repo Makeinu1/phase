@@ -1704,9 +1704,9 @@ function GamePageContent({
           <GameBoard
             manualPlayerAreaSelection={manualOwnedView && manualView && manualPort ? {
               playerId,
-              playerName: getPlayerDisplayName(playerId),
+              playerName: getPlayerDisplayName(playerId, playerId),
               selected: manualTarget?.playerId === playerId,
-              onSelect: () => { if (manualView.phase === "open") setManualTarget({ playerId, name: getPlayerDisplayName(playerId) }); },
+              onSelect: () => { if (manualView.phase === "open") setManualTarget({ playerId, name: getPlayerDisplayName(playerId, playerId) }); },
               returnFocusRef: manualReturnFocusRef,
             } : null}
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}

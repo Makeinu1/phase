@@ -172,6 +172,22 @@ describe("PlayerHand shared manual controller", () => {
       legalActionsByObject: { [HAND_CARD]: [castSpell(HAND_CARD)] } });
   });
 
+  it("raises selected Manual options above the battlefield HUD and releases the hand when the offer ends", () => {
+    const manualCast = controller();
+    const { container, rerender } = render(<PlayerHand manualCast={manualCast} />);
+    const hand = container.querySelector<HTMLElement>('[data-player-hand]')!;
+    expect(hand.style.zIndex).toBe('');
+    fireEvent.click(screen.getByRole("button", { name: "Hand Card" }));
+    expect(Number(hand.style.zIndex)).toBeGreaterThan(30);
+    fireEvent.click(screen.getByRole("button", { name: "Resolution options for Hand Card" }));
+    expect(Number(hand.style.zIndex)).toBeGreaterThan(30);
+    fireEvent.click(screen.getByRole("button", { name: "Cast normally" }));
+    manualCast.availabilityFor = () => null;
+    rerender(<PlayerHand manualCast={manualCast} />);
+    expect(hand.style.zIndex).toBe('');
+    expect(dispatchActionMock).toHaveBeenCalledExactlyOnceWith(castSpell(HAND_CARD));
+  });
+
   it("keeps desktop selection local and delegates its explicit Manual choice", () => {
     const manualCast = controller();
     render(<PlayerHand manualCast={manualCast} />);

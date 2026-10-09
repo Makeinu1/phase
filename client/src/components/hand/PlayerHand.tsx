@@ -606,7 +606,7 @@ export function PlayerHand({ interactionDisabled = false, manualCast = null }: P
       style={{
         perspective: "800px",
         ...playerHandFanSizingStyle(totalFanCards),
-        zIndex: draggingCardId != null || expanded ? 40 : undefined,
+        zIndex: draggingCardId != null || expanded || manualOffer != null ? 40 : undefined,
       }}
       {...handScrubHandlers}
       onClick={handleContainerClick}
