@@ -24,6 +24,7 @@ import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 // anchoring contract on lines 114-123). Centered modals must stay out of this set.
 const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<WaitingFor["type"]>([
   "Priority",
+  "ManualResolution",
   "DeclareAttackers",
   "DeclareBlockers",
   "MulliganDecision",

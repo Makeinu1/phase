@@ -99,6 +99,23 @@ describe("DialogHost", () => {
     expect(screen.queryByLabelText("Restore dialog")).not.toBeInTheDocument();
   });
 
+  it("leaves the inline ManualResolution board and sandbox outside a blocking host", () => {
+    setWaitingFor({ type: "ManualResolution", data: { player: 0, stack_entry_id: 7 } });
+    const { container } = render(<DialogHost>{null}</DialogHost>);
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").not.toMatch(/fixed/);
+    expect(wrapper?.className ?? "").not.toMatch(/z-40/);
+  });
+
+  it("still anchors a UI dialog opened during inline ManualResolution", () => {
+    setWaitingFor({ type: "ManualResolution", data: { player: 0, stack_entry_id: 7 } });
+    useUiStore.setState({ enchantmentsDialogPlayer: 0 });
+    const { container } = render(<DialogHost><div data-testid="ui-dialog" /></DialogHost>);
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper).toHaveClass("fixed", "inset-0", GAME_Z_LAYER.dialogHost);
+    expect(wrapper?.style.pointerEvents).not.toBe("none");
+  });
+
   it("does not establish a viewport-blocking wrapper when the opponent is the waiting player (regression)", () => {
     // Opponent (player 1) is searching their library; local player is 0.
     // The host MUST NOT wrap children in `fixed inset-0 z-40`, otherwise
