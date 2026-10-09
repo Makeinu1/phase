@@ -95,13 +95,26 @@ jobs:
             ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-bindgen.log
             ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-bindgen.jsonl
             ${{ runner.temp }}/p1-evidence/candidate-wasm-enabled-bindgen.control.log
+            ${{ runner.temp }}/p1-evidence/candidate-draft-build.json
+            ${{ runner.temp }}/p1-evidence/candidate-draft-build.log
+            ${{ runner.temp }}/p1-evidence/candidate-draft-build.jsonl
+            ${{ runner.temp }}/p1-evidence/candidate-draft-build.control.log
+            ${{ runner.temp }}/p1-evidence/candidate-draft-bindgen.json
+            ${{ runner.temp }}/p1-evidence/candidate-draft-bindgen.log
+            ${{ runner.temp }}/p1-evidence/candidate-draft-bindgen.jsonl
+            ${{ runner.temp }}/p1-evidence/candidate-draft-bindgen.control.log
             ${{ runner.temp }}/p1-evidence/runtime/engine_wasm.js
             ${{ runner.temp }}/p1-evidence/runtime/engine_wasm.d.ts
             ${{ runner.temp }}/p1-evidence/runtime/engine_wasm_bg.wasm
             ${{ runner.temp }}/p1-evidence/runtime/engine_wasm_bg.wasm.d.ts
+            ${{ runner.temp }}/p1-evidence/runtime/draft_wasm.js
+            ${{ runner.temp }}/p1-evidence/runtime/draft_wasm.d.ts
+            ${{ runner.temp }}/p1-evidence/runtime/draft_wasm_bg.wasm
+            ${{ runner.temp }}/p1-evidence/runtime/draft_wasm_bg.wasm.d.ts
             ${{ runner.temp }}/p1-evidence/runtime/snippets/**/*.js
             ${{ runner.temp }}/p1-evidence/consumer-install.json
             ${{ runner.temp }}/p1-evidence/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/browser-failure.json
             ${{ runner.temp }}/p1-evidence/product-scenario.log
             ${{ runner.temp }}/p1-evidence/capture-failure-*.json
             ${{ runner.temp }}/p1-evidence/step-index.json

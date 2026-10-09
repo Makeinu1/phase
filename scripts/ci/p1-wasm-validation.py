@@ -64,6 +64,8 @@ def main():
         manifest = json.loads((evidence / 'manifest.json').read_text())
         if manifest['status'] != 'built' or manifest['runtime'] != product or manifest['consumer'] != product:
             raise ValueError('runtime provenance does not match this consumer')
+        if not {'engine_wasm.js', 'engine_wasm_bg.wasm', 'draft_wasm.js', 'draft_wasm_bg.wasm'} <= manifest['artifacts'].keys():
+            raise ValueError('both engine and draft executable runtimes are required')
         for name, value in manifest['artifacts'].items():
             path = evidence / 'runtime' / name
             if sha(path) != value['sha256'] or path.stat().st_size != value['size']:
@@ -109,6 +111,9 @@ def main():
                 'build': ['cargo', 'build', '--locked', '-p', 'engine-wasm', '--target', 'wasm32-unknown-unknown',
                           '--profile', 'wasm-dev', '--no-default-features', '--features',
                           'manual_resolution_local_bootstrap', '--message-format=json'],
+                'draft_build': ['cargo', 'build', '--locked', '-p', 'draft-wasm', '--target', 'wasm32-unknown-unknown',
+                                '--profile', 'wasm-dev', '--features',
+                                'phase-ai/manual_resolution_prototype', '--message-format=json'],
                 'environment': {key: environment.get(key) for key in
                                 ['CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'CARGO_INCREMENTAL', 'RUNNER_TEMP']},
                 'tools': {}, 'artifacts': {}}
@@ -127,10 +132,23 @@ def main():
         manifest['raw_wasm'] = {'sha256': sha(raw), 'size': raw.stat().st_size}
         guarded('candidate-wasm-enabled-bindgen', ['wasm-bindgen', '--target', 'web', '--out-name', 'engine_wasm',
                 '--out-dir', str(evidence / 'runtime'), str(raw)])
+        engine_artifacts = {str(path.relative_to(evidence / 'runtime')): sha(path)
+                            for path in (evidence / 'runtime').rglob('*') if path.is_file()}
+        # GamePage's module graph imports draft-adapter even on a Local board.
+        # Build its real dependency separately, retaining the engine build flags.
+        guarded('candidate-draft-build', manifest['draft_build'])
+        draft_raw = evidence / 'target/wasm32-unknown-unknown/wasm-dev/draft_wasm.wasm'
+        manifest['raw_draft_wasm'] = {'sha256': sha(draft_raw), 'size': draft_raw.stat().st_size}
+        guarded('candidate-draft-bindgen', ['wasm-bindgen', '--target', 'web', '--out-name', 'draft_wasm',
+                '--out-dir', str(evidence / 'runtime'), str(draft_raw)])
+        for name, digest in engine_artifacts.items():
+            if sha(evidence / 'runtime' / name) != digest:
+                raise ValueError('draft generation changed an engine artifact: ' + name)
         manifest['artifacts'] = {str(path.relative_to(evidence / 'runtime')):
                                  {'sha256': sha(path), 'size': path.stat().st_size}
                                  for path in sorted((evidence / 'runtime').rglob('*')) if path.is_file()}
-        if not {'engine_wasm.js', 'engine_wasm_bg.wasm', 'engine_wasm.d.ts', 'engine_wasm_bg.wasm.d.ts'} <= manifest['artifacts'].keys():
+        if not {prefix + suffix for prefix in ['engine_wasm', 'draft_wasm']
+                for suffix in ['.js', '_bg.wasm', '.d.ts', '_bg.wasm.d.ts']} <= manifest['artifacts'].keys():
             raise ValueError('incomplete bindgen output')
         if identity(source) != product:
             raise ValueError('candidate changed during build')

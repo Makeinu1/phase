@@ -5,6 +5,7 @@ The scenario belongs to validation scripts, and is supplied after the writer's
 fixture contract arrives. Browser/driver transport logs remain unrecorded (V0).
 """
 import argparse
+import base64
 import datetime
 import hashlib
 import json
@@ -23,6 +24,69 @@ def identity(source):
     if git('status', '--porcelain'):
         raise ValueError('consumer source must be clean')
     return {'sha': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}')}
+
+
+def capture_failure(root, source, manifest, proof, session, call):
+    """Keep a labelled live-browser diagnostic, never an acceptance snapshot."""
+    diagnostic = {'kind': 'failure-diagnostic; not acceptance', 'consumer': manifest['consumer'],
+                  'browser_status': proof['status'], 'scenario_exit_code': proof['exit_code'],
+                  'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    endpoint = '/session/' + session
+    try:
+        diagnostic['source'] = identity(source)
+        if diagnostic['source'] != manifest['consumer']:
+            raise ValueError('diagnostic consumer mismatch')
+        executable = {name: item for name, item in manifest['artifacts'].items()
+                      if name.endswith(('.js', '.wasm'))}
+        for name, item in executable.items():
+            if hashlib.sha256((source / 'client/src/wasm' / name).read_bytes()).hexdigest() != item['sha256']:
+                raise ValueError('diagnostic runtime mismatch')
+        diagnostic['installed_runtime'] = executable
+        pixels = base64.b64decode(call(endpoint + '/screenshot'), validate=True)
+        if not pixels.startswith(b'\x89PNG\r\n\x1a\n'):
+            raise ValueError('invalid diagnostic screenshot')
+        target = root / 'screenshots/diagnostic-failure.png'
+        if target.exists():
+            raise ValueError('do not overwrite a diagnostic')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(pixels)
+        diagnostic['screenshot'] = {'path': 'screenshots/diagnostic-failure.png',
+                                    'sha256': hashlib.sha256(pixels).hexdigest()}
+    except Exception as error:
+        diagnostic['screenshot_error_type'] = type(error).__name__
+    try:
+        diagnostic['public_observation'] = call(endpoint + '/execute/sync', {'script': """
+const known = ['/p1-integration-fixtures/trusted-game-states.json', '/card-data.json',
+ '/src/wasm/engine_wasm.js', '/src/wasm/engine_wasm_bg.wasm',
+ '/src/wasm/draft_wasm.js', '/src/adapter/draft-adapter.ts'];
+let state = null, observerError = null;
+try { if (typeof window.__p1Observe === 'function') state = window.__p1Observe(); }
+catch (e) { observerError = e?.name ?? 'Error'; }
+return {url: location.href.split(/[?#]/, 1)[0], state, observerError,
+ visibleText: (document.body?.innerText ?? '').slice(0, 8000),
+ viteError: (document.querySelector('vite-error-overlay')?.shadowRoot
+   ?.querySelector('.message')?.textContent ?? '').slice(0, 2000),
+ resources: performance.getEntriesByType('resource').map(e => ({path: new URL(e.name).pathname,
+   status: e.responseStatus ?? null, initiator: e.initiatorType})).filter(e => known.includes(e.path))};
+""", 'args': []})
+    except Exception as error:
+        diagnostic['observation_error_type'] = type(error).__name__
+    try:
+        # Inspect in memory, retain only categories; never persist raw console,
+        # request bodies, session IDs, checkpoints or continuation capabilities.
+        entries = call(endpoint + '/se/log', {'type': 'browser'})
+        categories = []
+        for entry in entries:
+            message = entry.get('message', '')
+            category = ('missing-draft-import' if 'Failed to resolve import' in message and '@wasm/draft' in message
+                        else 'module-fetch-failed' if 'Failed to fetch dynamically imported module' in message
+                        else 'resource-load-failed' if 'Failed to load resource' in message
+                        else 'console-message')
+            categories.append({'level': entry.get('level'), 'category': category})
+        diagnostic['console_categories'] = categories[:100]
+    except Exception as error:
+        diagnostic['console_error_type'] = type(error).__name__
+    (root / 'browser-failure.json').write_text(json.dumps(diagnostic, indent=2) + '\n')
 
 
 def main():
@@ -90,10 +154,11 @@ def main():
         created = call('/session', {'capabilities': {'alwaysMatch': {'browserName': 'chrome',
             'goog:chromeOptions': {'binary': os.environ['P1_CHROME_BINARY'], 'args':
                 ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-logging', '--log-level=3']},
-            'goog:loggingPrefs': {'browser': 'OFF', 'performance': 'OFF'}}}})
+            'goog:loggingPrefs': {'browser': 'ALL', 'performance': 'OFF'}}}})
         session = created['sessionId']
         proof['session_sha256'] = hashlib.sha256(session.encode()).hexdigest()
         call('/session/' + session + '/timeouts', {'script': 130000, 'pageLoad': 60000, 'implicit': 0})
+        call('/session/' + session + '/window/rect', {'width': 1440, 'height': 1000})
         call('/session/' + session + '/url', {'url': proof['navigation_url']})
         proof['navigation_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         proof['status'] = 'fresh-product-session'
@@ -116,6 +181,11 @@ def main():
         raise
     finally:
         if session:
+            if proof['exit_code'] != 0:
+                try:
+                    capture_failure(root, source, manifest, proof, session, call)
+                except Exception as error:
+                    proof['diagnostic_error_type'] = type(error).__name__
             try:
                 request = urllib.request.Request('http://127.0.0.1:9515/session/' + session, method='DELETE')
                 urllib.request.urlopen(request, timeout=10).close()

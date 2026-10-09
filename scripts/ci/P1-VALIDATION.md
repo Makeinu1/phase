@@ -117,6 +117,13 @@ runtime, installs frozen client dependencies, and obtains the exact matching
 Chrome for Testing / ChromeDriver 154.0.8037.92 from official vendor metadata.
 All expensive stages retain the unchanged source/resource/process guard.
 
+The producer also builds real `draft-wasm` from the same pinned source. GamePage
+reaches draft-adapter in its module graph; Vite resolves its literal dynamic
+import even when a Local game does not invoke a draft action. Engine build flags
+remain unchanged. The separate draft build enables the already-built
+`phase-ai/manual_resolution_prototype` dependency feature, shares the guarded
+target directory, and records its command, raw binary and bindgen hashes.
+
 The installer verifies every generated artifact against the producer manifest,
 but copies only executable JS/WASM (including generated snippets) into the
 consumer. Generated `.d.ts` declarations stay in producer evidence, preserving
@@ -138,3 +145,10 @@ browser profiles and raw browser transport are excluded from upload paths.
 The artifact contains safe smoke reports and observation PNG/JSON. Its GitHub
 download page is a user retrieval path; actual delivery into chat must be
 verified separately, and artifact creation alone is not delivery completion.
+
+On browser/scenario failure, `browser-failure.json` records the fresh browser's
+visible DOM text, public observer state, selected resource path/status metadata,
+console error categories and diagnostic PNG hash before session cleanup. Console
+messages and request bodies are not persisted. `diagnostic-failure.png` is a
+labelled failure observation, never an acceptance snapshot or step-index entry.
+The diagnostic retains source/runtime verification and does not extend timeouts.
