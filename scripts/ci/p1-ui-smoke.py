@@ -24,10 +24,11 @@ BASE = 'http://127.0.0.1:9515/session/' + SESSION
 spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
-report = {'scope': 'Local K1 UI continuation to paid play22; S1 life18/play21, restore, Undo and full S1-S12 unaccepted',
-          'fixture': '1c.K1', 'status': 'starting', 'assertions': [],
+PREPAYMENT = os.environ.get('P1_UI_CASE') == 'prepayment1a'
+report = {'scope': CHECKS.S1_1A_SCOPE if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
+          'fixture': '1a.B' if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
-                     for name in ['initial', 'life19', 'finish', 'paidplay22']}, 'secondary': [],
+                     for name in (['prepayment', 'manual-options', 'manual-cast', 'initial', 'life18', 'finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
@@ -325,23 +326,25 @@ const done = arguments[arguments.length - 1];
 """, 'args': []})
 
 
-def drive_fixture_opponent_pass_once():
+def drive_fixture_opponent_pass_once(expected_life=19, expected_mana=0, expected_phase="closed"):
+    assert (expected_life, expected_mana, expected_phase) in {(19, 0, 'closed'), (20, 1, 'armed'), (18, 0, 'closed')}
     # Explicit fixture participant driver, not an opponent UI click or shared client.
     return call('/execute/async', {'script': """
 const done = arguments[arguments.length - 1];
+const [life, mana, phase] = arguments;
 (async () => {
   const {useGameStore} = await import('/src/stores/gameStore.ts');
   const {dispatchAction} = await import('/src/game/dispatch.ts');
   const before = window.__p1Observe();
   if (useGameStore.getState().gameMode !== 'local' || before.waitingType !== 'Priority'
-      || before.priorityPlayer !== 1 || before.stackCount !== 1 || before.ownManaCount !== 0
-      || before.life[0] !== 19 || before.manualPhase === 'open' || before.resolvingEntryId !== null)
+      || before.priorityPlayer !== 1 || before.stackCount !== 1 || before.ownManaCount !== mana
+      || before.life[0] !== life || before.manualPhase !== phase || before.resolvingEntryId !== null)
     throw new Error('Unexpected opponent driver state');
   await dispatchAction({type: 'PassPriority'}, 1);
   done({ok: true, mode: 'explicit-local-fixture-opponent-driver', action: 'PassPriority', actor: 1,
     before, after: window.__p1Observe(), commands: 1, opponent_ui: false, two_client: false});
 })().catch(e => done({ok: false, error_type: e?.name ?? 'Error'}));
-""", 'args': []})
+""", 'args': [expected_life, expected_mana, expected_phase]})
 
 
 def capture(step):
@@ -351,12 +354,12 @@ def capture(step):
         '--state-script', str(VALIDATION / 'scripts/ci/p1-public-state.js')], check=True)
 
 
-def resolve_control():
+def resolve_control(completed_life=22):
     """Observe completion while waiting for our actual enabled priority control."""
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         state = observe()
-        if state['life'][0] == 22:
+        if state['life'][0] == completed_life:
             return None
         if state['waitingType'] == 'Priority' and state['priorityPlayer'] == 0 and state['stackCount'] == 1:
             matches = call('/elements', {'using': 'xpath', 'value': '//button[normalize-space()="Resolve"]'})
@@ -364,12 +367,150 @@ def resolve_control():
                 identifier = match['element-6066-11e4-a52e-4f735466cecf']
                 if call('/element/' + identifier + '/displayed') and call('/element/' + identifier + '/enabled'):
                     latest = observe()
-                    if latest['life'][0] == 22:
+                    if latest['life'][0] == completed_life:
                         return None
                     if latest['waitingType'] == 'Priority' and latest['priorityPlayer'] == 0 and latest['stackCount'] == 1:
                         return identifier
         time.sleep(0.25)
     raise AssertionError('Ordinary resolution neither completed nor offered an own priority control')
+
+
+
+def run_s1_1a():
+    global stage
+    def passed(name):
+        report['stages'][name] = {'status': 'passed', 'assertions_completed': True}
+    def opponent(life, mana, phase):
+        if observe()['priorityPlayer'] == 0:
+            click('//button[normalize-space()="Resolve"]', 'xpath')
+        wait_for(lambda x: x['waitingType'] == 'Priority' and x['priorityPlayer'] == 1)
+        driver = drive_fixture_opponent_pass_once(life, mana, phase)
+        assert driver.get('ok') is True and type(driver.get('commands')) is int and driver['commands'] == 1
+        report.setdefault('fixture_opponent_drivers', []).append(driver)
+    stage = 'prepayment'
+    pre = wait_for(lambda x: x['waitingType'] == 'Priority' and x['priorityPlayer'] == 0
+        and x['manualPhase'] is None and x['life'] == [20,20] and x['ownManaCount'] == 2 and x['stackCount'] == 0)
+    assert type(pre['sourceCardId']) is int and pre['sourceInHand'] and type(pre['nextCardId']) is int
+    report['prepayment'] = pre
+    assert pre['publicEvents']['lifeChanges'] == [] and pre['publicEvents']['sourceDepartures'] == 0
+    receipts = call('/execute/async', {'script': '''
+const done = arguments[arguments.length-1];
+import('/src/stores/gameStore.ts').then(({useGameStore}) => {
+ const cap = useGameStore.getState().adapter?.localContinuation?.();
+ if (!cap) return done(false);
+ const unique = new Map(); let delivered = 0;
+ cap.subscribe(p => {
+  const r = p.receipt;
+  if (r?.status !== 'completed') return;
+  const a = r.attempt;
+  if (!unique.has(a.attemptId)) unique.set(a.attemptId, {
+   sourceId: a.source?.sourceId ?? null, stackEntryId: a.source?.stackEntryId ?? null,
+   lifeChanges: (r.result?.events ?? []).filter(e=>e.type==='LifeChanged' && e.data.player_id===0)
+    .map(e=>({amount:e.data.amount,total:e.data.new_total})),
+   terminalCount: (r.result?.events ?? []).filter(e=>e.type==='StackResolved' && e.data.object_id===a.source?.stackEntryId).length});
+  if (p.appliedResult) delivered++;
+ });
+ window.__p1ReceiptSummary = () => ({completed: [...unique.values()], appliedResults: delivered});
+ done(true);
+}, () => done(false));
+''', 'args': []})
+    assert receipts is True
+    passed('prepayment')
+    stage = 'manual-card-select'
+    click('[data-hand-card][data-object-id="' + str(pre['sourceCardId']) + '"]')
+    stage = 'manual-options'
+    click('//button[normalize-space()="Resolution options for P1 Self Loss"]', 'xpath')
+    disclosure = call('/execute/sync', {'script': "return document.body.textContent.includes('Its automatic spell body will be skipped');", 'args': []})
+    assert disclosure is True and observe()['ownManaCount'] == 2 and observe()['stackCount'] == 0
+    report['prepayment_scope_visible'] = True
+    passed('manual-options')
+    stage = 'capture-prepayment'
+    capture('prepayment')
+    stage = 'manual-cast'
+    click('//button[normalize-space()="Cast with manual resolution"]', 'xpath')
+    state = wait_for(lambda x: x['waitingType'] == 'ManaPayment' or
+        (x['waitingType'] == 'Priority' and x['ownManaCount'] == 1 and x['stackCount'] == 1))
+    if state['waitingType'] == 'ManaPayment':
+        click('//button[normalize-space()="Pay"]', 'xpath')
+    paid = wait_for(lambda x: x['waitingType'] == 'Priority' and x['ownManaCount'] == 1 and x['stackCount'] == 1)
+    assert paid['life'] == [20,20] and paid['manualPhase'] == 'armed'
+    assert paid['sourceId'] == pre['sourceCardId'] and paid['resolvingEntryId'] is None
+    report['manual_paid_before_begin'] = paid
+    passed('manual-cast')
+    stage = 'manual-response'
+    opponent(20, 1, 'armed')
+    began = wait_for(lambda x: x['manualPhase'] == 'open' and x['life'] == [20,20])
+    assert began['sourceId'] == pre['sourceCardId'] and began['stackCount'] == 0 and began['ownManaCount'] == 1
+    assert type(began['manualStackEntryId']) is int and began['resolvingEntryId'] == began['manualStackEntryId']
+    assert began['publicEvents']['lifeChanges'] == [] and began['publicEvents']['sourceDepartures'] == 0 and began['publicEvents']['manualTerminals'] == 0
+    report['begin'] = began
+    passed('initial')
+    stage = 'capture-same-source'
+    capture('same-source')
+    panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
+    stage = 'player-area-select'
+    label = call('/execute/sync', {'script': "return document.querySelector('[data-testid=\"player-area-0\"] > button[aria-pressed]')?.textContent;", 'args': []})
+    assert isinstance(label, str) and 'You' in label and 'Opp 1' not in label
+    click('[data-testid="player-area-0"] > button[aria-pressed]')
+    report['own_area_label'] = 'You'
+    stage = 'life18'
+    amount = element(panel + '//input[@type="number"]', 'xpath')
+    call('/element/' + amount + '/clear', {})
+    call('/element/' + amount + '/value', {'text': '2'})
+    click(panel + '//button[@type="submit"]', 'xpath')
+    life = wait_for(lambda x: x['life'] == [18,20] and x['manualPhase'] == 'open')
+    assert life['sourceId'] == began['sourceId'] and life['resolvingEntryId'] == began['manualStackEntryId']
+    assert life['publicEvents']['lifeChanges'] == [{'amount': -2, 'total': 18}]
+    assert life['publicEvents']['sourceDepartures'] == 0 and life['publicEvents']['manualTerminals'] == 0
+    report['life_applied'] = life
+    passed('life18')
+    stage = 'capture-life18'
+    capture('life18')
+    stage = 'finish'
+    click(panel + '//button[normalize-space()="Finish"]', 'xpath')
+    ended = wait_for(lambda x: CHECKS.finish_matches(began, x, own_life=18))
+    assert ended['sourceInGraveyard'] is True and ended['ownManaCount'] == 1
+    assert ended['publicEvents']['lifeChanges'] == [{'amount': -2, 'total': 18}]
+    assert ended['publicEvents']['sourceDepartures'] == 1 and ended['publicEvents']['manualTerminals'] == 1
+    report['finished'] = ended
+    passed('finish')
+    stage = 'capture-finish'
+    capture('finish')
+    stage = 'paidplay-normal-direct'
+    click('[data-hand-card][data-object-id="' + str(pre['nextCardId']) + '"]', double=True)
+    stage = 'paidplay-payment'
+    paying = wait_for(lambda x: x['waitingType'] == 'ManaPayment' or
+        (x['waitingType'] == 'Priority' and x['stackCount'] == 1 and x['ownManaCount'] == 0))
+    if paying['waitingType'] == 'ManaPayment':
+        click('//button[normalize-space()="Pay"]', 'xpath')
+    paid_next = wait_for(lambda x: x['waitingType'] == 'Priority' and x['stackCount'] == 1 and x['ownManaCount'] == 0)
+    assert paid_next['life'] == [18,20] and paid_next['manualPhase'] == 'closed' and paid_next['resolvingEntryId'] is None
+    report['paid_before_resolution'] = paid_next
+    stage = 'paidplay-response'
+    opponent(18, 0, 'closed')
+    ordinary = wait_for(lambda x: x['life'] == [21,20] and x['stackCount'] == 0 and x['waitingType'] == 'Priority')
+    assert ordinary['ownManaCount'] == 0 and ordinary['nextInGraveyard'] is True and ordinary['nextCardId'] is None
+    assert ordinary['resolvingEntryId'] is None and ordinary['manualPhase'] == 'closed'
+    assert ordinary['publicEvents']['lifeChanges'] == [{'amount': -2, 'total': 18}, {'amount': 3, 'total': 21}]
+    assert ordinary['publicEvents']['sourceDepartures'] == 1 and ordinary['publicEvents']['manualTerminals'] == 1
+    assert ordinary['publicEvents']['nextDepartures'] == 1
+    report['ordinary_completed'] = ordinary
+    report['receipt_summary'] = call('/execute/sync', {'script': 'return window.__p1ReceiptSummary();', 'args': []})
+    rs = report['receipt_summary']
+    assert len(rs['completed']) == 3 and rs['appliedResults'] == 3
+    cast_receipts = [r for r in rs['completed'] if r['stackEntryId'] is None]
+    operation_receipts = [r for r in rs['completed'] if r['stackEntryId'] == began['manualStackEntryId']]
+    assert len(cast_receipts) == 1 and cast_receipts[0]['sourceId'] == began['sourceId']
+    assert cast_receipts[0]['lifeChanges'] == [] and cast_receipts[0]['terminalCount'] == 0
+    assert len(operation_receipts) == 2
+    assert all(r['sourceId'] == began['sourceId'] and r['stackEntryId'] == began['manualStackEntryId'] for r in operation_receipts)
+    assert sorted(r['terminalCount'] for r in operation_receipts) == [0,1]
+    assert [e for r in operation_receipts for e in r['lifeChanges']] == [{'amount': -2, 'total': 18}]
+    passed('paidplay21')
+    stage = 'capture-paidplay21'
+    capture('paidplay21')
+    report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
+    report['status'] = 'passed'
 
 
 stage = 'application-observer'
@@ -388,10 +529,18 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
   window.__p1Observe = () => {
     const s = useGameStore.getState(), g = s.gameState;
     const v = g?.derived?.manual_resolution;
+    const sourceId = Object.values(g?.objects ?? {}).find(o => o.name === 'P1 Self Loss')?.id ?? null;
     const nextId = g?.players?.[0]?.hand?.find(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? null;
+    if (nextId !== null) window.__p1NextSource = nextId;
     const nextObject = nextId === null ? null : g?.objects?.[nextId];
     const nextActions = nextId === null ? [] : s.legalActionsByObject?.[String(nextId)] ?? [];
     return {life: g?.players?.map(p => p.life) ?? [],
+      sourceCardId: sourceId, sourceInHand: sourceId !== null && (g?.players?.[0]?.hand ?? []).includes(sourceId),
+      sourceInGraveyard: sourceId !== null && (g?.players?.[0]?.graveyard ?? []).includes(sourceId),
+      publicEvents: {lifeChanges: (s.eventHistory ?? []).filter(e=>e.type==='LifeChanged' && e.data.player_id===0).map(e=>({amount:e.data.amount,total:e.data.new_total})),
+        sourceDepartures: (s.eventHistory ?? []).filter(e=>e.type==='ZoneChanged' && e.data.object_id===sourceId && e.data.from==='Stack' && e.data.to==='Graveyard').length,
+        nextDepartures: (s.eventHistory ?? []).filter(e=>e.type==='ZoneChanged' && e.data.object_id===window.__p1NextSource && e.data.from==='Stack' && e.data.to==='Graveyard').length,
+        manualTerminals: (s.eventHistory ?? []).filter(e=>e.type==='StackResolved' && e.data.object_id===v?.source?.stackEntryId).length},
       manualPhase: v?.phase ?? null, sourceId: v?.source?.sourceId ?? null,
       sourceName: v?.source?.name ?? null, stackCount: g?.stack?.length ?? null,
       manualStackEntryId: v?.source?.stackEntryId ?? null,
@@ -412,112 +561,115 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
 }, () => done(false));
 """, 'args': []})
     assert ready, 'Public observer module could not load'
-    stage = 'initial'
-    initial = wait_for(lambda s: s['manualPhase'] == 'open' and s['life'][:1] == [20])
-    assert initial['sourceId'] is not None
-    assert initial['stackCount'] == 0, 'K1 Begin already popped the sole ordinary stack entry'
-    assert type(initial['manualStackEntryId']) is int and initial['resolvingEntryId'] == initial['manualStackEntryId']
-    stage = 'checked-restore-k1'
-    restore = checked_restore_current_k1()
-    report['checked_restore_k1'] = restore
-    assert restore.get('ok') is True and all(value is True for value in restore['contextChecks'].values())
-    initial = wait_for(lambda current: current == restore['after'])
-    for key in ['life', 'manualPhase', 'sourceId', 'sourceName', 'stackCount', 'manualStackEntryId', 'resolvingEntryId', 'waitingType', 'priorityPlayer', 'ownManaCount', 'nextCardId']:
-        assert restore['before'][key] == restore['after'][key], 'K1 restore changed a public occurrence field'
-    report['stages']['checked-restore-k1'] = {'status': 'passed', 'assertions_completed': True}
-    report['assertions'].append('Live engine persistence exported in memory and authenticated K1 checked restore preserved public occurrence/Begin state while renewing session, epoch and adapter generation; subsequent Apply/Finish use current real UI')
-    panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
-    element(panel, 'xpath')
-    report['stages']['initial'] = {'status': 'passed', 'assertions_completed': True}
-    stage = 'capture-same-source'
-    capture('same-source')
-    stage = 'player-area-select'
-    report['assertions'].append('trusted fixture reached Manual Open with own life 20')
-    click('[data-testid="player-area-0"] > button[aria-pressed]')
-    amount = element(panel + '//input[@type="number"]', 'xpath')
-    call('/element/' + amount + '/clear', {})
-    call('/element/' + amount + '/value', {'text': '1'})
-    call('/element/' + element(panel + '//button[@type="submit"]', 'xpath') + '/click', {})
-    stage = 'life19'
-    after_life = wait_for(lambda s: s['life'][:1] == [19] and s['manualPhase'] == 'open')
-    assert after_life['sourceId'] == initial['sourceId']
-    assert after_life['stackCount'] == initial['stackCount']
-    assert after_life['resolvingEntryId'] == after_life['manualStackEntryId'] == initial['manualStackEntryId']
-    report['stages']['life19'] = {'status': 'passed', 'assertions_completed': True}
-    stage = 'capture-life19'
-    capture('life19')
-    report['assertions'].append('real Apply click lost one life on the same open source')
-    # Locate the existing visible Finish button, then issue a real WebDriver click.
-    stage = 'finish'
-    finish = element(panel + '//button[normalize-space()="Finish"]', 'xpath')
-    call('/element/' + finish + '/click', {})
-    ended = wait_for(lambda s: CHECKS.finish_matches(initial, s))
-    assert ended['life'][0] == 19
-    report['stages']['finish'] = {'status': 'passed', 'assertions_completed': True}
-    stage = 'capture-finish'
-    capture('finish')
-    report['assertions'].append('real Finish click closed the exact resolving entry and returned Priority; ordinary stack stayed empty and life stayed 19')
-    # The native fixture has one remaining generic mana and a +3-life ordinary
-    # spell. Continue from life19, hence 22; this is not the S1 life18 -> 21 path.
-    stage = 'paidplay-normal-direct'
-    assert ended['ownManaCount'] == 1 and type(ended['nextCardId']) is int
-    next_id = ended['nextCardId']
-    click('[data-hand-card][data-object-id="' + str(next_id) + '"]', double=True)
-    command = report['click_commands'][-1]
-    events = command['native_input_observation']['events']
-    command['dblclick_received_by_requested_card'] = any(e['type'] == 'dblclick' and e['trusted']
-        and e['target']['withinRequestedCard'] for e in events if e.get('target'))
-    assert command['dblclick_received_by_requested_card'], 'Native pointer pair did not deliver a trusted dblclick to the requested card'
-    stage = 'paidplay-payment'
-    paying = wait_for(lambda s: s['waitingType'] == 'ManaPayment'
-                      or (s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0))
-    if paying['waitingType'] == 'ManaPayment':
-        pay = element('//button[normalize-space()="Pay"]', 'xpath')
-        call('/element/' + pay + '/click', {})
-    paid = wait_for(lambda s: s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0)
-    assert paid['life'][0] == 19 and paid['manualPhase'] != 'open' and paid['resolvingEntryId'] is None
-    assert paid['nextCardId'] is None and paid['nextInGraveyard'] is False
-    report['paid_before_resolution'] = paid
-    if paid['priorityPlayer'] == 0:
-        stage = 'paidplay-own-pass-before-driver'
-        resolve = resolve_control()
-        assert resolve is not None
-        before_own_pass = observe()
-        assert before_own_pass['priorityPlayer'] == 0 and before_own_pass['stackCount'] == 1
-        call('/element/' + resolve + '/click', {})
-        report['own_pass_before_driver'] = {'method': 'native-own-Resolve', 'before': before_own_pass}
-        wait_for(lambda current: current['waitingType'] == 'Priority' and current['priorityPlayer'] == 1
-                 and current['stackCount'] == 1 and current['ownManaCount'] == 0)
-    stage = 'fixture-opponent-pass'
-    driver = drive_fixture_opponent_pass_once()
-    report['fixture_opponent_driver'] = driver
-    assert driver.get('ok') is True and type(driver.get('commands')) is int and driver['commands'] == 1
-    report['stages']['fixture-opponent-pass'] = {'status': 'passed', 'assertions_completed': True}
-    stage = 'paidplay-resolve'
-    # Explicit fixture opponent pass uses the ordinary command pipeline. Any
-    # remaining own pass still uses the actual UI; never click again
-    # after the observed life change.
-    for _ in range(2):
-        resolve = resolve_control()
-        if resolve is None:
-            break
-        before = observe()
-        if before['life'][0] == 22:
-            break
-        if before['waitingType'] != 'Priority' or before['priorityPlayer'] != 0 or before['stackCount'] != 1:
-            continue
-        call('/element/' + resolve + '/click', {})
-        wait_for(lambda s: s['life'][0] == 22 or s['priorityPlayer'] != before['priorityPlayer'])
-    ordinary = wait_for(lambda s: s['life'][0] == 22 and s['stackCount'] == 0 and s['waitingType'] == 'Priority')
-    assert ordinary['ownManaCount'] == 0 and ordinary['resolvingEntryId'] is None
-    assert ordinary['manualPhase'] != 'open' and ordinary['nextInGraveyard'] is True
-    assert ordinary['nextCardId'] is None and ordinary['life'][1] == initial['life'][1]
-    report['stages']['paidplay22'] = {'status': 'passed', 'assertions_completed': True}
-    stage = 'capture-paidplay22'
-    capture('paidplay22')
-    report['assertions'].append('Existing ordinary card double-click paid the remaining one mana; normal priority resolution gained exactly three life to22, moved the next card to graveyard and left no manual carrier')
-    report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
-    report['status'] = 'passed'
+    if PREPAYMENT:
+        run_s1_1a()
+    else:
+        stage = 'initial'
+        initial = wait_for(lambda s: s['manualPhase'] == 'open' and s['life'][:1] == [20])
+        assert initial['sourceId'] is not None
+        assert initial['stackCount'] == 0, 'K1 Begin already popped the sole ordinary stack entry'
+        assert type(initial['manualStackEntryId']) is int and initial['resolvingEntryId'] == initial['manualStackEntryId']
+        stage = 'checked-restore-k1'
+        restore = checked_restore_current_k1()
+        report['checked_restore_k1'] = restore
+        assert restore.get('ok') is True and all(value is True for value in restore['contextChecks'].values())
+        initial = wait_for(lambda current: current == restore['after'])
+        for key in ['life', 'manualPhase', 'sourceId', 'sourceName', 'stackCount', 'manualStackEntryId', 'resolvingEntryId', 'waitingType', 'priorityPlayer', 'ownManaCount', 'nextCardId']:
+            assert restore['before'][key] == restore['after'][key], 'K1 restore changed a public occurrence field'
+        report['stages']['checked-restore-k1'] = {'status': 'passed', 'assertions_completed': True}
+        report['assertions'].append('Live engine persistence exported in memory and authenticated K1 checked restore preserved public occurrence/Begin state while renewing session, epoch and adapter generation; subsequent Apply/Finish use current real UI')
+        panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
+        element(panel, 'xpath')
+        report['stages']['initial'] = {'status': 'passed', 'assertions_completed': True}
+        stage = 'capture-same-source'
+        capture('same-source')
+        stage = 'player-area-select'
+        report['assertions'].append('trusted fixture reached Manual Open with own life 20')
+        click('[data-testid="player-area-0"] > button[aria-pressed]')
+        amount = element(panel + '//input[@type="number"]', 'xpath')
+        call('/element/' + amount + '/clear', {})
+        call('/element/' + amount + '/value', {'text': '1'})
+        call('/element/' + element(panel + '//button[@type="submit"]', 'xpath') + '/click', {})
+        stage = 'life19'
+        after_life = wait_for(lambda s: s['life'][:1] == [19] and s['manualPhase'] == 'open')
+        assert after_life['sourceId'] == initial['sourceId']
+        assert after_life['stackCount'] == initial['stackCount']
+        assert after_life['resolvingEntryId'] == after_life['manualStackEntryId'] == initial['manualStackEntryId']
+        report['stages']['life19'] = {'status': 'passed', 'assertions_completed': True}
+        stage = 'capture-life19'
+        capture('life19')
+        report['assertions'].append('real Apply click lost one life on the same open source')
+        # Locate the existing visible Finish button, then issue a real WebDriver click.
+        stage = 'finish'
+        finish = element(panel + '//button[normalize-space()="Finish"]', 'xpath')
+        call('/element/' + finish + '/click', {})
+        ended = wait_for(lambda s: CHECKS.finish_matches(initial, s))
+        assert ended['life'][0] == 19
+        report['stages']['finish'] = {'status': 'passed', 'assertions_completed': True}
+        stage = 'capture-finish'
+        capture('finish')
+        report['assertions'].append('real Finish click closed the exact resolving entry and returned Priority; ordinary stack stayed empty and life stayed 19')
+        # The native fixture has one remaining generic mana and a +3-life ordinary
+        # spell. Continue from life19, hence 22; this is not the S1 life18 -> 21 path.
+        stage = 'paidplay-normal-direct'
+        assert ended['ownManaCount'] == 1 and type(ended['nextCardId']) is int
+        next_id = ended['nextCardId']
+        click('[data-hand-card][data-object-id="' + str(next_id) + '"]', double=True)
+        command = report['click_commands'][-1]
+        events = command['native_input_observation']['events']
+        command['dblclick_received_by_requested_card'] = any(e['type'] == 'dblclick' and e['trusted']
+            and e['target']['withinRequestedCard'] for e in events if e.get('target'))
+        assert command['dblclick_received_by_requested_card'], 'Native pointer pair did not deliver a trusted dblclick to the requested card'
+        stage = 'paidplay-payment'
+        paying = wait_for(lambda s: s['waitingType'] == 'ManaPayment'
+                          or (s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0))
+        if paying['waitingType'] == 'ManaPayment':
+            pay = element('//button[normalize-space()="Pay"]', 'xpath')
+            call('/element/' + pay + '/click', {})
+        paid = wait_for(lambda s: s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0)
+        assert paid['life'][0] == 19 and paid['manualPhase'] != 'open' and paid['resolvingEntryId'] is None
+        assert paid['nextCardId'] is None and paid['nextInGraveyard'] is False
+        report['paid_before_resolution'] = paid
+        if paid['priorityPlayer'] == 0:
+            stage = 'paidplay-own-pass-before-driver'
+            resolve = resolve_control()
+            assert resolve is not None
+            before_own_pass = observe()
+            assert before_own_pass['priorityPlayer'] == 0 and before_own_pass['stackCount'] == 1
+            call('/element/' + resolve + '/click', {})
+            report['own_pass_before_driver'] = {'method': 'native-own-Resolve', 'before': before_own_pass}
+            wait_for(lambda current: current['waitingType'] == 'Priority' and current['priorityPlayer'] == 1
+                     and current['stackCount'] == 1 and current['ownManaCount'] == 0)
+        stage = 'fixture-opponent-pass'
+        driver = drive_fixture_opponent_pass_once()
+        report['fixture_opponent_driver'] = driver
+        assert driver.get('ok') is True and type(driver.get('commands')) is int and driver['commands'] == 1
+        report['stages']['fixture-opponent-pass'] = {'status': 'passed', 'assertions_completed': True}
+        stage = 'paidplay-resolve'
+        # Explicit fixture opponent pass uses the ordinary command pipeline. Any
+        # remaining own pass still uses the actual UI; never click again
+        # after the observed life change.
+        for _ in range(2):
+            resolve = resolve_control()
+            if resolve is None:
+                break
+            before = observe()
+            if before['life'][0] == 22:
+                break
+            if before['waitingType'] != 'Priority' or before['priorityPlayer'] != 0 or before['stackCount'] != 1:
+                continue
+            call('/element/' + resolve + '/click', {})
+            wait_for(lambda s: s['life'][0] == 22 or s['priorityPlayer'] != before['priorityPlayer'])
+        ordinary = wait_for(lambda s: s['life'][0] == 22 and s['stackCount'] == 0 and s['waitingType'] == 'Priority')
+        assert ordinary['ownManaCount'] == 0 and ordinary['resolvingEntryId'] is None
+        assert ordinary['manualPhase'] != 'open' and ordinary['nextInGraveyard'] is True
+        assert ordinary['nextCardId'] is None and ordinary['life'][1] == initial['life'][1]
+        report['stages']['paidplay22'] = {'status': 'passed', 'assertions_completed': True}
+        stage = 'capture-paidplay22'
+        capture('paidplay22')
+        report['assertions'].append('Existing ordinary card double-click paid the remaining one mana; normal priority resolution gained exactly three life to22, moved the next card to graveyard and left no manual carrier')
+        report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
+        report['status'] = 'passed'
 except Exception as error:
     exit_code = 1
     report['status'] = 'failed'
@@ -527,7 +679,7 @@ except Exception as error:
               else 'operation-assertion-failed' if isinstance(error, AssertionError)
               else 'scenario-command-failed')
     report['primary'] = {'stage': stage, 'code': 1, 'reason': reason}
-    if stage == 'capture-finish' and all(item['assertions_completed'] is True for item in report['stages'].values()):
+    if stage in {'capture-finish', 'capture-paidplay21', 'capture-paidplay22'} and all(item['assertions_completed'] is True for item in report['stages'].values()):
         report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         report['secondary'].append({'stage': stage, 'code': 1, 'reason': 'required-capture-failed'})
         report['status'] = 'incomplete'

@@ -188,12 +188,13 @@ offered, and actual own-priority **Resolve** controls. It requires remaining
 mana1 → 0, a paid ordinary stack entry before resolution, life19 + 3 = 22,
 the next card in graveyard, an empty stack and no open manual carrier. Four
 screenshots/public-state receipts including `paidplay22` are mandatory and
-checked against the current consumer execution. Opponent priority is observed
+checked against the current consumer execution. In the pre-driver validation
+through run37976165163, opponent priority was observed
 without submitting an action on its behalf; completion remains observable
 while waiting for a visible own control. A blocked opponent turn is retained
 as a failed diagnostic, not bypassed with store edits or forced clicks.
 
-This bounded continuation does **not** establish S1's life18 → paidplay21,
+That pre-driver continuation did **not** establish S1's life18 → paidplay21,
 before-payment manual designation, checked save/restore, Undo, or full S1–S12
 acceptance. The existing pinned same-product producer37956261306 runtime is
 reused through the ordinary Actions API; no product or build-input changes.
@@ -220,7 +221,7 @@ public guards do not explain the non-transition, actual handler/dispatch
 observation is still required; no success is inferred from static source.
 
 ### Bounded live K1 restore and explicit fixture opponent participant
-The next validation exports the current live K1 trusted persistence through
+The current bounded validation exports the live K1 trusted persistence through
 `exportPersistenceState` and restores that same in-memory checkpoint through
 `localContinuation().restore`. No raw checkpoint/context is written to evidence.
 It requires preserved public source/carrier/Begin/wait/life and changed opaque
@@ -235,3 +236,37 @@ change state, invoke playCard, use Resolve All, emulate an ACK, or claim an
 opponent UI click or two-client/S9 acceptance. Any remaining own pass is a
 native UI click. The final four captures require genuine life22/graveyard/stack0
 and no manual carrier; driver assistance must remain visible in evidence.
+
+Run37978983564 passed this bounded case. An independent formal reader verified
+ZIP/internal source hashes, all four PNG/state/index hashes and personally
+viewed all images. All four context checks passed; one fixture opponent
+PassPriority produced life22/mana0/graveyardtrue/stack0. K1-only checked restore
+and this driver-assisted continuation are accepted; full S8 remains unaccepted.
+Both generated reports share `BOUNDED_K1_SCOPE`; the operation validator rejects
+a missing or inconsistent scope. Earlier artifact bytes and historical results
+are retained unchanged. This wording-only follow-up requires lightweight
+validation, not another WASM/UI CI run.
+
+
+### Current finite prepayment UI slice
+
+The reviewed current CI entry is initial fixture `1a.B` on the normal Local
+`/game/:id` route. The fixture supplies the starting board only. Real native
+browser inputs select S, open resolution options, choose Manual before payment,
+pay through ordinary payment, and issue A's priority response. Each B response
+uses the existing, explicit single-command fixture participant driver. This is
+assistance, not opponent UI or two-client/D acceptance.
+
+Five mandatory captures show the prepayment options disclosure, Begin at life20,
+Apply2 at life18, Finish at life18 with S in graveyard/carrier released, and N's
+paid ordinary resolution at life21. Initial mana2, S paid mana1, N paid mana0;
+public source/occurrence, bounded engine events, and completed Local receipt
+delivery are cross-checked. Missing captures fail acceptance. No forced clicks,
+DOM changes, seat switch, or unannounced pass is used.
+
+This finite positive S1-1a/S12c path does not accept all S1–S12. Auto/N controls,
+wrong actor/stale refusal, the mandatory 1c two-Apply receipt-relookup path,
+Undo/Recovery, D/two-client, and the other finite groups remain separate gates.
+Historical K1 checked-restore validation and its artifacts remain available.
+The changed product SHA requires a fresh guarded runtime build; an old runtime
+must never be relabelled as this candidate.

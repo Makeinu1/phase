@@ -17,13 +17,21 @@ import zlib
 import urllib.request
 
 
+BOUNDED_K1_SCOPE = ('Local K1 checked-restore and real UI continuation to paid play22 with explicit fixture opponent driver; '
+                    'K1-only acceptance when passed; full S8, opponent UI, two-client S9, '
+                    'S1 life18/play21, Undo and full S1-S12 unaccepted')
+
+
+S1_1A_SCOPE = 'S1-1a and S12c prepayment Manual UI with explicit fixture opponent passes; not full P1, opponent UI, two-client, Undo or Recovery acceptance'
+
+
 class EvidenceFailure(ValueError):
     def __init__(self, stage, reason):
         self.stage, self.reason = stage, reason
         super().__init__(reason)
 
 
-def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False):
+def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False, s1_1a=False):
     """Require explicit operation completion; image receipts are observations."""
     def reject(reason):
         raise EvidenceFailure('operation-assertions', reason)
@@ -39,12 +47,15 @@ def validate_operations(report, consumer, execution, paidplay=False, restore_dri
     stages = report.get('stages')
     if not isinstance(stages, dict):
         reject('required-operation-stages-missing')
-    for stage in ['initial', 'life19', 'finish'] + (['paidplay22'] if paidplay else []) + (['checked-restore-k1', 'fixture-opponent-pass'] if restore_driver else []):
+    required = (['prepayment', 'manual-options', 'manual-cast', 'initial', 'life18', 'finish', 'paidplay21'] if s1_1a else ['initial', 'life19', 'finish'] + (['paidplay22'] if paidplay else []) + (['checked-restore-k1', 'fixture-opponent-pass'] if restore_driver else []))
+    for stage in required:
         item = stages.get(stage)
         if not isinstance(item, dict):
             reject('required-operation-stage-missing:' + stage)
         if item.get('status') != 'passed' or item.get('assertions_completed') is not True:
             reject('required-operation-stage-incomplete:' + stage)
+    if s1_1a:
+        validate_s1_1a(report)
     if paidplay:
         paid = report.get('paid_before_resolution')
         if (not isinstance(paid, dict) or paid.get('life') != [19, 20]
@@ -55,6 +66,8 @@ def validate_operations(report, consumer, execution, paidplay=False, restore_dri
                 or paid.get('nextCardId', 'missing') is not None or paid.get('nextInGraveyard') is not False):
             reject('paid-before-resolution-incomplete')
     if restore_driver:
+        if report.get('scope') != BOUNDED_K1_SCOPE:
+            reject('bounded-k1-scope-mismatch')
         restore = report.get('checked_restore_k1')
         checks = restore.get('contextChecks') if isinstance(restore, dict) else None
         expected_checks = {'sameOwner', 'newSession', 'nextRestoreEpoch', 'nextAdapterGeneration'}
@@ -93,6 +106,75 @@ def validate_operations(report, consumer, execution, paidplay=False, restore_dri
                 or pending.get('resolvingEntryId', 'missing') is not None
                 or pending.get('nextCardId', 'missing') is not None or pending.get('nextInGraveyard') is not False):
             reject('fixture-opponent-driver-boundary-mismatch')
+
+
+def validate_s1_1a(report):
+    def require(condition, reason):
+        if not condition:
+            raise EvidenceFailure('operation-assertions', 's1-1a-' + reason)
+    require(report.get('scope') == S1_1A_SCOPE and report.get('fixture') == '1a.B', 'scope-fixture-mismatch')
+    pre, paid, begin, life, end, next_paid, next_done = (report.get(k) for k in
+        ['prepayment', 'manual_paid_before_begin', 'begin', 'life_applied', 'finished', 'paid_before_resolution', 'ordinary_completed'])
+    require(all(isinstance(x, dict) for x in [pre, paid, begin, life, end, next_paid, next_done]), 'public-boundaries-missing')
+    source, entry = pre.get('sourceCardId'), begin.get('manualStackEntryId')
+    require(type(source) is int and type(entry) is int and type(pre.get('nextCardId')) is int, 'source-occurrence-missing')
+    require(pre.get('sourceInHand') is True and pre.get('sourceInGraveyard') is False
+        and pre.get('manualPhase') is None and pre.get('resolvingEntryId') is None
+        and pre.get('stackCount') == 0 and pre.get('life') == [20,20] and pre.get('ownManaCount') == 2
+        and pre.get('waitingType') == 'Priority' and pre.get('priorityPlayer') == 0, 'not-before-designation-payment')
+    require(report.get('prepayment_scope_visible') is True and report.get('own_area_label') == 'You', 'real-scope-own-area-label-missing')
+    require(paid.get('life') == [20,20] and paid.get('ownManaCount') == 1 and paid.get('stackCount') == 1
+        and paid.get('manualPhase') == 'armed' and paid.get('sourceId') == source
+        and paid.get('resolvingEntryId') is None and paid.get('waitingType') == 'Priority', 'manual-payment-boundary-mismatch')
+    require(begin.get('life') == [20,20] and begin.get('ownManaCount') == 1 and begin.get('stackCount') == 0
+        and begin.get('manualPhase') == 'open' and begin.get('sourceId') == source
+        and begin.get('resolvingEntryId') == entry, 'begin-boundary-mismatch')
+    require(life.get('life') == [18,20] and life.get('ownManaCount') == 1 and life.get('stackCount') == 0
+        and life.get('manualPhase') == 'open' and life.get('sourceId') == source
+        and life.get('manualStackEntryId') == entry and life.get('resolvingEntryId') == entry, 'apply-boundary-mismatch')
+    require(finish_matches(begin, end, own_life=18) and end.get('sourceInGraveyard') is True
+        and end.get('ownManaCount') == 1, 'finish-boundary-mismatch')
+    require(next_paid.get('life') == [18,20] and next_paid.get('ownManaCount') == 0 and next_paid.get('stackCount') == 1
+        and next_paid.get('manualPhase') == 'closed' and next_paid.get('resolvingEntryId') is None
+        and next_paid.get('waitingType') == 'Priority' and next_paid.get('nextCardId', 'missing') is None
+        and next_paid.get('nextInGraveyard') is False, 'ordinary-payment-boundary-mismatch')
+    require(next_done.get('life') == [21,20] and next_done.get('ownManaCount') == 0 and next_done.get('stackCount') == 0
+        and next_done.get('manualPhase') == 'closed' and next_done.get('resolvingEntryId') is None
+        and next_done.get('waitingType') == 'Priority' and next_done.get('nextCardId', 'missing') is None
+        and next_done.get('nextInGraveyard') is True, 'ordinary-completion-boundary-mismatch')
+    drivers = report.get('fixture_opponent_drivers')
+    require(isinstance(drivers, list) and len(drivers) == 2, 'fixture-driver-count')
+    for driver, boundary, amount, mana, phase in zip(drivers, [paid, next_paid], [20,18], [1,0], ['armed','closed']):
+        require(isinstance(driver, dict) and driver.get('ok') is True and driver.get('mode') == 'explicit-local-fixture-opponent-driver'
+            and driver.get('action') == 'PassPriority' and type(driver.get('actor')) is int and driver['actor'] == 1
+            and type(driver.get('commands')) is int and driver['commands'] == 1
+            and driver.get('opponent_ui') is False and driver.get('two_client') is False, 'fixture-driver-invalid')
+        b = driver.get('before')
+        require(isinstance(b, dict) and b.get('life') == [amount,20] and b.get('ownManaCount') == mana
+            and b.get('manualPhase') == phase and b.get('priorityPlayer') == 1 and b.get('waitingType') == 'Priority'
+            and b.get('stackCount') == 1 and b.get('resolvingEntryId') is None
+            and b.get('sourceId') == source and b.get('manualStackEntryId') == boundary.get('manualStackEntryId'), 'fixture-driver-boundary')
+    for state, changes, departed, terminals, next_departed in [
+        (pre, [], 0, 0, 0), (begin, [], 0, 0, 0),
+        (life, [{'amount':-2,'total':18}],0,0,0), (end,[{'amount':-2,'total':18}],1,1,0),
+        (next_done,[{'amount':-2,'total':18},{'amount':3,'total':21}],1,1,1)]:
+        require(state.get('publicEvents') == {'lifeChanges':changes,'sourceDepartures':departed,
+            'manualTerminals':terminals,'nextDepartures':next_departed}, 'event-boundary-mismatch')
+    summary = report.get('receipt_summary')
+    require(isinstance(summary, dict) and summary.get('appliedResults') == 3, 'receipt-delivery-count')
+    receipts = summary.get('completed')
+    require(isinstance(receipts, list) and len(receipts) == 3 and all(isinstance(r,dict) for r in receipts), 'receipt-count')
+    cast_receipts = [r for r in receipts if r.get('stackEntryId', 'missing') is None]
+    operation_receipts = [r for r in receipts if r.get('stackEntryId') == entry]
+    require(len(cast_receipts) == 1 and len(operation_receipts) == 2
+        and cast_receipts[0].get('sourceId') == source and cast_receipts[0].get('lifeChanges') == []
+        and cast_receipts[0].get('terminalCount') == 0, 'cast-receipt-mismatch')
+    require(all(r.get('sourceId') == source and r.get('stackEntryId') == entry for r in operation_receipts)
+        and sorted(r.get('terminalCount', -1) for r in operation_receipts) == [0,1]
+        and [e for r in operation_receipts for e in r.get('lifeChanges', [])] == [{'amount':-2,'total':18}], 'receipt-source-event-mismatch')
+    commands = report.get('click_commands', [])
+    require(all(any(c.get('operation') == stage and c.get('status') == 'completed' for c in commands)
+        for stage in ['manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']), 'native-clicks-missing')
 
 
 def valid_png(data):
@@ -139,7 +221,7 @@ def valid_png(data):
     return False
 
 
-def finish_matches(initial, ended):
+def finish_matches(initial, ended, own_life=19):
     """Begin already popped this occurrence; Finish releases its carrier.
 
     Ordinary stack entries, whether zero or nonzero, are not the resolving
@@ -151,14 +233,14 @@ def finish_matches(initial, ended):
             and initial.get('resolvingEntryId') == entry
             and type(count) is int and count >= 0
             and ended.get('manualPhase') == 'closed' and ended.get('waitingType') == 'Priority'
-            and ended.get('life', [])[:1] == [19]
+            and ended.get('life', [])[:1] == [own_life]
             and ended.get('sourceId') == initial.get('sourceId')
             and ended.get('manualStackEntryId') == entry
             and 'resolvingEntryId' in ended and ended['resolvingEntryId'] is None
             and type(ended.get('stackCount')) is int and ended['stackCount'] == count)
 
 
-def validate_required_images(root, manifest, execution, paidplay=False):
+def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False):
     """Recheck the three existing capture receipts and saved public bytes."""
     def reject(reason):
         raise EvidenceFailure('required-images', reason)
@@ -169,7 +251,7 @@ def validate_required_images(root, manifest, execution, paidplay=False):
     if not isinstance(steps, list) or any(not isinstance(item, dict) for item in steps):
         reject('required-image-index-invalid')
     observations = {}
-    required = ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
+    required = ['prepayment','same-source','life18','finish','paidplay21'] if s1_1a else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
     for step in required:
         matches = [item for item in steps if item.get('step') == step]
         if len(matches) != 1:
@@ -219,23 +301,30 @@ def validate_required_images(root, manifest, execution, paidplay=False):
                         or (state['waitingType'] is not None and not isinstance(state['waitingType'], str))):
                     reject('required-state-invalid:' + step)
                 observations[step] = state
-    initial, life, finish = (observations[step] for step in ['same-source', 'life19', 'finish'])
+    own_life = 18 if s1_1a else 19
+    initial, life, finish = (observations[step] for step in ['same-source', 'life18' if s1_1a else 'life19', 'finish'])
+    if s1_1a:
+        pre = observations['prepayment']
+        if (pre['life'] != [20,20] or pre['manualPhase'] is not None or pre['stackCount'] != 0
+                or pre['resolvingEntryId'] is not None or pre.get('ownManaCount') != 2
+                or pre.get('sourceInHand') is not True or pre.get('sourceCardId') != initial['sourceId']):
+            reject('required-state-content-mismatch:prepayment')
     if (initial['life'][0] != 20 or initial['manualPhase'] != 'open' or initial['sourceId'] is None
             or type(initial['manualStackEntryId']) is not int
             or initial['resolvingEntryId'] != initial['manualStackEntryId']):
         reject('required-state-content-mismatch:same-source')
-    if (life['life'][0] != 19 or life['manualPhase'] != 'open' or life['sourceId'] != initial['sourceId']
+    if (life['life'][0] != own_life or life['manualPhase'] != 'open' or life['sourceId'] != initial['sourceId']
             or life['manualStackEntryId'] != initial['manualStackEntryId']
             or life['resolvingEntryId'] != initial['manualStackEntryId']
             or life['stackCount'] != initial['stackCount']):
         reject('required-state-content-mismatch:life19')
-    if not finish_matches(initial, finish):
+    if not finish_matches(initial, finish, own_life=own_life):
         reject('required-state-content-mismatch:finish')
-    if paidplay:
-        next_play = observations['paidplay22']
+    if paidplay or s1_1a:
+        next_play = observations['paidplay21' if s1_1a else 'paidplay22']
         if (type(finish.get('ownManaCount')) is not int or finish['ownManaCount'] != 1
                 or type(finish.get('nextCardId')) is not int or finish.get('nextInGraveyard') is not False
-                or next_play['life'] != [22, initial['life'][1]]
+                or next_play['life'] != [21 if s1_1a else 22, initial['life'][1]]
                 or next_play['stackCount'] != 0 or next_play['waitingType'] != 'Priority'
                 or next_play['manualPhase'] == 'open' or next_play['resolvingEntryId'] is not None
                 or type(next_play.get('ownManaCount')) is not int or next_play['ownManaCount'] != 0

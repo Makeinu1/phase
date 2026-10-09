@@ -192,7 +192,7 @@ class FinishEvidenceTests(unittest.TestCase):
                     self.assertEqual(namespace['resolve_control'](), expected)
                 self.assertFalse(any(path.endswith('/click') for path in requests))
 
-    def verify(self, stack_count=0, finish_changes=None, initial_changes=None, paidplay=False, paid_changes=None):
+    def verify(self, stack_count=0, finish_changes=None, initial_changes=None, paidplay=False, paid_changes=None, s1_1a=False, missing_step=None):
         product = {'sha': 'unit-product', 'tree': 'unit-tree'}
         execution = {'validation_sha': 'unit-consumer', 'run_id': 1, 'run_attempt': 1}
         manifest = {'consumer': product, 'runtime': product, 'validation': {'sha': 'unit-producer'},
@@ -203,7 +203,7 @@ class FinishEvidenceTests(unittest.TestCase):
         initial.update(initial_changes or {})
         life = dict(initial, life=[19, 20])
         finish = dict(life, manualPhase='closed', waitingType='Priority', resolvingEntryId=None)
-        if paidplay:
+        if paidplay or s1_1a:
             finish.update(ownManaCount=1, nextCardId=11, nextInGraveyard=False)
         finish.update(finish_changes or {})
         paid = dict(finish, life=[22, 20], ownManaCount=0, nextCardId=None, nextInGraveyard=True)
@@ -218,7 +218,19 @@ class FinishEvidenceTests(unittest.TestCase):
             states = [('same-source', initial), ('life19', life), ('finish', finish)]
             if paidplay:
                 states.append(('paidplay22', paid))
+            if s1_1a:
+                initial.update(sourceCardId=7, ownManaCount=1, sourceInHand=False)
+                life = dict(initial, life=[18,20])
+                finish = dict(life, manualPhase='closed', waitingType='Priority', resolvingEntryId=None, ownManaCount=1, nextCardId=11, nextInGraveyard=False)
+                finish.update(finish_changes or {})
+                pre = dict(initial, manualPhase=None, resolvingEntryId=None, manualStackEntryId=None, ownManaCount=2, sourceInHand=True)
+                pre.update(initial_changes or {})
+                paid = dict(finish, life=[21,20], ownManaCount=0, nextCardId=None, nextInGraveyard=True)
+                paid.update(paid_changes or {})
+                states = [('prepayment',pre),('same-source',initial),('life18',life),('finish',finish),('paidplay21',paid)]
             for step, state in states:
+                if step == missing_step:
+                    continue
                 item = {'step': step, 'status': 'observation-only', 'exit_code': 0,
                         'consumer': product, 'runtime': product, 'validation': manifest['validation'],
                         'consumer_execution': execution, 'served': {'engine_wasm_bg.wasm': 'unit-runtime'}}
@@ -230,7 +242,7 @@ class FinishEvidenceTests(unittest.TestCase):
                     item[kind] = {'path': relative, 'sha256': hashlib.sha256(data).hexdigest()}
                 entries.append(item)
             (root / 'step-index.json').write_text(json.dumps(entries))
-            return capture.validate_required_images(root, manifest, execution, paidplay=paidplay)
+            return capture.validate_required_images(root, manifest, execution, paidplay=paidplay, s1_1a=s1_1a)
 
     def test_paid_continuation_requires_four_current_execution_receipts(self):
         self.assertEqual(self.verify(paidplay=True)['verified_count'], 4)
@@ -260,6 +272,71 @@ class FinishEvidenceTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(capture.EvidenceFailure):
                 capture.validate_operations(dict(report, paid_before_resolution=dict(paid, **change)), {}, {}, paidplay=True)
 
+    def s1_report(self):
+        events = lambda changes=[], departed=0, terminals=0, next_departed=0: dict(lifeChanges=changes, sourceDepartures=departed, manualTerminals=terminals, nextDepartures=next_departed)
+        pre = dict(life=[20,20],ownManaCount=2,sourceCardId=7,sourceInHand=True,sourceInGraveyard=False,nextCardId=11,manualPhase=None,resolvingEntryId=None,stackCount=0,waitingType='Priority',priorityPlayer=0,publicEvents=events())
+        paid = dict(pre,ownManaCount=1,stackCount=1,sourceId=7,manualStackEntryId=9,manualPhase='armed')
+        begin = dict(paid,stackCount=0,resolvingEntryId=9,manualPhase='open')
+        life = dict(begin,life=[18,20],publicEvents=events([{'amount':-2,'total':18}]))
+        end = dict(life,manualPhase='closed',resolvingEntryId=None,sourceInGraveyard=True,publicEvents=events([{'amount':-2,'total':18}],1,1))
+        next_paid = dict(end,ownManaCount=0,stackCount=1,nextCardId=None,nextInGraveyard=False)
+        next_done = dict(next_paid,life=[21,20],stackCount=0,nextInGraveyard=True,publicEvents=events([{'amount':-2,'total':18},{'amount':3,'total':21}],1,1,1))
+        return dict(status='passed',consumer={},consumer_execution={},secondary=[],scope=capture.S1_1A_SCOPE,fixture='1a.B',
+            primary=dict(stage='operations-complete',code=0,reason='completed'),
+            stages={stage:dict(status='passed',assertions_completed=True) for stage in ['prepayment','manual-options','manual-cast','initial','life18','finish','paidplay21']},
+            prepayment=pre,manual_paid_before_begin=paid,begin=begin,life_applied=life,finished=end,paid_before_resolution=next_paid,ordinary_completed=next_done,
+            prepayment_scope_visible=True,own_area_label='You',
+            fixture_opponent_drivers=[dict(ok=True,mode='explicit-local-fixture-opponent-driver',action='PassPriority',actor=1,commands=1,opponent_ui=False,two_client=False,before=dict(b,priorityPlayer=1)) for b in [paid,next_paid]],
+            receipt_summary=dict(appliedResults=3,completed=[dict(sourceId=7,stackEntryId=None,terminalCount=0,lifeChanges=[]),dict(sourceId=7,stackEntryId=9,terminalCount=0,lifeChanges=[{'amount':-2,'total':18}]),dict(sourceId=7,stackEntryId=9,terminalCount=1,lifeChanges=[])]),
+            click_commands=[dict(operation=stage,status='completed') for stage in ['manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']])
+
+    def test_s1_1a_requires_prepaid_boundaries_receipts_events_and_native_commands(self):
+        report = self.s1_report()
+        capture.validate_operations(report, {}, {}, s1_1a=True)
+        faults = [(['fixture'],'1c.K1'),(['stages','prepayment','status'],'skipped'),(['prepayment','ownManaCount'],1),
+            (['prepayment','manualPhase'],'open'),(['begin','life'],[18,20]),(['manual_paid_before_begin','ownManaCount'],2),
+            (['life_applied','resolvingEntryId'],10),(['finished','sourceInGraveyard'],False),(['finished','life'],[16,20]),
+            (['ordinary_completed','life'],[22,20]),(['paid_before_resolution','ownManaCount'],1),(['own_area_label'],'Opp 1'),
+            (['fixture_opponent_drivers'],[]),(['fixture_opponent_drivers',0,'commands'],2),(['fixture_opponent_drivers',0,'actor'],0),
+            (['fixture_opponent_drivers',0,'before','priorityPlayer'],0),(['receipt_summary','appliedResults'],4),
+            (['receipt_summary','completed',2,'terminalCount'],2),(['finished','publicEvents','manualTerminals'],2),
+            (['begin','publicEvents','lifeChanges'],[{'amount':-2,'total':18}]),(['click_commands'],[])]
+        for path,value in faults:
+            with self.subTest(path=path), self.assertRaises(capture.EvidenceFailure):
+                changed = json.loads(json.dumps(report)); at=changed
+                for key in path[:-1]: at=at[key]
+                at[path[-1]]=value
+                capture.validate_operations(changed, {}, {}, s1_1a=True)
+
+    def test_s1_1a_requires_all_five_images(self):
+        self.assertEqual(self.verify(s1_1a=True)['verified_count'],5)
+        for step in ['prepayment','same-source','life18','finish','paidplay21']:
+            with self.subTest(step=step), self.assertRaises(capture.EvidenceFailure):
+                self.verify(s1_1a=True,missing_step=step)
+        for changes in [dict(ownManaCount=1),dict(manualPhase='open')]:
+            with self.subTest(changes=changes), self.assertRaises(capture.EvidenceFailure):
+                self.verify(s1_1a=True,initial_changes=changes)
+        with self.assertRaises(capture.EvidenceFailure): self.verify(s1_1a=True,paid_changes=dict(life=[22,20]))
+
+    def test_generated_reports_share_the_bounded_k1_scope(self):
+        ui = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        report = next(node.value for node in ui.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'report' for target in node.targets))
+        expression = next(value for key, value in zip(report.keys, report.values)
+                          if isinstance(key, ast.Constant) and key.value == 'scope')
+        ui_scope = eval(compile(ast.Expression(expression), '<ui-scope>', 'eval'), {'CHECKS': capture, 'PREPAYMENT': False})
+        ci = ast.parse(Path(__file__).with_name('p1-ci-ui-smoke.py').read_text())
+        assignment = next(node for node in ast.walk(ci) if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                                  and target.value.id == 'proof' and isinstance(target.slice, ast.Constant)
+                                  and target.slice.value == 'scope' for target in node.targets))
+        ci_scope = eval(compile(ast.Expression(assignment.value), '<ci-scope>', 'eval'), {'checks': capture})
+        self.assertEqual(ci_scope, capture.S1_1A_SCOPE)
+        self.assertEqual(ui_scope, capture.BOUNDED_K1_SCOPE)
+        self.assertIn('K1-only acceptance when passed', ui_scope)
+        self.assertIn('full S8', ui_scope)
+        self.assertNotIn('restore, Undo', ui_scope)
+
     def test_bounded_restore_and_driver_require_complete_nonvacuous_receipts(self):
         k1 = {'life': [20,20], 'manualPhase': 'open', 'sourceId': 1, 'sourceName': 'P1 Self Loss',
               'stackCount': 0, 'manualStackEntryId': 1, 'resolvingEntryId': 1,
@@ -278,8 +355,12 @@ class FinishEvidenceTests(unittest.TestCase):
                   'fixture_opponent_driver': {'ok': True, 'mode': 'explicit-local-fixture-opponent-driver',
                     'action': 'PassPriority', 'actor': 1, 'commands': 1, 'opponent_ui': False, 'two_client': False,
                     'before': paid, 'after': {'life': [22,20]}}}
+        report['scope'] = capture.BOUNDED_K1_SCOPE
         capture.validate_operations(report, {}, {}, paidplay=True, restore_driver=True)
-        changes = [(['checked_restore_k1'], None),
+        changes = [(['scope'], 'Local K1 UI continuation; restore unaccepted'),
+                   (['scope'], 'full S8 accepted'),
+                   (['scope'], None),
+                   (['checked_restore_k1'], None),
                    (['stages','checked-restore-k1','status'], 'skipped'),
                    (['stages','fixture-opponent-pass','assertions_completed'], False),
                    (['checked_restore_k1','contextChecks'], {}),
