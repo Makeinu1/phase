@@ -1,5 +1,7 @@
 """Offline Finish evidence regressions; synthetic bytes are not product UI PASS."""
 import ast
+import base64
+import datetime
 import hashlib
 import html
 import importlib.util
@@ -18,6 +20,42 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_click_commands_identify_button_operation_and_keep_original_error_when_diagnostic_fails(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'click')
+        report, requests = {}, []
+        original = {'error': 'element click intercepted', 'native_click_point': {'x': 559, 'y': 640},
+                    'target_at_error': {'tag': 'BUTTON'}, 'interceptor_at_error': {'tag': 'SPAN'}}
+        def observe(selector, native_point=None, using='css selector'):
+            self.assertEqual(using, 'xpath')
+            return {'selector': selector, 'nativePoint': native_point}
+        def call(path, data=None):
+            requests.append(path)
+            if namespace['stage'] == 'paidplay-options':
+                return None
+            if path.endswith('/click'):
+                report['webdriver_error'] = dict(original)
+                raise RuntimeError('original click failed')
+            if path == '/screenshot':
+                report['webdriver_error'] = {'error': 'different diagnostic error'}
+                raise RuntimeError('diagnostic failed')
+            self.fail('Unexpected command')
+        namespace = {'report': report, 'stage': 'paidplay-options', 'datetime': datetime, 'base64': base64,
+                     'element': lambda selector, using: 'private-browser-element-reference',
+                     'hit_observation': observe, 'call': call}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<click-command-binding>', 'exec'), namespace)
+        namespace['click']('//button[normalize-space()="Resolution options for Next Ordinary Play"]', 'xpath')
+        namespace['stage'] = 'paidplay-normal'
+        with self.assertRaisesRegex(RuntimeError, 'original click failed'):
+            namespace['click']('//button[normalize-space()="Cast normally"]', 'xpath')
+        self.assertEqual([c['operation'] for c in report['click_commands']], ['paidplay-options', 'paidplay-normal'])
+        self.assertEqual([c['status'] for c in report['click_commands']], ['completed', 'failed'])
+        self.assertEqual(report['failed_click_operation'], 'paidplay-normal')
+        self.assertEqual(report['webdriver_error'], original)
+        self.assertEqual(report['click_observation_after_failure_error_type'], 'RuntimeError')
+        self.assertEqual(report['click_commands'][1]['after']['nativePoint'], {'x': 559, 'y': 640})
+        self.assertNotIn('private-browser-element-reference', json.dumps(report))
+
     def test_click_error_keeps_native_point_and_interceptor_without_raw_private_attributes(self):
         module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
         function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'click_error_details')

@@ -111,10 +111,12 @@ def element(selector, using='css selector'):
     raise AssertionError('Required product control did not become visible and enabled')
 
 
-def hit_observation(selector, native_point=None):
+def hit_observation(selector, native_point=None, using='css selector'):
     # Public geometry only; no scrolling, focus or application-state changes.
     return call('/execute/sync', {'script': '''
-const target = document.querySelector(arguments[0]);
+const target = arguments[2] === 'xpath'
+ ? document.evaluate(arguments[0], document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+ : document.querySelector(arguments[0]);
 const r = target.getBoundingClientRect();
 const x = (Math.max(0, r.left) + Math.min(innerWidth, r.right)) / 2;
 const y = (Math.max(0, r.top) + Math.min(innerHeight, r.bottom)) / 2;
@@ -144,7 +146,7 @@ return {selector: arguments[0], viewport: {width: innerWidth, height: innerHeigh
  nativePoint: point, nativePointTop: describe(atNativePoint), nativePointAncestors: ancestors,
  nativePointHitsTarget: !!atNativePoint && (atNativePoint === target || target.contains(atNativePoint)),
  centerHitsTarget: !!top && (top === target || target.contains(top))};
-''', 'args': [selector, native_point]})
+''', 'args': [selector, native_point, using]})
 
 
 def prepare_hand_click(selector, identifier):
@@ -181,18 +183,29 @@ def prepare_hand_click(selector, identifier):
     raise AssertionError('Native hovered hand card did not settle visibly without obstruction')
 
 
-def click(selector):
-    identifier = element(selector)
+def click(selector, using='css selector'):
+    identifier = element(selector, using)
     if selector.startswith('[data-hand-card]'):
         prepare_hand_click(selector, identifier)
-    report['click_observation'] = hit_observation(selector)
+    report['click_observation'] = hit_observation(selector, using=using)
+    commands = report.setdefault('click_commands', [])
+    command = {'ordinal': len(commands) + 1, 'operation': stage, 'using': using,
+               'locator': selector, 'before': report['click_observation'],
+               'status': 'attempting', 'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    commands.append(command)
     try:
         call('/element/' + identifier + '/click', {})
+        command['status'] = 'completed'
+        command['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     except RuntimeError:
         original_error = dict(report.get('webdriver_error', {}))
+        command.update(status='failed', error=original_error,
+                       finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        report['failed_click_operation'] = stage
         try:
             report['click_observation_after_failure'] = hit_observation(selector,
-                original_error.get('native_click_point'))
+                original_error.get('native_click_point'), using=using)
+            command['after'] = report['click_observation_after_failure']
             if original_error.get('error') == 'element click intercepted':
                 diagnostic = {'kind': 'immediate post-interception diagnostic; not acceptance',
                               'requested_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
@@ -207,6 +220,7 @@ def click(selector):
                 diagnostic['screenshot'] = {'path': 'screenshots/diagnostic-click-intercepted.png',
                                           'sha256': hashlib.sha256(pixels).hexdigest()}
                 report['click_interception_diagnostic'] = diagnostic
+                command['diagnostic'] = diagnostic
         except Exception as error:
             report['click_observation_after_failure_error_type'] = type(error).__name__
         finally:
@@ -313,10 +327,10 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     assert ended['ownManaCount'] == 1 and type(ended['nextCardId']) is int
     next_id = ended['nextCardId']
     click('[data-hand-card][data-object-id="' + str(next_id) + '"]')
-    options = element('//button[normalize-space()="Resolution options for Next Ordinary Play"]', 'xpath')
-    call('/element/' + options + '/click', {})
-    normal = element('//button[normalize-space()="Cast normally"]', 'xpath')
-    call('/element/' + normal + '/click', {})
+    stage = 'paidplay-options'
+    click('//button[normalize-space()="Resolution options for Next Ordinary Play"]', 'xpath')
+    stage = 'paidplay-normal'
+    click('//button[normalize-space()="Cast normally"]', 'xpath')
     stage = 'paidplay-payment'
     paying = wait_for(lambda s: s['waitingType'] == 'ManaPayment'
                       or (s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0))

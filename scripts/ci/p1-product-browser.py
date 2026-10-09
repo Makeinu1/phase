@@ -92,7 +92,8 @@ return {url: location.href.split(/[?#]/, 1)[0], state, observerError,
 PRIMARY_STAGES = {'scenario', 'application-start', 'browser-boot-report', 'source-after',
     'application-observer', 'initial', 'player-area-select', 'life19', 'finish',
     'capture-same-source', 'capture-life19', 'capture-finish', 'operations-complete',
-    'paidplay-select', 'paidplay-payment', 'paidplay-resolve', 'capture-paidplay22'}
+    'paidplay-select', 'paidplay-options', 'paidplay-normal', 'paidplay-payment',
+    'paidplay-resolve', 'capture-paidplay22'}
 PRIMARY_REASONS = {'completed', 'scenario-exit-nonzero', 'required-capture-failed',
     'webdriver-command-failed', 'operation-assertion-failed', 'scenario-command-failed',
     'required-report-save-failed', 'consumer-source-changed', 'scenario-launch-failed',
