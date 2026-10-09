@@ -285,3 +285,19 @@ witness of trusted click detail1, click detail2 and dblclick detail2 in order on
 the requested card, with no dropped events. Missing witness fails with
 `native-double-click-not-observed`; observed timing is diagnostic only and has
 no guessed success threshold. No JS event dispatch or automatic retry is used.
+
+
+Run38001962170 completed the real20→18→21 scenario with all five PNG/state/index
+pairs and a trusted card2 dblclick (reader-observed422.8ms). Overall CI correctly
+failed `s1-1a-native-clicks-missing`: actual completed operations were only
+manual-card-select, manual-options, manual-cast, player-area-select, life18,
+finish, paidplay-normal-direct. Both required own priority response clicks were
+absent; automatic own passing is not evidence of native own response.
+
+The next journey turns the existing Full Control UI ON with a native click and
+confirms its pressed state before designation/payment. Each own priority0 is
+mandatory before native Resolve; only after priority1 may the explicit one-shot
+B fixture driver run. The validator retains both native response requirements
+and additionally requires the Full Control click and confirmed state. Product
+and guarded runtime remain afe3 unchanged. Historical failed reports remain
+failed; no auto-pass is relabelled as native input.

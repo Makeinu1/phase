@@ -172,11 +172,12 @@ def validate_s1_1a(report):
     require(all(r.get('sourceId') == source and r.get('stackEntryId') == entry for r in operation_receipts)
         and sorted(r.get('terminalCount', -1) for r in operation_receipts) == [0,1]
         and [e for r in operation_receipts for e in r.get('lifeChanges', [])] == [{'amount':-2,'total':18}], 'receipt-source-event-mismatch')
+    require(report.get('prepayment_full_control') is True, 'full-control-not-confirmed')
     commands = report.get('click_commands', [])
     ordinary_clicks = [c for c in commands if c.get('operation') == 'paidplay-normal-direct']
     require(len(ordinary_clicks) == 1 and ordinary_clicks[0].get('native_double_click_verified') is True, 'trusted-double-click-missing')
     require(all(any(c.get('operation') == stage and c.get('status') == 'completed' for c in commands)
-        for stage in ['manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']), 'native-clicks-missing')
+        for stage in ['prepayment-full-control','manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']), 'native-clicks-missing')
 
 
 def valid_png(data):

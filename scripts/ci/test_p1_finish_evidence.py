@@ -314,15 +314,15 @@ class FinishEvidenceTests(unittest.TestCase):
             primary=dict(stage='operations-complete',code=0,reason='completed'),
             stages={stage:dict(status='passed',assertions_completed=True) for stage in ['prepayment','manual-options','manual-cast','initial','life18','finish','paidplay21']},
             prepayment=pre,manual_paid_before_begin=paid,begin=begin,life_applied=life,finished=end,paid_before_resolution=next_paid,ordinary_completed=next_done,
-            prepayment_scope_visible=True,own_area_label='You',
+            prepayment_scope_visible=True,prepayment_full_control=True,own_area_label='You',
             fixture_opponent_drivers=[dict(ok=True,mode='explicit-local-fixture-opponent-driver',action='PassPriority',actor=1,commands=1,opponent_ui=False,two_client=False,before=dict(b,priorityPlayer=1)) for b in [paid,next_paid]],
             receipt_summary=dict(appliedResults=3,completed=[dict(sourceId=7,stackEntryId=None,terminalCount=0,lifeChanges=[]),dict(sourceId=7,stackEntryId=9,terminalCount=0,lifeChanges=[{'amount':-2,'total':18}]),dict(sourceId=7,stackEntryId=9,terminalCount=1,lifeChanges=[])]),
-            click_commands=[dict(operation=stage,status='completed',native_double_click_verified=stage=='paidplay-normal-direct') for stage in ['manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']])
+            click_commands=[dict(operation=stage,status='completed',native_double_click_verified=stage=='paidplay-normal-direct') for stage in ['prepayment-full-control','manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']])
 
     def test_s1_1a_requires_prepaid_boundaries_receipts_events_and_native_commands(self):
         report = self.s1_report()
         capture.validate_operations(report, {}, {}, s1_1a=True)
-        faults = [(['fixture'],'1c.K1'),(['stages','prepayment','status'],'skipped'),(['prepayment','ownManaCount'],1),
+        faults = [(['prepayment_full_control'],False),(['fixture'],'1c.K1'),(['stages','prepayment','status'],'skipped'),(['prepayment','ownManaCount'],1),
             (['prepayment','manualPhase'],'open'),(['begin','life'],[18,20]),(['manual_paid_before_begin','ownManaCount'],2),
             (['life_applied','resolvingEntryId'],10),(['finished','sourceInGraveyard'],False),(['finished','life'],[16,20]),
             (['ordinary_completed','life'],[22,20]),(['paid_before_resolution','ownManaCount'],1),(['own_area_label'],'Opp 1'),
@@ -336,6 +336,41 @@ class FinishEvidenceTests(unittest.TestCase):
                 for key in path[:-1]: at=at[key]
                 at[path[-1]]=value
                 capture.validate_operations(changed, {}, {}, s1_1a=True)
+
+    def test_s1_1a_rejects_each_missing_or_incomplete_native_operation(self):
+        report = self.s1_report()
+        for index, command in enumerate(report['click_commands']):
+            for mode in ['missing', 'incomplete']:
+                with self.subTest(operation=command['operation'], mode=mode), self.assertRaises(capture.EvidenceFailure):
+                    changed = json.loads(json.dumps(report))
+                    if mode == 'missing':
+                        del changed['click_commands'][index]
+                    else:
+                        changed['click_commands'][index]['status'] = 'attempting'
+                    capture.validate_operations(changed, {}, {}, s1_1a=True)
+
+    def test_s1_1a_requires_own_native_response_before_each_opponent_driver(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        journey = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == 'run_s1_1a')
+        function = next(n for n in journey.body if isinstance(n, ast.FunctionDef) and n.name == 'opponent')
+        for operation, life, mana, phase in [('manual-response',20,1,'armed'),('paidplay-response',18,0,'closed')]:
+            state = {'waitingType':'Priority','priorityPlayer':1}
+            native, drivers = [], []
+            def wait(predicate):
+                if not predicate(state): raise AssertionError('required own priority unavailable')
+                return state
+            def native_click(*args):
+                native.append(operation); state['priorityPlayer']=1
+            def driver(*args):
+                drivers.append(args); return dict(ok=True,commands=1)
+            namespace = dict(report={},observe=lambda: state,wait_for=wait,click=native_click,drive_fixture_opponent_pass_once=driver)
+            exec(compile(ast.Module(body=[function],type_ignores=[]),'<own-native-response>', 'exec'),namespace)
+            with self.subTest(operation=operation), self.assertRaisesRegex(AssertionError,'required own priority'):
+                namespace['opponent'](life,mana,phase)
+            self.assertEqual(native,[]); self.assertEqual(drivers,[])
+            state['priorityPlayer']=0
+            namespace['opponent'](life,mana,phase)
+            self.assertEqual(native,[operation]); self.assertEqual(drivers,[(life,mana,phase)])
 
     def test_s1_1a_requires_all_five_images(self):
         self.assertEqual(self.verify(s1_1a=True)['verified_count'],5)

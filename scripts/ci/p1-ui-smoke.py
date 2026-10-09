@@ -402,8 +402,8 @@ def run_s1_1a():
     def passed(name):
         report['stages'][name] = {'status': 'passed', 'assertions_completed': True}
     def opponent(life, mana, phase):
-        if observe()['priorityPlayer'] == 0:
-            click('//button[normalize-space()="Resolve"]', 'xpath')
+        wait_for(lambda x: x['waitingType'] == 'Priority' and x['priorityPlayer'] == 0)
+        click('//button[normalize-space()="Resolve"]', 'xpath')
         wait_for(lambda x: x['waitingType'] == 'Priority' and x['priorityPlayer'] == 1)
         driver = drive_fixture_opponent_pass_once(life, mana, phase)
         assert driver.get('ok') is True and type(driver.get('commands')) is int and driver['commands'] == 1
@@ -437,6 +437,11 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
 ''', 'args': []})
     assert receipts is True
     passed('prepayment')
+    stage = 'prepayment-full-control'
+    click('button[aria-label="Full Control Off"][aria-pressed="false"]')
+    control_on = call('/execute/sync', {'script': 'return document.querySelector(\'button[aria-label="Full Control On"][aria-pressed="true"]\') !== null;', 'args': []})
+    assert control_on is True
+    report['prepayment_full_control'] = True
     stage = 'manual-card-select'
     click('[data-hand-card][data-object-id="' + str(pre['sourceCardId']) + '"]')
     stage = 'manual-options'

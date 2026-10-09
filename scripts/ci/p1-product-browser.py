@@ -89,7 +89,7 @@ return {url: location.href.split(/[?#]/, 1)[0], state, observerError,
     (root / 'browser-failure.json').write_text(json.dumps(diagnostic, indent=2) + '\n')
 
 
-PRIMARY_STAGES = {'prepayment', 'manual-card-select', 'manual-options', 'manual-cast', 'manual-response', 'life18', 'paidplay-response', 'scenario', 'application-start', 'browser-boot-report', 'source-after',
+PRIMARY_STAGES = {'prepayment', 'prepayment-full-control', 'manual-card-select', 'manual-options', 'manual-cast', 'manual-response', 'life18', 'paidplay-response', 'scenario', 'application-start', 'browser-boot-report', 'source-after',
     'application-observer', 'initial', 'player-area-select', 'life19', 'finish',
     'capture-same-source', 'capture-life19', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'operations-complete',
     'paidplay-select', 'paidplay-options', 'paidplay-normal', 'paidplay-payment',
