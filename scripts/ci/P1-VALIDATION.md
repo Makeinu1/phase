@@ -33,7 +33,7 @@ Then run `install-runtime` with the same arguments. This verifies the producer
 manifest, all WASM/glue/snippet hashes, and the consumer SHA before installing
 only ignored generated artifacts. Consumer replay does not rebuild Rust.
 
-The fork workflow runs **preflight only** on pushes to this validation branch.
+The fork workflow's push mode currently builds the pinned candidate.
 Its `P1_PUSH_CANDIDATE_SHA` and `P1_PUSH_MODE` literals can be changed to the final
 reviewed SHA and `build` for a single CI build. This push path works for a newly
 added workflow without putting it on the default branch. Dispatch is an optional
@@ -107,3 +107,28 @@ scenario must compare the actual states with the fixed contract and return a
 nonzero exit on failure. The browser tools' synthetic navigation preflight is
 also not a P1 UI test. No scenario exists yet because its actual fixture input
 has not been received.
+
+## Same-job bounded UI smoke
+
+The build workflow now invokes `p1-ci-ui-smoke.py` after a successful producer
+build, using the same product checkout and runner-temp evidence directory.
+It generates the existing 145 native trusted fixtures through the focused
+`manual_resolution_prototype` test target, checks `1c.K1`, installs the verified
+runtime, installs frozen client dependencies, and obtains the exact matching
+Chrome for Testing / ChromeDriver 154.0.8037.92 from official vendor metadata.
+All expensive stages retain the unchanged source/resource/process guard.
+
+`p1-ui-smoke.py` uses the existing product entrance
+`/game/p1-ci-smoke?mode=local&manual=1&p1Fixture=1c.K1`. It reads only public store
+fields, clicks the real player-area selection, Apply and Finish controls, and
+asserts Manual Open at life 20, same-source life 19, and one removed stack
+entry at Finish with life still 19. The existing capture helper saves the three
+PNG/public-state pairs and their source/runtime/time/hash provenance.
+
+This independently specified smoke does not replace the unavailable migrated
+full scenario and does not accept Undo, next paid play, ACK faults or S1-S12.
+Fixtures/checkpoints, actor capabilities, private receipt wires, session IDs,
+browser profiles and raw browser transport are excluded from upload paths.
+The artifact contains safe smoke reports and observation PNG/JSON. Its GitHub
+download page is a user retrieval path; actual delivery into chat must be
+verified separately, and artifact creation alone is not delivery completion.

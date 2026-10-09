@@ -55,6 +55,9 @@ jobs:
         with:
           version: 9.15.9
           run_install: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.3
       - name: Guarded preflight or one fresh candidate build
         env:
           P1_CANDIDATE_SHA: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
@@ -63,6 +66,14 @@ jobs:
           mode=preflight
           if [ "$P1_PREFLIGHT_ONLY" = false ]; then mode=build; fi
           python3 validation-source/scripts/ci/p1-wasm-validation.py "$mode" \
+            --source "$GITHUB_WORKSPACE/product-source" --candidate-sha "$P1_CANDIDATE_SHA" \
+            --evidence "$RUNNER_TEMP/p1-evidence"
+      - name: Consume the same job runtime on the real Local product board
+        if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.preflight_only) || (github.event_name == 'push' && env.P1_PUSH_MODE == 'build') }}
+        env:
+          P1_CANDIDATE_SHA: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
+        run: |
+          python3 validation-source/scripts/ci/p1-ci-ui-smoke.py \
             --source "$GITHUB_WORKSPACE/product-source" --candidate-sha "$P1_CANDIDATE_SHA" \
             --evidence "$RUNNER_TEMP/p1-evidence"
       - name: Retain candidate output and evidence (explicit allowlist)
@@ -96,5 +107,12 @@ jobs:
             ${{ runner.temp }}/p1-evidence/step-index.json
             ${{ runner.temp }}/p1-evidence/screenshots/*.png
             ${{ runner.temp }}/p1-evidence/states/*.json
+            ${{ runner.temp }}/p1-evidence/ci-ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/browser-tools.json
+            ${{ runner.temp }}/p1-evidence/p1-native-fixtures.json
+            ${{ runner.temp }}/p1-evidence/p1-client-dependencies.json
+            ${{ runner.temp }}/p1-evidence/p1-browser-tools.json
+            ${{ runner.temp }}/p1-evidence/p1-ui-smoke.json
           if-no-files-found: error
           retention-days: 7
