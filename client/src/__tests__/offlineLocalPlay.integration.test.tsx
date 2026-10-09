@@ -10,6 +10,7 @@ import { useCardImage } from "../hooks/useCardImage";
 import { useCloudSyncStore } from "../stores/cloudSyncStore";
 import { clearActiveGame, loadActiveGame, useGameStore } from "../stores/gameStore";
 import { buildGameState } from "../test/factories/gameStateFactory";
+import type * as Scryfall from "../services/scryfall";
 
 /*
  * This is intentionally one integration fixture rather than a fourth copy of
@@ -266,12 +267,14 @@ vi.mock("../services/aiDeckCatalog", () => ({
     error: null,
   }),
 }));
-vi.mock("../services/scryfall", () => {
+vi.mock("../services/scryfall", async (importOriginal) => {
+  const actual = await importOriginal<typeof Scryfall>();
   const remote = () => {
     test.ledger.remoteImageContinuation += 1;
     return Promise.reject(new Error("remote image continuation is forbidden"));
   };
   return {
+    MANA_SYMBOL_SHARDS: actual.MANA_SYMBOL_SHARDS,
     CARD_BACK_URL: "data:,card-back",
     IMAGE_SIZE_WIDTHS: { small: 146, normal: 488 },
     deriveImageUrl: (src: string) => src,

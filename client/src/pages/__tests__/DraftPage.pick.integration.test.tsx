@@ -101,6 +101,8 @@ function deferred<T>() {
 async function renderDraft(initialView = view()) {
   wasm.start_quick_draft.mockReturnValue(initialView);
   await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+  expect(fetch).toHaveBeenCalledWith(__CARD_DATA_URL__);
+  expect(wasm.load_card_database).toHaveBeenLastCalledWith("{}");
   render(<MemoryRouter><DraftPage /></MemoryRouter>);
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
   await screen.findByTestId("pack-sequence");
@@ -133,6 +135,13 @@ describe("DraftPage production pick integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useDraftStore.getState().reset();
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      expect(input).toBe(__CARD_DATA_URL__);
+      return new Response("{}", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }));
     localStorage.setItem(DRAFT_WORKSPACE_PREFERENCES_KEY, JSON.stringify({
       ...createDefaultDraftWorkspacePreferences(), explicitView: "board", sideboardCollapsed: true,
     }));
@@ -141,6 +150,7 @@ describe("DraftPage production pick integration", () => {
   afterEach(() => {
     cleanup();
     useDraftStore.getState().reset();
+    vi.unstubAllGlobals();
     localStorage.clear();
   });
 
