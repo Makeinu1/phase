@@ -372,6 +372,45 @@ class FinishEvidenceTests(unittest.TestCase):
             namespace['opponent'](life,mana,phase)
             self.assertEqual(native,[operation]); self.assertEqual(drivers,[(life,mana,phase)])
 
+    def test_full_control_uses_visible_right_rail_and_records_acquisition_failure(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        lookup = next(n for n in module.body if isinstance(n,ast.FunctionDef) and n.name=='element')
+        journey = next(n for n in module.body if isinstance(n,ast.FunctionDef) and n.name=='run_s1_1a')
+        start = next(i for i,n in enumerate(journey.body) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value=='prepayment-full-control')
+        end = next(i for i,n in enumerate(journey.body) if isinstance(n,ast.Assign) and isinstance(n.value,ast.Constant) and n.value.value=='manual-card-select')
+        report, native = {}, []
+        def request(path,data=None):
+            if path=='/elements':
+                ids=['visible-right'] if data['value'].startswith('[data-mobile-action-right]') else ['hidden-left','visible-right']
+                return [{'element-6066-11e4-a52e-4f735466cecf':i} for i in ids]
+            if path.endswith('/displayed'): return 'visible-right' in path
+            if path.endswith('/enabled'): return True
+            if path.endswith('/click'): native.append(path); return None
+            if path=='/execute/sync': return bool(native) and '[data-mobile-action-right]' in data['script']
+            raise AssertionError(path)
+        ticks=iter([0,0,41])
+        namespace=dict(report=report,stage='prepayment-full-control',call=request,
+            time=SimpleNamespace(monotonic=lambda:next(ticks),sleep=lambda _:None),
+            observe=lambda:dict(life=[20,20],ownManaCount=2,stackCount=0))
+        exec(compile(ast.Module(body=[lookup],type_ignores=[]),'<control-acquisition>', 'exec'),namespace)
+        def native_click(selector):
+            identifier=namespace['element'](selector)
+            request('/element/'+identifier+'/click',{})
+        namespace['click']=native_click
+        exec(compile(ast.Module(body=journey.body[start:end],type_ignores=[]),'<actual-control-journey-prefix>', 'exec'),namespace)
+        self.assertEqual(native,['/element/visible-right/click'])
+        self.assertTrue(report['prepayment_full_control'])
+        self.assertEqual(report['full_control_confirmation'],dict(phase='on-confirmation',found=True))
+        native.clear(); ticks=iter([0,0,41])
+        with self.assertRaisesRegex(AssertionError,'visible and enabled'):
+            namespace['element']('button[aria-label="Full Control Off"]')
+        failure=report['control_acquisition_failure']
+        self.assertEqual(failure['phase'],'element-acquisition')
+        self.assertEqual(failure['lastObservation'],dict(matchCount=2,firstMatch=dict(index=0,displayed=False,enabled=None)))
+        self.assertEqual(failure['publicStateAtFailure']['life'],[20,20])
+        self.assertNotIn('hidden-left',json.dumps(failure))
+        self.assertEqual(native,[])
+
     def test_s1_1a_requires_all_five_images(self):
         self.assertEqual(self.verify(s1_1a=True)['verified_count'],5)
         for step in ['prepayment','same-source','life18','finish','paidplay21']:

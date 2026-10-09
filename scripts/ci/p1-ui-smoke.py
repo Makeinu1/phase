@@ -102,13 +102,29 @@ def wait_for(predicate):
 
 def element(selector, using='css selector'):
     deadline = time.monotonic() + 40
+    last = {'matchCount': 0, 'firstMatch': None}
     while time.monotonic() < deadline:
         matches = call('/elements', {'using': using, 'value': selector})
+        last = {'matchCount': len(matches), 'firstMatch': None}
         if matches:
             identifier = matches[0]['element-6066-11e4-a52e-4f735466cecf']
-            if call('/element/' + identifier + '/displayed') and call('/element/' + identifier + '/enabled'):
+            displayed = call('/element/' + identifier + '/displayed')
+            enabled = call('/element/' + identifier + '/enabled') if displayed else None
+            last['firstMatch'] = {'index': 0, 'displayed': displayed, 'enabled': enabled}
+            if displayed and enabled:
                 return identifier
         time.sleep(0.25)
+    failure = {'operation': stage, 'phase': 'element-acquisition', 'locator': selector, 'using': using,
+        'condition': 'first-match-visible-and-enabled', 'lastObservation': last}
+    original_error = report.get('webdriver_error')
+    try:
+        failure['publicStateAtFailure'] = observe()
+    except Exception as error:
+        failure['publicStateObservationError'] = type(error).__name__
+    finally:
+        if original_error is None: report.pop('webdriver_error', None)
+        else: report['webdriver_error'] = original_error
+    report['control_acquisition_failure'] = failure
     raise AssertionError('Required product control did not become visible and enabled')
 
 
@@ -438,8 +454,9 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     assert receipts is True
     passed('prepayment')
     stage = 'prepayment-full-control'
-    click('button[aria-label="Full Control Off"][aria-pressed="false"]')
-    control_on = call('/execute/sync', {'script': 'return document.querySelector(\'button[aria-label="Full Control On"][aria-pressed="true"]\') !== null;', 'args': []})
+    click('[data-mobile-action-right] button[aria-label="Full Control Off"][aria-pressed="false"]')
+    control_on = call('/execute/sync', {'script': 'return document.querySelector(\'[data-mobile-action-right] button[aria-label="Full Control On"][aria-pressed="true"]\') !== null;', 'args': []})
+    report['full_control_confirmation'] = {'phase': 'on-confirmation', 'found': control_on}
     assert control_on is True
     report['prepayment_full_control'] = True
     stage = 'manual-card-select'
@@ -701,6 +718,8 @@ except Exception as error:
     report['status'] = 'failed'
     report['error_type'] = type(error).__name__
     reason = ('required-capture-failed' if stage.startswith('capture-')
+              else 'required-control-not-visible-and-enabled' if report.get('control_acquisition_failure', {}).get('operation') == stage
+              else 'full-control-on-not-confirmed' if stage == 'prepayment-full-control' and 'full_control_confirmation' in report and report['full_control_confirmation'].get('found') is not True
               else 'native-double-click-not-observed' if report.get('click_commands', [{}])[-1].get('reason') == 'native-double-click-not-observed'
               else 'webdriver-command-failed' if 'webdriver_error' in report
               else 'operation-assertion-failed' if isinstance(error, AssertionError)

@@ -94,7 +94,7 @@ PRIMARY_STAGES = {'prepayment', 'prepayment-full-control', 'manual-card-select',
     'capture-same-source', 'capture-life19', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'operations-complete',
     'paidplay-select', 'paidplay-options', 'paidplay-normal', 'paidplay-payment',
     'paidplay-normal-direct', 'checked-restore-k1', 'fixture-opponent-pass', 'paidplay-own-pass-before-driver', 'paidplay-resolve', 'capture-paidplay22'}
-PRIMARY_REASONS = {'native-double-click-not-observed', 'completed', 'scenario-exit-nonzero', 'required-capture-failed',
+PRIMARY_REASONS = {'native-double-click-not-observed', 'required-control-not-visible-and-enabled', 'full-control-on-not-confirmed', 'completed', 'scenario-exit-nonzero', 'required-capture-failed',
     'webdriver-command-failed', 'operation-assertion-failed', 'scenario-command-failed',
     'required-report-save-failed', 'consumer-source-changed', 'scenario-launch-failed',
     'application-start-failed'}

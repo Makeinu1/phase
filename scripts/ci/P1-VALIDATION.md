@@ -301,3 +301,17 @@ B fixture driver run. The validator retains both native response requirements
 and additionally requires the Full Control click and confirmed state. Product
 and guarded runtime remain afe3 unchanged. Historical failed reports remain
 failed; no auto-pass is relabelled as native input.
+
+
+Run38003286935 stopped at prepayment-full-control before any click_commands;
+Manual and subsequent stages were not run. Source and the offline reproduction show the unscoped Full Control locator
+selects a hidden mobile-left instance before the visible right rail at the
+fixed1440×1000 viewport. The two-control offline reproduction is RED on1e5.
+Both native OFF click and passive ON confirmation are now scoped to the
+existing data-mobile-action-right container. No timeout is increased.
+
+Acquisition failure reports the specific operation, acquisition phase, locator,
+first-match-visible-and-enabled condition, last match count/first visibility,
+and passive public state. Native click failure retains its original error;
+performed ON confirmation records its result separately. Fixed failure reasons
+survive browser aggregation. Missing responses/Full Control remain failures.
