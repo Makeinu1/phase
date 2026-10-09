@@ -182,7 +182,8 @@ An intercepted click is not replaced with JavaScript or store mutation.
 
 The current validation retains the independently checked `1c.K1` life20 →
 life19 → Finish closed/Priority smoke, then continues using the own-hand
-`Next Ordinary Play` through **Cast normally**, an actual **Pay** control when
+`Next Ordinary Play` through its existing native card **double-click** (the
+same `playCard` handler used by **Cast normally**), an actual **Pay** control when
 offered, and actual own-priority **Resolve** controls. It requires remaining
 mana1 → 0, a paid ordinary stack entry before resolution, life19 + 3 = 22,
 the next card in graveyard, an empty stack and no open manual carrier. Four
@@ -196,3 +197,9 @@ This bounded continuation does **not** establish S1's life18 → paidplay21,
 before-payment manual designation, checked save/restore, Undo, or full S1–S12
 acceptance. The existing pinned same-product producer37956261306 runtime is
 reused through the ordinary Actions API; no product or build-input changes.
+
+Run37969255038 confirmed that the inline Resolution options button is covered
+by the own life19 HUD at the native click point (559, 640). That options/manual
+entry obstruction remains an unresolved UI issue. The ordinary double-click
+checks its exact native pointer origin before dispatch and does not bypass an
+obstructed target. This desktop route does not establish iOS or whole-UI quality.

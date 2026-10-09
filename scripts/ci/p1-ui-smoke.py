@@ -130,6 +130,7 @@ const first = clientRects[0];
 const expectedPoint = first ? {
  x: Math.floor((Math.max(0, first.left) + Math.min(innerWidth, first.right)) / 2),
  y: Math.floor((Math.max(0, first.top) + Math.min(innerHeight, first.bottom)) / 2)} : null;
+const expectedTop = expectedPoint ? document.elementFromPoint(expectedPoint.x, expectedPoint.y) : null;
 const point = arguments[1];
 const atNativePoint = point ? document.elementFromPoint(point.x, point.y) : null;
 const ancestors = [];
@@ -140,6 +141,8 @@ return {selector: arguments[0], viewport: {width: innerWidth, height: innerHeigh
  sampledAt: new Date().toISOString(), browserTimeMs: performance.now(),
  scroll: {x: scrollX, y: scrollY},
  rect: rectValue(r), clientRects, expectedWebDriverPoint: expectedPoint,
+ expectedWebDriverPointTop: describe(expectedTop),
+ expectedWebDriverPointHitsTarget: !!expectedTop && (expectedTop === target || target.contains(expectedTop)),
  clippedViewport: {left: Math.max(0, r.left), top: Math.max(0, r.top),
   right: Math.min(innerWidth, r.right), bottom: Math.min(innerHeight, r.bottom)},
  center: {x, y}, target: describe(target), top: describe(top),
@@ -183,7 +186,7 @@ def prepare_hand_click(selector, identifier):
     raise AssertionError('Native hovered hand card did not settle visibly without obstruction')
 
 
-def click(selector, using='css selector'):
+def click(selector, using='css selector', double=False):
     identifier = element(selector, using)
     if selector.startswith('[data-hand-card]'):
         prepare_hand_click(selector, identifier)
@@ -191,10 +194,27 @@ def click(selector, using='css selector'):
     commands = report.setdefault('click_commands', [])
     command = {'ordinal': len(commands) + 1, 'operation': stage, 'using': using,
                'locator': selector, 'before': report['click_observation'],
+               'kind': 'native-pointer-double-click' if double else 'native-element-click',
                'status': 'attempting', 'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
     commands.append(command)
+    if double and report['click_observation'].get('expectedWebDriverPointHitsTarget') is not True:
+        command.update(status='failed', reason='native-origin-obstructed',
+                       finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        raise AssertionError('Existing ordinary card native origin is obstructed')
     try:
-        call('/element/' + identifier + '/click', {})
+        if double:
+            # Existing HandCard.onDoubleClick calls the same ordinary playCard
+            # as the menu's Cast normally button. Native pointer input reaches
+            # the browser's normal event target; it never forces a DOM handler.
+            call('/actions', {'actions': [{'type': 'pointer', 'id': 'p1-hand-pointer',
+                'parameters': {'pointerType': 'mouse'}, 'actions': [
+                    {'type': 'pointerMove', 'duration': 0,
+                     'origin': {'element-6066-11e4-a52e-4f735466cecf': identifier}, 'x': 0, 'y': 0},
+                    {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0},
+                    {'type': 'pause', 'duration': 80},
+                    {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0}]}]})
+        else:
+            call('/element/' + identifier + '/click', {})
         command['status'] = 'completed'
         command['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     except RuntimeError:
@@ -323,14 +343,10 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     report['assertions'].append('real Finish click closed the exact resolving entry and returned Priority; ordinary stack stayed empty and life stayed 19')
     # The native fixture has one remaining generic mana and a +3-life ordinary
     # spell. Continue from life19, hence 22; this is not the S1 life18 -> 21 path.
-    stage = 'paidplay-select'
+    stage = 'paidplay-normal-direct'
     assert ended['ownManaCount'] == 1 and type(ended['nextCardId']) is int
     next_id = ended['nextCardId']
-    click('[data-hand-card][data-object-id="' + str(next_id) + '"]')
-    stage = 'paidplay-options'
-    click('//button[normalize-space()="Resolution options for Next Ordinary Play"]', 'xpath')
-    stage = 'paidplay-normal'
-    click('//button[normalize-space()="Cast normally"]', 'xpath')
+    click('[data-hand-card][data-object-id="' + str(next_id) + '"]', double=True)
     stage = 'paidplay-payment'
     paying = wait_for(lambda s: s['waitingType'] == 'ManaPayment'
                       or (s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0))
@@ -363,7 +379,7 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     report['stages']['paidplay22'] = {'status': 'passed', 'assertions_completed': True}
     stage = 'capture-paidplay22'
     capture('paidplay22')
-    report['assertions'].append('Cast normally paid the remaining one mana; normal priority resolution gained exactly three life to22, moved the next card to graveyard and left no manual carrier')
+    report['assertions'].append('Existing ordinary card double-click paid the remaining one mana; normal priority resolution gained exactly three life to22, moved the next card to graveyard and left no manual carrier')
     report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
     report['status'] = 'passed'
 except Exception as error:

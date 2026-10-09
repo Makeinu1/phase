@@ -20,6 +20,34 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_ordinary_double_click_uses_native_pointer_pair_and_structured_origin(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'click')
+        report, requests, preparations = {}, [], []
+        selector = '[data-hand-card][data-object-id="11"]'
+        namespace = {'report': report, 'stage': 'paidplay-normal-direct', 'datetime': datetime,
+                     'element': lambda selector, using: 'private-native-card-reference',
+                     'prepare_hand_click': lambda selector, identifier: preparations.append(selector),
+                     'hit_observation': lambda selector, **kwargs: {'centerHitsTarget': True, 'expectedWebDriverPointHitsTarget': True},
+                     'call': lambda path, data=None: requests.append((path, data))}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<ordinary-native-double-click>', 'exec'), namespace)
+        namespace['click'](selector, double=True)
+        self.assertEqual(preparations, [selector])
+        self.assertEqual([p for p, _ in requests], ['/actions'])
+        actions = requests[0][1]['actions'][0]['actions']
+        self.assertEqual(actions[0]['origin'], {'element-6066-11e4-a52e-4f735466cecf': 'private-native-card-reference'})
+        self.assertEqual([a['type'] for a in actions], ['pointerMove', 'pointerDown', 'pointerUp', 'pause', 'pointerDown', 'pointerUp'])
+        self.assertTrue(all(a['button'] == 0 for a in actions if a['type'] in {'pointerDown', 'pointerUp'}))
+        self.assertEqual(report['click_commands'][0]['kind'], 'native-pointer-double-click')
+        self.assertEqual(report['click_commands'][0]['status'], 'completed')
+        self.assertNotIn('private-native-card-reference', json.dumps(report))
+        requests.clear()
+        namespace['hit_observation'] = lambda selector, **kwargs: {'centerHitsTarget': True, 'expectedWebDriverPointHitsTarget': False}
+        with self.assertRaises(AssertionError):
+            namespace['click'](selector, double=True)
+        self.assertEqual(requests, [])
+        self.assertEqual(report['click_commands'][-1]['reason'], 'native-origin-obstructed')
+
     def test_click_commands_identify_button_operation_and_keep_original_error_when_diagnostic_fails(self):
         module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
         function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'click')
