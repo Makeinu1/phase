@@ -21,7 +21,7 @@ permissions:
 # Change these two literals only after receiving the reviewed product SHA.
 env:
   P1_PUSH_CANDIDATE_SHA: afe3f35d8aaaa33c401ac7d3c1ced5eacc2c179c
-  P1_PUSH_MODE: build
+  P1_PUSH_MODE: reuse
 
 jobs:
   candidate-runtime:

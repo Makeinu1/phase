@@ -115,7 +115,7 @@ def main():
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'process-cleanup', 'browser-boot-report', 'capture-finish', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'process-cleanup', 'browser-boot-report', 'capture-finish', 'capture-paidplay21', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True

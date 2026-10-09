@@ -270,3 +270,18 @@ Undo/Recovery, D/two-client, and the other finite groups remain separate gates.
 Historical K1 checked-restore validation and its artifacts remain available.
 The changed product SHA requires a fresh guarded runtime build; an old runtime
 must never be relabelled as this candidate.
+
+
+The fresh afe3 producer run37997514707 built its guarded runtime successfully,
+but the UI consumer failed at N payment: two trusted detail1 clicks were
+observed, with no dblclick. Manual Begin20/Apply2/Finish18 passed; this run does
+not prove the final paidplay21 capture. The next validation uses that exact
+producer runtime through the existing normal Actions reuse verifier; all hash,
+source and provenance guards remain unchanged. No rebuild fallback is allowed.
+
+The native ordinary-card double-click is one WebDriver actions request without
+an explicit inter-click pause. Command completion requires the passive browser
+witness of trusted click detail1, click detail2 and dblclick detail2 in order on
+the requested card, with no dropped events. Missing witness fails with
+`native-double-click-not-observed`; observed timing is diagnostic only and has
+no guessed success threshold. No JS event dispatch or automatic retry is used.

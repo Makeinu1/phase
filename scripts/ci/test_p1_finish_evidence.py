@@ -25,25 +25,37 @@ class FinishEvidenceTests(unittest.TestCase):
         function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'click')
         report, requests, preparations = {}, [], []
         selector = '[data-hand-card][data-object-id="11"]'
-        namespace = {'report': report, 'stage': 'paidplay-normal-direct', 'datetime': datetime,
+        namespace = {'report': report, 'stage': 'paidplay-normal-direct', 'datetime': datetime, 're': re,
                      'element': lambda selector, using: 'private-native-card-reference',
                      'prepare_hand_click': lambda selector, identifier: preparations.append(selector),
                      'hit_observation': lambda selector, **kwargs: {'centerHitsTarget': True, 'expectedWebDriverPointHitsTarget': True},
                      'call': lambda path, data=None: requests.append((path, data)),
                      'start_native_input_observation': lambda selector: {'installed': True},
-                     'finish_native_input_observation': lambda: {'events': [], 'dropped': 0, 'publicStateAfterCommand': {'life': [19,20]}}}
+                     'finish_native_input_observation': lambda: {'events': [dict(type=kind,detail=detail,trusted=True,target=dict(ownCardId=11,withinRequestedCard=True)) for kind,detail in [('click',1),('click',2),('dblclick',2)]], 'dropped': 0, 'publicStateAfterCommand': {'life': [19,20]}}}
         exec(compile(ast.Module(body=[function], type_ignores=[]), '<ordinary-native-double-click>', 'exec'), namespace)
         namespace['click'](selector, double=True)
         self.assertEqual(preparations, [selector])
         self.assertEqual([p for p, _ in requests], ['/actions'])
         actions = requests[0][1]['actions'][0]['actions']
         self.assertEqual(actions[0]['origin'], {'element-6066-11e4-a52e-4f735466cecf': 'private-native-card-reference'})
-        self.assertEqual([a['type'] for a in actions], ['pointerMove', 'pointerDown', 'pointerUp', 'pause', 'pointerDown', 'pointerUp'])
+        self.assertEqual([a['type'] for a in actions], ['pointerMove', 'pointerDown', 'pointerUp', 'pointerDown', 'pointerUp'])
         self.assertTrue(all(a['button'] == 0 for a in actions if a['type'] in {'pointerDown', 'pointerUp'}))
         self.assertEqual(report['click_commands'][0]['kind'], 'native-pointer-double-click')
         self.assertEqual(report['click_commands'][0]['status'], 'completed')
         self.assertEqual(report['click_commands'][0]['native_input_observation']['publicStateAfterCommand']['life'], [19,20])
         self.assertNotIn('private-native-card-reference', json.dumps(report))
+        self.assertTrue(report['click_commands'][0]['native_double_click_verified'])
+        good = namespace['finish_native_input_observation']
+        missing = dict(good(), events=[dict(type='click',detail=1,trusted=True,browserTimestamp=t,target=dict(ownCardId=11,withinRequestedCard=True)) for t in [176701.4,177146.5]])
+        wrong_order = dict(good(), events=list(reversed(good()['events'])))
+        wrong_card = json.loads(json.dumps(good())); wrong_card['events'][-1]['target']['ownCardId']=12
+        for observation in [missing,wrong_order,wrong_card,dict(good(),dropped=1),dict(good(),events=[])]:
+            namespace['finish_native_input_observation'] = lambda observation=observation: observation
+            with self.subTest(observation=observation), self.assertRaisesRegex(AssertionError,'trusted ordinary card dblclick'):
+                namespace['click'](selector,double=True)
+            self.assertEqual(report['click_commands'][-1]['status'],'failed')
+            self.assertEqual(report['click_commands'][-1]['reason'],'native-double-click-not-observed')
+        namespace['finish_native_input_observation'] = good
         requests.clear()
         namespace['hit_observation'] = lambda selector, **kwargs: {'centerHitsTarget': True, 'expectedWebDriverPointHitsTarget': False}
         with self.assertRaises(AssertionError):
@@ -73,6 +85,23 @@ class FinishEvidenceTests(unittest.TestCase):
         self.assertEqual(report['click_commands'][-1]['native_input_observation_error_type'], 'RuntimeError')
 
 
+
+    def test_two_trusted_single_clicks_do_not_complete_ordinary_double_click(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == 'click')
+        report = {}
+        observation = {'events': [dict(type='click', detail=1, trusted=True, browserTimestamp=t,
+            target=dict(ownCardId=2, withinRequestedCard=True)) for t in [176701.4, 177146.5]], 'dropped': 0}
+        namespace = dict(report=report, stage='paidplay-normal-direct', datetime=datetime, re=re,
+            element=lambda *args: 'native-reference', prepare_hand_click=lambda *args: None,
+            hit_observation=lambda *args, **kwargs: dict(centerHitsTarget=True, expectedWebDriverPointHitsTarget=True),
+            call=lambda *args, **kwargs: None, start_native_input_observation=lambda *args: {},
+            finish_native_input_observation=lambda: observation)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<native-event-regression>', 'exec'), namespace)
+        with self.assertRaisesRegex(AssertionError, 'trusted ordinary card dblclick'):
+            namespace['click']('[data-hand-card][data-object-id="2"]', double=True)
+        self.assertEqual(report['click_commands'][-1]['status'], 'failed')
+        self.assertEqual(report['click_commands'][-1]['reason'], 'native-double-click-not-observed')
 
     def test_click_commands_identify_button_operation_and_keep_original_error_when_diagnostic_fails(self):
         module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
@@ -288,7 +317,7 @@ class FinishEvidenceTests(unittest.TestCase):
             prepayment_scope_visible=True,own_area_label='You',
             fixture_opponent_drivers=[dict(ok=True,mode='explicit-local-fixture-opponent-driver',action='PassPriority',actor=1,commands=1,opponent_ui=False,two_client=False,before=dict(b,priorityPlayer=1)) for b in [paid,next_paid]],
             receipt_summary=dict(appliedResults=3,completed=[dict(sourceId=7,stackEntryId=None,terminalCount=0,lifeChanges=[]),dict(sourceId=7,stackEntryId=9,terminalCount=0,lifeChanges=[{'amount':-2,'total':18}]),dict(sourceId=7,stackEntryId=9,terminalCount=1,lifeChanges=[])]),
-            click_commands=[dict(operation=stage,status='completed') for stage in ['manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']])
+            click_commands=[dict(operation=stage,status='completed',native_double_click_verified=stage=='paidplay-normal-direct') for stage in ['manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']])
 
     def test_s1_1a_requires_prepaid_boundaries_receipts_events_and_native_commands(self):
         report = self.s1_report()

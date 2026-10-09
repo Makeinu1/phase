@@ -250,7 +250,6 @@ def click(selector, using='css selector', double=False):
                         {'type': 'pointerMove', 'duration': 0,
                          'origin': {'element-6066-11e4-a52e-4f735466cecf': identifier}, 'x': 0, 'y': 0},
                         {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0},
-                        {'type': 'pause', 'duration': 80},
                         {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0}]}]})
             finally:
                 original_native_error = report.get('webdriver_error')
@@ -263,10 +262,32 @@ def click(selector, using='css selector', double=False):
                         report.pop('webdriver_error', None)
                     else:
                         report['webdriver_error'] = original_native_error
+            observation = command.get('native_input_observation', {})
+            events = observation.get('events', [])
+            requested = int(re.search(r'data-object-id="(\d+)"', selector)[1])
+            clicks = [e for e in events if e.get('type') == 'click']
+            doubles = [e for e in events if e.get('type') == 'dblclick']
+            def on_requested(e):
+                target = e.get('target') or {}
+                return e.get('trusted') is True and target.get('ownCardId') == requested and target.get('withinRequestedCard') is True
+            verified = (observation.get('dropped') == 0 and len(clicks) == 2 and len(doubles) == 1
+                and [e.get('type') for e in events if e.get('type') in {'click','dblclick'}] == ['click','click','dblclick']
+                and [e.get('detail') for e in clicks] == [1,2] and doubles[0].get('detail') == 2
+                and all(on_requested(e) for e in clicks + doubles))
+            command['native_double_click_verified'] = verified
+            if len(clicks) == 2 and all(type(e.get('browserTimestamp')) in {int,float} for e in clicks):
+                command['observed_click_interval_ms'] = clicks[1]['browserTimestamp'] - clicks[0]['browserTimestamp']
+            if not verified:
+                command['reason'] = 'native-double-click-not-observed'
+                raise AssertionError('Required trusted ordinary card dblclick did not occur')
         else:
             call('/element/' + identifier + '/click', {})
         command['status'] = 'completed'
         command['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    except AssertionError:
+        command.update(status='failed', finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        report['failed_click_operation'] = stage
+        raise
     except RuntimeError:
         original_error = dict(report.get('webdriver_error', {}))
         command.update(status='failed', error=original_error,
@@ -675,6 +696,7 @@ except Exception as error:
     report['status'] = 'failed'
     report['error_type'] = type(error).__name__
     reason = ('required-capture-failed' if stage.startswith('capture-')
+              else 'native-double-click-not-observed' if report.get('click_commands', [{}])[-1].get('reason') == 'native-double-click-not-observed'
               else 'webdriver-command-failed' if 'webdriver_error' in report
               else 'operation-assertion-failed' if isinstance(error, AssertionError)
               else 'scenario-command-failed')
