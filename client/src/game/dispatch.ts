@@ -886,12 +886,12 @@ export async function dispatchInteraction(
     const snapshot = await adapter.getSnapshot();
     if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
 
-    useGameStore.getState().commitEngineSnapshot(snapshot, {
+    const committed = useGameStore.getState().commitEngineSnapshot(snapshot, {
       events: result.events,
       logEntries: result.log_entries ?? [],
       extraState: { restoredStackAutomation: null },
     });
-    return { status: "applied" };
+    return { status: committed ? "applied" : "stale" };
   } catch (err) {
     if (!isDispatchContextCurrent(generation, session)) return { status: "stale" };
 
