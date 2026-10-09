@@ -315,3 +315,30 @@ first-match-visible-and-enabled condition, last match count/first visibility,
 and passive public state. Native click failure retains its original error;
 performed ON confirmation records its result separately. Fixed failure reasons
 survive browser aggregation. Missing responses/Full Control remain failures.
+
+
+## Finite 1c continuation on unchanged afe3
+
+Run38004364808 succeeded on b4 with exact guarded producer37997514707 runtime.
+Parent independently verified the exact artifact and visually checked all five
+PNGs and accepted finite S1-1a plus S12c only. Full P1 remains unaccepted.
+
+The next consumer uses 1c.B before designation/payment on the same afe3 and
+same guarded runtime. Two separate native UI Apply1 operations produce
+20→19→18 on the same source/occurrence. A subscriber privately retains the
+actual completed first original. One native read-only lookup (actor0) must
+return that exact completed original/result (old LifeChanged19, no rejection),
+with appliedResult null and resident current18/open/same source. Then a public
+port reconciles the exact original command binding through its terminal cache.
+UI before/after remains18, and publication/completed/applied counts cannot grow.
+The native lookup and client cache reconciliation are separate evidence;
+this does not exercise publishing an old native reply through the adapter.
+No submission is repeated, no adapter-private maps are altered, no control
+state is seeded after the initial fixture. Finally removes the subscription
+and private original data on success or failure. Cleanup failure propagates.
+
+Normal Finish and next paid play continue to21 through real own Resolve clicks
+and two explicitly labelled B fixture passes. Seven exact PNG/state/index
+receipts are required: prepayment, same-source20, life19, life18,
+historical-lookup18, Finish18, paidplay21. Wrong actor/stale controls, Auto S,
+standalone N and remaining S1–S12 groups are still separate outstanding work.

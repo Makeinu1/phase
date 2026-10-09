@@ -221,7 +221,7 @@ class FinishEvidenceTests(unittest.TestCase):
                     self.assertEqual(namespace['resolve_control'](), expected)
                 self.assertFalse(any(path.endswith('/click') for path in requests))
 
-    def verify(self, stack_count=0, finish_changes=None, initial_changes=None, paidplay=False, paid_changes=None, s1_1a=False, missing_step=None):
+    def verify(self, stack_count=0, finish_changes=None, initial_changes=None, paidplay=False, paid_changes=None, s1_1a=False, s1_1c=False, missing_step=None):
         product = {'sha': 'unit-product', 'tree': 'unit-tree'}
         execution = {'validation_sha': 'unit-consumer', 'run_id': 1, 'run_attempt': 1}
         manifest = {'consumer': product, 'runtime': product, 'validation': {'sha': 'unit-producer'},
@@ -232,7 +232,7 @@ class FinishEvidenceTests(unittest.TestCase):
         initial.update(initial_changes or {})
         life = dict(initial, life=[19, 20])
         finish = dict(life, manualPhase='closed', waitingType='Priority', resolvingEntryId=None)
-        if paidplay or s1_1a:
+        if paidplay or s1_1a or s1_1c:
             finish.update(ownManaCount=1, nextCardId=11, nextInGraveyard=False)
         finish.update(finish_changes or {})
         paid = dict(finish, life=[22, 20], ownManaCount=0, nextCardId=None, nextInGraveyard=True)
@@ -247,7 +247,7 @@ class FinishEvidenceTests(unittest.TestCase):
             states = [('same-source', initial), ('life19', life), ('finish', finish)]
             if paidplay:
                 states.append(('paidplay22', paid))
-            if s1_1a:
+            if s1_1a or s1_1c:
                 initial.update(sourceCardId=7, ownManaCount=1, sourceInHand=False)
                 life = dict(initial, life=[18,20])
                 finish = dict(life, manualPhase='closed', waitingType='Priority', resolvingEntryId=None, ownManaCount=1, nextCardId=11, nextInGraveyard=False)
@@ -257,6 +257,8 @@ class FinishEvidenceTests(unittest.TestCase):
                 paid = dict(finish, life=[21,20], ownManaCount=0, nextCardId=None, nextInGraveyard=True)
                 paid.update(paid_changes or {})
                 states = [('prepayment',pre),('same-source',initial),('life18',life),('finish',finish),('paidplay21',paid)]
+                if s1_1c:
+                    states += [('life19',dict(initial,life=[19,20])),('historical-lookup',dict(life))]
             for step, state in states:
                 if step == missing_step:
                     continue
@@ -271,7 +273,7 @@ class FinishEvidenceTests(unittest.TestCase):
                     item[kind] = {'path': relative, 'sha256': hashlib.sha256(data).hexdigest()}
                 entries.append(item)
             (root / 'step-index.json').write_text(json.dumps(entries))
-            return capture.validate_required_images(root, manifest, execution, paidplay=paidplay, s1_1a=s1_1a)
+            return capture.validate_required_images(root, manifest, execution, paidplay=paidplay, s1_1a=s1_1a, s1_1c=s1_1c)
 
     def test_paid_continuation_requires_four_current_execution_receipts(self):
         self.assertEqual(self.verify(paidplay=True)['verified_count'], 4)
@@ -318,6 +320,56 @@ class FinishEvidenceTests(unittest.TestCase):
             fixture_opponent_drivers=[dict(ok=True,mode='explicit-local-fixture-opponent-driver',action='PassPriority',actor=1,commands=1,opponent_ui=False,two_client=False,before=dict(b,priorityPlayer=1)) for b in [paid,next_paid]],
             receipt_summary=dict(appliedResults=3,completed=[dict(sourceId=7,stackEntryId=None,terminalCount=0,lifeChanges=[]),dict(sourceId=7,stackEntryId=9,terminalCount=0,lifeChanges=[{'amount':-2,'total':18}]),dict(sourceId=7,stackEntryId=9,terminalCount=1,lifeChanges=[])]),
             click_commands=[dict(operation=stage,status='completed',native_double_click_verified=stage=='paidplay-normal-direct') for stage in ['prepayment-full-control','manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']])
+
+    def s1_1c_report(self):
+        report = self.s1_report()
+        report.update(scope=capture.S1_1C_SCOPE,fixture='1c.B',receipt_observer_stopped=True)
+        first = dict(report['begin'],life=[19,20],publicEvents=dict(lifeChanges=[{'amount':-1,'total':19}],sourceDepartures=0,manualTerminals=0,nextDepartures=0))
+        losses = [{'amount':-1,'total':19},{'amount':-1,'total':18}]
+        for key in ['life_applied','finished','ordinary_completed']:
+            report[key]['publicEvents']['lifeChanges'] = losses + ([{'amount':3,'total':21}] if key=='ordinary_completed' else [])
+        report['life_first'] = first
+        report['stages'].update({stage:dict(status='passed',assertions_completed=True) for stage in ['life19','historical-lookup']})
+        report['click_commands'].append(dict(operation='life19',status='completed'))
+        report['receipt_summary']['completed'][1]['lifeChanges']=[{'amount':-1,'total':19}]
+        report['receipt_summary']['completed'].insert(2,dict(sourceId=7,stackEntryId=9,terminalCount=0,lifeChanges=[{'amount':-1,'total':18}]))
+        report['receipt_summary']['appliedResults']=4
+        counts=dict(publications=3,appliedResults=3,completed=3)
+        report['historical_lookup']=dict(method='native-read-only-original-lookup-and-client-terminal-cache-reconcile',nativeLookupCount=1,
+            before=report['life_applied'],after=report['life_applied'],countsBefore=counts,countsAfter=dict(counts),
+            differentInteractions=True,differentAttempts=True,sameOriginal=True,sameOriginalResult=True,sameSource=True,sameContext=True,
+            nativeAppliedResultNull=True,nativeRejectionNull=True,cacheOriginalBinding=True,nativeStatus='completed',cacheStatus='completed',
+            historicalLifeChanges=[{'amount':-1,'total':19}],historicalTerminalCount=0,currentLife=[18,20],currentSourceId=7,currentEntryId=9,currentPhase='open',adapterPublishedHistoricalReply=False)
+        return report
+
+    def test_s1_1c_rejects_old_receipt_replay_and_ui_regression(self):
+        report=self.s1_1c_report()
+        capture.validate_operations(report, {}, {}, s1_1c=True)
+        faults=[(['historical_lookup',flag],False) for flag in ['differentInteractions','differentAttempts','sameOriginal','sameOriginalResult','sameSource','sameContext','nativeAppliedResultNull','nativeRejectionNull','cacheOriginalBinding']]
+        faults += [(['historical_lookup','nativeLookupCount'],2),(['historical_lookup','adapterPublishedHistoricalReply'],True),
+            (['historical_lookup','nativeStatus'],'pending'),(['historical_lookup','cacheStatus'],'indeterminate'),
+            (['historical_lookup','historicalLifeChanges'],[{'amount':-1,'total':18}]),(['historical_lookup','currentLife'],[19,20]),
+            (['historical_lookup','currentSourceId'],8),(['historical_lookup','currentEntryId'],10),(['historical_lookup','currentPhase'],'closed'),
+            (['historical_lookup','countsAfter','publications'],4),(['historical_lookup','countsAfter','appliedResults'],4),
+            (['historical_lookup','countsAfter','completed'],4),(['historical_lookup','after','life'],[19,20]),
+            (['life_first','publicEvents','lifeChanges'],[{'amount':-2,'total':18}]),(['receipt_observer_stopped'],False),
+            (['receipt_summary','appliedResults'],5),(['fixture'],'1a.B'),(['stages','historical-lookup','status'],'skipped')]
+        for path,value in faults:
+            changed=json.loads(json.dumps(report)); node=changed
+            for key in path[:-1]: node=node[key]
+            node[path[-1]]=value
+            with self.subTest(path=path),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_operations(changed,{}, {},s1_1c=True)
+        for operation in ['life19','life18']:
+            changed=json.loads(json.dumps(report)); changed['click_commands']=[c for c in changed['click_commands'] if c['operation']!=operation]
+            with self.subTest(operation=operation),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_operations(changed,{}, {},s1_1c=True)
+
+    def test_s1_1c_requires_seven_current_images(self):
+        self.assertEqual(self.verify(s1_1c=True)['verified_count'],7)
+        for step in ['prepayment','same-source','life19','life18','historical-lookup','finish','paidplay21']:
+            with self.subTest(step=step),self.assertRaises(capture.EvidenceFailure):
+                self.verify(s1_1c=True,missing_step=step)
 
     def test_s1_1a_requires_prepaid_boundaries_receipts_events_and_native_commands(self):
         report = self.s1_report()
@@ -434,7 +486,7 @@ class FinishEvidenceTests(unittest.TestCase):
                                   and target.value.id == 'proof' and isinstance(target.slice, ast.Constant)
                                   and target.slice.value == 'scope' for target in node.targets))
         ci_scope = eval(compile(ast.Expression(assignment.value), '<ci-scope>', 'eval'), {'checks': capture})
-        self.assertEqual(ci_scope, capture.S1_1A_SCOPE)
+        self.assertEqual(ci_scope, capture.S1_1C_SCOPE)
         self.assertEqual(ui_scope, capture.BOUNDED_K1_SCOPE)
         self.assertIn('K1-only acceptance when passed', ui_scope)
         self.assertIn('full S8', ui_scope)

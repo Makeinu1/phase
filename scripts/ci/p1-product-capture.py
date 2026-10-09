@@ -24,6 +24,8 @@ BOUNDED_K1_SCOPE = ('Local K1 checked-restore and real UI continuation to paid p
 
 S1_1A_SCOPE = 'S1-1a and S12c prepayment Manual UI with explicit fixture opponent passes; not full P1, opponent UI, two-client, Undo or Recovery acceptance'
 
+S1_1C_SCOPE = 'S1-1c native original receipt lookup and client terminal cache reconciliation with latest UI18, prepayment Manual UI and paid play21; not adapter historical reply publication or full P1 acceptance'
+
 
 class EvidenceFailure(ValueError):
     def __init__(self, stage, reason):
@@ -31,7 +33,7 @@ class EvidenceFailure(ValueError):
         super().__init__(reason)
 
 
-def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False, s1_1a=False):
+def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False, s1_1a=False, s1_1c=False):
     """Require explicit operation completion; image receipts are observations."""
     def reject(reason):
         raise EvidenceFailure('operation-assertions', reason)
@@ -47,15 +49,17 @@ def validate_operations(report, consumer, execution, paidplay=False, restore_dri
     stages = report.get('stages')
     if not isinstance(stages, dict):
         reject('required-operation-stages-missing')
-    required = (['prepayment', 'manual-options', 'manual-cast', 'initial', 'life18', 'finish', 'paidplay21'] if s1_1a else ['initial', 'life19', 'finish'] + (['paidplay22'] if paidplay else []) + (['checked-restore-k1', 'fixture-opponent-pass'] if restore_driver else []))
+    required = (['prepayment', 'manual-options', 'manual-cast', 'initial', 'life18', 'finish', 'paidplay21'] + (['life19','historical-lookup'] if s1_1c else []) if s1_1a or s1_1c else ['initial', 'life19', 'finish'] + (['paidplay22'] if paidplay else []) + (['checked-restore-k1', 'fixture-opponent-pass'] if restore_driver else []))
     for stage in required:
         item = stages.get(stage)
         if not isinstance(item, dict):
             reject('required-operation-stage-missing:' + stage)
         if item.get('status') != 'passed' or item.get('assertions_completed') is not True:
             reject('required-operation-stage-incomplete:' + stage)
-    if s1_1a:
-        validate_s1_1a(report)
+    if s1_1a or s1_1c:
+        validate_s1_1a(report, split_apply=s1_1c)
+    if s1_1c:
+        validate_historical_lookup(report)
     if paidplay:
         paid = report.get('paid_before_resolution')
         if (not isinstance(paid, dict) or paid.get('life') != [19, 20]
@@ -108,11 +112,11 @@ def validate_operations(report, consumer, execution, paidplay=False, restore_dri
             reject('fixture-opponent-driver-boundary-mismatch')
 
 
-def validate_s1_1a(report):
+def validate_s1_1a(report, split_apply=False):
     def require(condition, reason):
         if not condition:
-            raise EvidenceFailure('operation-assertions', 's1-1a-' + reason)
-    require(report.get('scope') == S1_1A_SCOPE and report.get('fixture') == '1a.B', 'scope-fixture-mismatch')
+            raise EvidenceFailure('operation-assertions', ('s1-1c-' if split_apply else 's1-1a-') + reason)
+    require(report.get('scope') == (S1_1C_SCOPE if split_apply else S1_1A_SCOPE) and report.get('fixture') == ('1c.B' if split_apply else '1a.B'), 'scope-fixture-mismatch')
     pre, paid, begin, life, end, next_paid, next_done = (report.get(k) for k in
         ['prepayment', 'manual_paid_before_begin', 'begin', 'life_applied', 'finished', 'paid_before_resolution', 'ordinary_completed'])
     require(all(isinstance(x, dict) for x in [pre, paid, begin, life, end, next_paid, next_done]), 'public-boundaries-missing')
@@ -154,31 +158,66 @@ def validate_s1_1a(report):
             and b.get('manualPhase') == phase and b.get('priorityPlayer') == 1 and b.get('waitingType') == 'Priority'
             and b.get('stackCount') == 1 and b.get('resolvingEntryId') is None
             and b.get('sourceId') == source and b.get('manualStackEntryId') == boundary.get('manualStackEntryId'), 'fixture-driver-boundary')
+    losses = [{'amount':-1,'total':19},{'amount':-1,'total':18}] if split_apply else [{'amount':-2,'total':18}]
     for state, changes, departed, terminals, next_departed in [
         (pre, [], 0, 0, 0), (begin, [], 0, 0, 0),
-        (life, [{'amount':-2,'total':18}],0,0,0), (end,[{'amount':-2,'total':18}],1,1,0),
-        (next_done,[{'amount':-2,'total':18},{'amount':3,'total':21}],1,1,1)]:
+        (life, losses,0,0,0), (end,losses,1,1,0),
+        (next_done,losses+[{'amount':3,'total':21}],1,1,1)]:
         require(state.get('publicEvents') == {'lifeChanges':changes,'sourceDepartures':departed,
             'manualTerminals':terminals,'nextDepartures':next_departed}, 'event-boundary-mismatch')
     summary = report.get('receipt_summary')
-    require(isinstance(summary, dict) and summary.get('appliedResults') == 3, 'receipt-delivery-count')
+    require(isinstance(summary, dict) and summary.get('appliedResults') == (4 if split_apply else 3), 'receipt-delivery-count')
     receipts = summary.get('completed')
-    require(isinstance(receipts, list) and len(receipts) == 3 and all(isinstance(r,dict) for r in receipts), 'receipt-count')
+    require(isinstance(receipts, list) and len(receipts) == (4 if split_apply else 3) and all(isinstance(r,dict) for r in receipts), 'receipt-count')
     cast_receipts = [r for r in receipts if r.get('stackEntryId', 'missing') is None]
     operation_receipts = [r for r in receipts if r.get('stackEntryId') == entry]
-    require(len(cast_receipts) == 1 and len(operation_receipts) == 2
+    require(len(cast_receipts) == 1 and len(operation_receipts) == (3 if split_apply else 2)
         and cast_receipts[0].get('sourceId') == source and cast_receipts[0].get('lifeChanges') == []
         and cast_receipts[0].get('terminalCount') == 0, 'cast-receipt-mismatch')
     require(all(r.get('sourceId') == source and r.get('stackEntryId') == entry for r in operation_receipts)
-        and sorted(r.get('terminalCount', -1) for r in operation_receipts) == [0,1]
-        and [e for r in operation_receipts for e in r.get('lifeChanges', [])] == [{'amount':-2,'total':18}], 'receipt-source-event-mismatch')
+        and sorted(r.get('terminalCount', -1) for r in operation_receipts) == ([0,0,1] if split_apply else [0,1])
+        and [e for r in operation_receipts for e in r.get('lifeChanges', [])] == losses, 'receipt-source-event-mismatch')
     require(report.get('prepayment_full_control') is True, 'full-control-not-confirmed')
     commands = report.get('click_commands', [])
     ordinary_clicks = [c for c in commands if c.get('operation') == 'paidplay-normal-direct']
     require(len(ordinary_clicks) == 1 and ordinary_clicks[0].get('native_double_click_verified') is True, 'trusted-double-click-missing')
     require(all(any(c.get('operation') == stage and c.get('status') == 'completed' for c in commands)
-        for stage in ['prepayment-full-control','manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']), 'native-clicks-missing')
+        for stage in ['prepayment-full-control','manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response'] + (['life19'] if split_apply else [])), 'native-clicks-missing')
 
+
+
+def validate_historical_lookup(report):
+    def require(condition, reason):
+        if not condition:
+            raise EvidenceFailure('operation-assertions', 's1-1c-' + reason)
+    lookup, begin, first, life = (report.get(k) for k in ['historical_lookup','begin','life_first','life_applied'])
+    require(all(isinstance(x,dict) for x in [lookup,begin,first,life]), 'historical-boundaries-missing')
+    source, entry = begin.get('sourceId'), begin.get('manualStackEntryId')
+    require(type(source) is int and type(entry) is int, 'lookup-source-missing')
+    require(first.get('life') == [19,20] and first.get('sourceId') == source
+        and first.get('manualStackEntryId') == entry and first.get('resolvingEntryId') == entry
+        and first.get('manualPhase') == 'open' and first.get('stackCount') == 0 and first.get('ownManaCount') == 1
+        and first.get('publicEvents') == dict(lifeChanges=[{'amount':-1,'total':19}],sourceDepartures=0,manualTerminals=0,nextDepartures=0), 'first-apply-mismatch')
+    require(lookup.get('method') == 'native-read-only-original-lookup-and-client-terminal-cache-reconcile'
+        and type(lookup.get('nativeLookupCount')) is int and lookup['nativeLookupCount'] == 1
+        and lookup.get('adapterPublishedHistoricalReply') is False, 'lookup-method-mismatch')
+    for flag in ['differentInteractions','differentAttempts','sameOriginal','sameOriginalResult','sameSource','sameContext',
+                 'nativeAppliedResultNull','nativeRejectionNull','cacheOriginalBinding']:
+        require(lookup.get(flag) is True, 'lookup-' + flag)
+    require(lookup.get('nativeStatus') == 'completed' and lookup.get('cacheStatus') == 'completed'
+        and lookup.get('historicalLifeChanges') == [{'amount':-1,'total':19}]
+        and lookup.get('historicalTerminalCount') == 0, 'original-receipt-mismatch')
+    require(lookup.get('currentLife') == [18,20] and lookup.get('currentSourceId') == source
+        and lookup.get('currentEntryId') == entry and lookup.get('currentPhase') == 'open', 'latest-native-current-mismatch')
+    require(lookup.get('before') == life and lookup.get('after') == life, 'ui-regressed-after-lookup')
+    counts = lookup.get('countsBefore')
+    require(isinstance(counts,dict) and set(counts) == {'publications','appliedResults','completed'}
+        and all(type(v) is int for v in counts.values()) and counts['publications'] >= 3
+        and counts['appliedResults'] == 3 and counts['completed'] == 3
+        and lookup.get('countsAfter') == counts, 'lookup-replayed-or-published')
+    # During the live journey cleanup happens in finally; final aggregate requires it.
+    if report.get('status') == 'passed':
+        require(report.get('receipt_observer_stopped') is True, 'receipt-observer-not-stopped')
 
 def valid_png(data):
     """Check saved PNG chunks/CRC and compressed pixels with the stdlib."""
@@ -243,7 +282,7 @@ def finish_matches(initial, ended, own_life=19):
             and type(ended.get('stackCount')) is int and ended['stackCount'] == count)
 
 
-def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False):
+def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False, s1_1c=False):
     """Recheck the three existing capture receipts and saved public bytes."""
     def reject(reason):
         raise EvidenceFailure('required-images', reason)
@@ -254,7 +293,7 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
     if not isinstance(steps, list) or any(not isinstance(item, dict) for item in steps):
         reject('required-image-index-invalid')
     observations = {}
-    required = ['prepayment','same-source','life18','finish','paidplay21'] if s1_1a else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
+    required = ['prepayment','same-source','life18','finish','paidplay21'] + (['life19','historical-lookup'] if s1_1c else []) if s1_1a or s1_1c else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
     for step in required:
         matches = [item for item in steps if item.get('step') == step]
         if len(matches) != 1:
@@ -304,9 +343,15 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
                         or (state['waitingType'] is not None and not isinstance(state['waitingType'], str))):
                     reject('required-state-invalid:' + step)
                 observations[step] = state
-    own_life = 18 if s1_1a else 19
-    initial, life, finish = (observations[step] for step in ['same-source', 'life18' if s1_1a else 'life19', 'finish'])
-    if s1_1a:
+    if s1_1c:
+        first, current = observations['life19'], observations['life18']
+        if (first.get('life') != [19,20] or first.get('manualPhase') != 'open'
+                or any(first.get(k) != current.get(k) for k in ['sourceId','manualStackEntryId','resolvingEntryId','stackCount','ownManaCount'])
+                or observations['historical-lookup'] != current):
+            reject('required-state-content-mismatch:historical-lookup')
+    own_life = 18 if s1_1a or s1_1c else 19
+    initial, life, finish = (observations[step] for step in ['same-source', 'life18' if s1_1a or s1_1c else 'life19', 'finish'])
+    if s1_1a or s1_1c:
         pre = observations['prepayment']
         if (pre['life'] != [20,20] or pre['manualPhase'] is not None or pre['stackCount'] != 0
                 or pre['resolvingEntryId'] is not None or pre.get('ownManaCount') != 2
@@ -323,11 +368,11 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
         reject('required-state-content-mismatch:life19')
     if not finish_matches(initial, finish, own_life=own_life):
         reject('required-state-content-mismatch:finish')
-    if paidplay or s1_1a:
-        next_play = observations['paidplay21' if s1_1a else 'paidplay22']
+    if paidplay or s1_1a or s1_1c:
+        next_play = observations['paidplay21' if s1_1a or s1_1c else 'paidplay22']
         if (type(finish.get('ownManaCount')) is not int or finish['ownManaCount'] != 1
                 or type(finish.get('nextCardId')) is not int or finish.get('nextInGraveyard') is not False
-                or next_play['life'] != [21 if s1_1a else 22, initial['life'][1]]
+                or next_play['life'] != [21 if s1_1a or s1_1c else 22, initial['life'][1]]
                 or next_play['stackCount'] != 0 or next_play['waitingType'] != 'Priority'
                 or next_play['manualPhase'] == 'open' or next_play['resolvingEntryId'] is not None
                 or type(next_play.get('ownManaCount')) is not int or next_play['ownManaCount'] != 0
@@ -343,7 +388,7 @@ def main():
     parser.add_argument('--step', required=True)
     parser.add_argument('--state-script', required=True, type=Path)
     args = parser.parse_args()
-    if not re.fullmatch(r'(prepayment|same-source|life19|life18|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
+    if not re.fullmatch(r'(prepayment|same-source|life19|life18|historical-lookup|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
         raise ValueError('unknown P1 observation step')
     session = os.environ['P1_WEBDRIVER_SESSION']
     if not re.fullmatch('[a-zA-Z0-9-]+', session):

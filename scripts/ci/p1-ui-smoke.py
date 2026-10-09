@@ -24,11 +24,12 @@ BASE = 'http://127.0.0.1:9515/session/' + SESSION
 spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
-PREPAYMENT = os.environ.get('P1_UI_CASE') == 'prepayment1a'
-report = {'scope': CHECKS.S1_1A_SCOPE if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
-          'fixture': '1a.B' if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
+SPLIT_APPLY = os.environ.get('P1_UI_CASE') == 'prepayment1c'
+PREPAYMENT = SPLIT_APPLY or os.environ.get('P1_UI_CASE') == 'prepayment1a'
+report = {'scope': (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
+          'fixture': ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
-                     for name in (['prepayment', 'manual-options', 'manual-cast', 'initial', 'life18', 'finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
+                     for name in (['prepayment', 'manual-options', 'manual-cast', 'initial'] + (['life19', 'life18', 'historical-lookup'] if SPLIT_APPLY else ['life18']) + ['finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
@@ -435,19 +436,58 @@ const done = arguments[arguments.length-1];
 import('/src/stores/gameStore.ts').then(({useGameStore}) => {
  const cap = useGameStore.getState().adapter?.localContinuation?.();
  if (!cap) return done(false);
- const unique = new Map(); let delivered = 0;
- cap.subscribe(p => {
+ const unique = new Map(), originals = []; let delivered = 0, publications = 0;
+ const stop = cap.subscribe(p => {
+  publications++;
   const r = p.receipt;
   if (r?.status !== 'completed') return;
   const a = r.attempt;
-  if (!unique.has(a.attemptId)) unique.set(a.attemptId, {
+  if (!unique.has(a.attemptId)) {
+   originals.push(r);
+   unique.set(a.attemptId, {
    sourceId: a.source?.sourceId ?? null, stackEntryId: a.source?.stackEntryId ?? null,
    lifeChanges: (r.result?.events ?? []).filter(e=>e.type==='LifeChanged' && e.data.player_id===0)
     .map(e=>({amount:e.data.amount,total:e.data.new_total})),
    terminalCount: (r.result?.events ?? []).filter(e=>e.type==='StackResolved' && e.data.object_id===a.source?.stackEntryId).length});
+  }
   if (p.appliedResult) delivered++;
  });
  window.__p1ReceiptSummary = () => ({completed: [...unique.values()], appliedResults: delivered});
+ window.__p1StopReceipts = () => { stop(); originals.length = 0; unique.clear();
+  delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
+ window.__p1LookupFirst = async () => {
+  const [{unwrapClientGameState}, {sameLocalContinuationValue}] = await Promise.all([
+   import('/src/adapter/wasm-adapter.ts'), import('/src/adapter/types.ts')]);
+  const losses = originals.filter(r => r.attempt.submission.response.type==='manualResolution' && r.attempt.submission.response.data.decision.type==='loseOwnLife' && r.attempt.submission.response.data.decision.data.amount===1 && r.result?.events?.some(e => e.type==='LifeChanged' && e.data.player_id===0));
+  if (losses.length !== 2) throw new Error('Two actual Apply originals required');
+  const [first, second] = losses, a = first.attempt;
+  const before = window.__p1Observe();
+  const countsBefore = {publications, appliedResults:delivered, completed:unique.size};
+  const reply = await useGameStore.getState().adapter.getEngineClient().submitLocalContinuation(0,
+   {type:'localContinuation',operation:'lookup',attempt:a});
+  const current = reply.current && unwrapClientGameState(reply.current.snapshot.state);
+  const binding = {interactionId:a.submission.interactionId,adapterGeneration:a.context.adapterGeneration};
+  const source = {stackEntryId:a.source.stackEntryId,sourceObjectId:a.source.sourceId,adapterGeneration:a.context.adapterGeneration};
+  const request = {binding,command:{type:'lose-life',affectedPlayerId:0,amount:1,
+   stackEntryId:a.source.stackEntryId,sourceObjectId:a.source.sourceId}};
+  const reconciled = await cap.commandPortFactory(source).reconcileManualResolution(request);
+  const after = window.__p1Observe();
+  return {method:'native-read-only-original-lookup-and-client-terminal-cache-reconcile', nativeLookupCount:1,
+   before, after, countsBefore, countsAfter:{publications,appliedResults:delivered,completed:unique.size},
+   differentInteractions:a.submission.interactionId !== second.attempt.submission.interactionId,
+   differentAttempts:a.attemptId !== second.attempt.attemptId,
+   sameOriginal:sameLocalContinuationValue(a,reply.receipt?.attempt),
+   sameSource:first.attempt.source.sourceId===second.attempt.source.sourceId && first.attempt.source.stackEntryId===second.attempt.source.stackEntryId,
+   nativeStatus:reply.receipt?.status, nativeRejectionNull:reply.receipt?.rejection===null,
+   sameOriginalResult:sameLocalContinuationValue(first.result,reply.receipt?.result), nativeAppliedResultNull:reply.appliedResult===null,
+   historicalLifeChanges:(reply.receipt?.result?.events ?? []).filter(e=>e.type==='LifeChanged' && e.data.player_id===0).map(e=>({amount:e.data.amount,total:e.data.new_total})),
+   historicalTerminalCount:(reply.receipt?.result?.events ?? []).filter(e=>e.type==='StackResolved').length,
+   currentLife:current?.players?.map(p=>p.life),currentSourceId:current?.derived?.manual_resolution?.source?.sourceId,
+   currentEntryId:current?.resolving_stack_entry?.id,currentPhase:current?.derived?.manual_resolution?.phase,
+   sameContext:sameLocalContinuationValue(a.context,reply.current?.context),
+   cacheStatus:reconciled.status,cacheOriginalBinding:sameLocalContinuationValue(binding,reconciled.binding),
+   adapterPublishedHistoricalReply:false};
+ };
  done(true);
 }, () => done(false));
 ''', 'args': []})
@@ -496,24 +536,35 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     assert isinstance(label, str) and 'You' in label and 'Opp 1' not in label
     click('[data-testid="player-area-0"] > button[aria-pressed]')
     report['own_area_label'] = 'You'
-    stage = 'life18'
-    amount = element(panel + '//input[@type="number"]', 'xpath')
-    call('/element/' + amount + '/clear', {})
-    call('/element/' + amount + '/value', {'text': '2'})
-    click(panel + '//button[@type="submit"]', 'xpath')
-    life = wait_for(lambda x: x['life'] == [18,20] and x['manualPhase'] == 'open')
-    assert life['sourceId'] == began['sourceId'] and life['resolvingEntryId'] == began['manualStackEntryId']
-    assert life['publicEvents']['lifeChanges'] == [{'amount': -2, 'total': 18}]
-    assert life['publicEvents']['sourceDepartures'] == 0 and life['publicEvents']['manualTerminals'] == 0
-    report['life_applied'] = life
-    passed('life18')
-    stage = 'capture-life18'
-    capture('life18')
+    changes = []
+    for amount_value, total in ([(1,19),(1,18)] if SPLIT_APPLY else [(2,18)]):
+        stage = 'life' + str(total)
+        amount = element(panel + '//input[@type="number"]', 'xpath')
+        call('/element/' + amount + '/clear', {})
+        call('/element/' + amount + '/value', {'text': str(amount_value)})
+        click(panel + '//button[@type="submit"]', 'xpath')
+        life = wait_for(lambda x: x['life'] == [total,20] and x['manualPhase'] == 'open')
+        changes.append({'amount': -amount_value, 'total': total})
+        assert life['sourceId'] == began['sourceId'] and life['resolvingEntryId'] == began['manualStackEntryId']
+        assert life['publicEvents']['lifeChanges'] == changes
+        assert life['publicEvents']['sourceDepartures'] == 0 and life['publicEvents']['manualTerminals'] == 0
+        report['life_first' if total == 19 else 'life_applied'] = life
+        passed(stage)
+        stage = 'capture-life' + str(total)
+        capture('life' + str(total))
+    if SPLIT_APPLY:
+        stage = 'historical-lookup'
+        lookup = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1LookupFirst().then(done,()=>done(null));", 'args': []})
+        report['historical_lookup'] = lookup
+        CHECKS.validate_historical_lookup(report)
+        passed('historical-lookup')
+        stage = 'capture-historical-lookup'
+        capture('historical-lookup')
     stage = 'finish'
     click(panel + '//button[normalize-space()="Finish"]', 'xpath')
     ended = wait_for(lambda x: CHECKS.finish_matches(began, x, own_life=18))
     assert ended['sourceInGraveyard'] is True and ended['ownManaCount'] == 1
-    assert ended['publicEvents']['lifeChanges'] == [{'amount': -2, 'total': 18}]
+    assert ended['publicEvents']['lifeChanges'] == changes
     assert ended['publicEvents']['sourceDepartures'] == 1 and ended['publicEvents']['manualTerminals'] == 1
     report['finished'] = ended
     passed('finish')
@@ -534,21 +585,21 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     ordinary = wait_for(lambda x: x['life'] == [21,20] and x['stackCount'] == 0 and x['waitingType'] == 'Priority')
     assert ordinary['ownManaCount'] == 0 and ordinary['nextInGraveyard'] is True and ordinary['nextCardId'] is None
     assert ordinary['resolvingEntryId'] is None and ordinary['manualPhase'] == 'closed'
-    assert ordinary['publicEvents']['lifeChanges'] == [{'amount': -2, 'total': 18}, {'amount': 3, 'total': 21}]
+    assert ordinary['publicEvents']['lifeChanges'] == changes + [{'amount': 3, 'total': 21}]
     assert ordinary['publicEvents']['sourceDepartures'] == 1 and ordinary['publicEvents']['manualTerminals'] == 1
     assert ordinary['publicEvents']['nextDepartures'] == 1
     report['ordinary_completed'] = ordinary
     report['receipt_summary'] = call('/execute/sync', {'script': 'return window.__p1ReceiptSummary();', 'args': []})
     rs = report['receipt_summary']
-    assert len(rs['completed']) == 3 and rs['appliedResults'] == 3
+    assert len(rs['completed']) == (4 if SPLIT_APPLY else 3) and rs['appliedResults'] == (4 if SPLIT_APPLY else 3)
     cast_receipts = [r for r in rs['completed'] if r['stackEntryId'] is None]
     operation_receipts = [r for r in rs['completed'] if r['stackEntryId'] == began['manualStackEntryId']]
     assert len(cast_receipts) == 1 and cast_receipts[0]['sourceId'] == began['sourceId']
     assert cast_receipts[0]['lifeChanges'] == [] and cast_receipts[0]['terminalCount'] == 0
-    assert len(operation_receipts) == 2
+    assert len(operation_receipts) == (3 if SPLIT_APPLY else 2)
     assert all(r['sourceId'] == began['sourceId'] and r['stackEntryId'] == began['manualStackEntryId'] for r in operation_receipts)
-    assert sorted(r['terminalCount'] for r in operation_receipts) == [0,1]
-    assert [e for r in operation_receipts for e in r['lifeChanges']] == [{'amount': -2, 'total': 18}]
+    assert sorted(r['terminalCount'] for r in operation_receipts) == ([0,0,1] if SPLIT_APPLY else [0,1])
+    assert [e for r in operation_receipts for e in r['lifeChanges']] == changes
     passed('paidplay21')
     stage = 'capture-paidplay21'
     capture('paidplay21')
@@ -730,6 +781,13 @@ except Exception as error:
         report['secondary'].append({'stage': stage, 'code': 1, 'reason': 'required-capture-failed'})
         report['status'] = 'incomplete'
 finally:
+    if PREPAYMENT:
+        try:
+            report['receipt_observer_stopped'] = call('/execute/sync', {'script': 'return window.__p1StopReceipts ? window.__p1StopReceipts() : true;', 'args': []})
+        except Exception:
+            report['secondary'].append({'stage': 'receipt-observer-cleanup', 'code': 1, 'reason': 'receipt-observer-cleanup-failed'})
+            exit_code = exit_code or 1
+            report['status'] = 'incomplete' if report['primary']['code'] == 0 else 'failed'
     report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
         (ROOT / 'ui-smoke-report.json').write_text(json.dumps(report, indent=2) + '\n')

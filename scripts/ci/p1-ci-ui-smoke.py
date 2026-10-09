@@ -76,7 +76,7 @@ def main():
     spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
     checks = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(checks)
-    proof['scope'] = checks.S1_1A_SCOPE
+    proof['scope'] = checks.S1_1C_SCOPE
     spec = importlib.util.spec_from_file_location('p1_browser_results', VALIDATION / 'scripts/ci/p1-product-browser.py')
     results = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(results)
@@ -111,11 +111,11 @@ def main():
                     proof['primary'] = results.safe_primary(primary)
                 # Copy only safe, structured secondary fields from this local helper.
                 allowed = {'diagnostic-save-failed', 'failure-report-unreadable', 'session-cleanup-failed',
-                           'process-cleanup-failed', 'required-report-save-failed', 'required-capture-failed'}
+                           'process-cleanup-failed', 'required-report-save-failed', 'required-capture-failed', 'receipt-observer-cleanup-failed'}
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'process-cleanup', 'browser-boot-report', 'capture-finish', 'capture-paidplay21', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'process-cleanup', 'browser-boot-report', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True
@@ -135,7 +135,7 @@ def main():
             'p1_native_journey::paid_manual_begin_life_finish_next_and_checked_checkpoints',
             '--', '--exact'], {'P1_FIXTURE_OUTPUT_DIR': str(fixtures)})
         bundle = json.loads((fixtures / 'trusted-game-states.json').read_text())
-        if bundle['version'] != 1 or '1a.B' not in bundle['cases'] or len(bundle['cases']) != 145:
+        if bundle['version'] != 1 or '1c.B' not in bundle['cases'] or len(bundle['cases']) != 145:
             raise ValueError('finite fixture generation did not produce the reviewed bundle')
         proof['fixtures'] = {name: hashlib.sha256((fixtures / name).read_bytes()).hexdigest()
             for name in ['card-data.json', 'trusted-game-states.json']}
@@ -165,21 +165,21 @@ def main():
         proof['stage'] = 'product-browser'
         guarded('p1-ui-smoke', ['python3', str(VALIDATION / 'scripts/ci/p1-product-browser.py'),
             '--source', str(source), '--evidence', str(evidence),
-            '--entry-route', '/game/p1-ci-smoke?mode=local&manual=1&p1Fixture=1a.B',
+            '--entry-route', '/game/p1-ci-smoke?mode=local&manual=1&p1Fixture=1c.B',
             '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
-            dict({key: str(value) for key, value in tools.items()}, P1_UI_CASE='prepayment1a'))
+            dict({key: str(value) for key, value in tools.items()}, P1_UI_CASE='prepayment1c'))
         proof['stages']['application'] = 'passed'
         proof['stage'] = 'operation-assertions'
         try:
             report = json.loads((evidence / 'ui-smoke-report.json').read_text())
         except (OSError, ValueError):
             raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
-        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1a=True)
-        proof['bounded_support'] = {'initial_fixture': '1a.B-before-designation-and-payment', 'prepayment_manual_ui': True, 'opponent': 'explicit-fixture-driver', 'opponent_ui': False, 'two_client': False}
+        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=True)
+        proof['bounded_support'] = {'initial_fixture': '1c.B-before-designation-and-payment', 'prepayment_manual_ui': True, 'opponent': 'explicit-fixture-driver', 'opponent_ui': False, 'two_client': False}
         proof['stages']['operations'] = 'passed'
         proof['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         proof['stage'] = 'required-images'
-        proof['images'] = checks.validate_required_images(evidence, manifest, proof['consumer_execution'], s1_1a=True)
+        proof['images'] = checks.validate_required_images(evidence, manifest, proof['consumer_execution'], s1_1c=True)
         proof['stages']['images'] = 'passed'
         proof['status'] = 'passed'
     except checks.EvidenceFailure as error:
