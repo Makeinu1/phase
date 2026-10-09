@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import type * as WasmAdapterModule from "../../adapter/wasm-adapter";
 import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import { createDefaultDraftWorkspacePreferences } from "../../components/draft/workspace/workspacePreferences";
 
@@ -41,7 +42,15 @@ const persistence = vi.hoisted(() => ({
   runLimits: vi.fn(() => ({ maxWins: 1, maxLosses: 1 })),
 }));
 
+const formatGate = vi.hoisted(() => ({
+  evaluate: vi.fn<WasmAdapterModule.WasmAdapter["evaluateDeckFormatGate"]>(),
+}));
+
 vi.mock("@wasm/draft", () => wasm);
+vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
+  ...await importOriginal<typeof WasmAdapterModule>(),
+  getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),
+}));
 vi.mock("../../services/quickDraftPersistence", () => persistence);
 vi.mock("../../services/engineRuntime", () => ({
   ensureCardDatabase: vi.fn(async () => 0),
@@ -113,7 +122,9 @@ function prepareDrag(instanceId = "picked") {
   const target = document.querySelector<HTMLElement>('[data-drop-target="collapsed-sideboard"]')!;
   expect(source).not.toBeNull();
   expect(target).not.toBeNull();
-  expect(target.querySelector('section[data-zone="sideboard"]')).not.toBeNull();
+  const sideboard = target.closest('section[data-zone="sideboard"]');
+  expect(sideboard).not.toBeNull();
+  expect(sideboard).toContainElement(target);
   source.setPointerCapture = vi.fn();
   source.releasePointerCapture = vi.fn();
   target.getBoundingClientRect = () => ({
@@ -134,6 +145,7 @@ function dragToTarget(source: HTMLElement, target: HTMLElement) {
 describe("DraftPage production pick integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    formatGate.evaluate.mockReset();
     useDraftStore.getState().reset();
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
       expect(input).toBe(__CARD_DATA_URL__);
@@ -187,11 +199,21 @@ describe("DraftPage production pick integration", () => {
   });
 
   it("settles_clean_unowned_busy_without_a_lock_edge_or_failure_state", async () => {
+    // Simulate format admission at its adapter boundary to isolate pick sequencing.
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: true, reasons: [] });
     const submission = deferred<DraftPlayerView>();
     wasm.submit_deck.mockReturnValue(submission.promise);
     await renderDraft();
     const privateOperation = useDraftStore.getState().submitDeck();
+    expect(formatGate.evaluate).toHaveBeenCalledOnce();
+    expect(formatGate.evaluate).toHaveBeenCalledWith({
+      main_deck: [], sideboard: [], commander: [], companion: [], planar_deck: [],
+      scheme_deck: [], signature_spell: [], draft_set_codes: [],
+      selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+    });
     await waitFor(() => expect(wasm.submit_deck).toHaveBeenCalledOnce());
+    expect(formatGate.evaluate.mock.invocationCallOrder[0])
+      .toBeLessThan(wasm.submit_deck.mock.invocationCallOrder[0]!);
     const { source, target, release } = prepareDrag();
     dragToTarget(source, target);
 
@@ -203,6 +225,34 @@ describe("DraftPage production pick integration", () => {
 
     submission.resolve(view());
     await privateOperation;
+  });
+
+  it("rejects_format_gate_before_the_draft_lease_and_releases_busy_for_a_real_pick", async () => {
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: ["fixture format rejection"] });
+    await renderDraft();
+    const workspaceBefore = useDraftStore.getState().workspaceState;
+    const viewBefore = useDraftStore.getState().view;
+
+    await expect(useDraftStore.getState().submitDeck()).rejects.toThrow("fixture format rejection");
+    expect(formatGate.evaluate).toHaveBeenCalledOnce();
+    expect(formatGate.evaluate).toHaveBeenCalledWith({
+      main_deck: [], sideboard: [], commander: [], companion: [], planar_deck: [],
+      scheme_deck: [], signature_spell: [], draft_set_codes: [],
+      selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+    });
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().workspaceState).toBe(workspaceBefore);
+    expect(useDraftStore.getState().view).toBe(viewBefore);
+    expect(useDraftStore.getState()).toMatchObject({ phase: "drafting", pickInteractionLocked: false, pendingPickIntent: null });
+
+    wasm.submit_pick.mockReturnValue(view({ pool: [card("picked")], pack: [] }));
+    const { source, target, release } = prepareDrag();
+    dragToTarget(source, target);
+    await waitFor(() => expect(wasm.submit_pick).toHaveBeenCalledWith("picked"));
+    await waitFor(() => expect(useDraftStore.getState().workspaceState?.placements.picked).toMatchObject({ zone: "sideboard", column: 0 }));
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(useDraftStore.getState()).toMatchObject({ pickInteractionLocked: false, pendingPickIntent: null });
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
   });
 
   it.each([

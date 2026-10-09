@@ -275,6 +275,7 @@ vi.mock("../services/scryfall", async (importOriginal) => {
   };
   return {
     MANA_SYMBOL_SHARDS: actual.MANA_SYMBOL_SHARDS,
+    isManaSymbolShard: actual.isManaSymbolShard,
     CARD_BACK_URL: "data:,card-back",
     IMAGE_SIZE_WIDTHS: { small: 146, normal: 488 },
     deriveImageUrl: (src: string) => src,
