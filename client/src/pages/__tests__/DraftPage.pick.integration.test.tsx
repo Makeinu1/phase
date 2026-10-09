@@ -255,14 +255,20 @@ describe("DraftPage production pick integration", () => {
     expect(wasm.submit_deck).not.toHaveBeenCalled();
   });
 
+  const preExistingPicked = { ...card("picked"), cmc: 0 };
+
   it.each([
-    ["pre-existing", [card("picked")], [card("picked")], "deck"],
+    ["pre-existing", [preExistingPicked], [preExistingPicked], "deck"],
     ["duplicate", [], [card("picked"), card("picked")], undefined],
     ["missing", [], [card("other")], undefined],
     ["unchanged", [card("existing")], [card("existing")], undefined],
-  ] as const)("rejects_%s_adapter_acknowledgment_through_the_real_page", async (_label, beforePool, afterPool, existingZone) => {
-    wasm.submit_pick.mockReturnValue(view({ pool: [...afterPool] }));
-    await renderDraft(view({ pool: [...beforePool] }));
+  ] as const)("rejects_%s_adapter_acknowledgment_through_the_real_page", async (label, beforePool, afterPool, existingZone) => {
+    const pack = [label === "pre-existing" ? preExistingPicked : card("picked")];
+    wasm.submit_pick.mockReturnValue(view({ pool: [...afterPool], pack }));
+    await renderDraft(view({ pool: [...beforePool], pack }));
+    if (label === "pre-existing") {
+      expect(useDraftStore.getState().workspaceState?.placements.picked).toMatchObject({ zone: "deck", column: 0 });
+    }
     const workspaceBefore = useDraftStore.getState().workspaceState;
     const intents: unknown[] = [];
     const unsubscribe = useDraftStore.subscribe((state) => {
