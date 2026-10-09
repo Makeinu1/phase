@@ -178,3 +178,21 @@ report now retains its public hit-test geometry and selected W3C HTTP error
 code and fixed message classification, omitting raw messages, response bodies,
 stack traces and session identifiers.
 An intercepted click is not replaced with JavaScript or store mutation.
+# Bounded next ordinary paid play (2026-10-09)
+
+The current validation retains the independently checked `1c.K1` life20 →
+life19 → Finish closed/Priority smoke, then continues using the own-hand
+`Next Ordinary Play` through **Cast normally**, an actual **Pay** control when
+offered, and actual own-priority **Resolve** controls. It requires remaining
+mana1 → 0, a paid ordinary stack entry before resolution, life19 + 3 = 22,
+the next card in graveyard, an empty stack and no open manual carrier. Four
+screenshots/public-state receipts including `paidplay22` are mandatory and
+checked against the current consumer execution. Opponent priority is observed
+without submitting an action on its behalf; completion remains observable
+while waiting for a visible own control. A blocked opponent turn is retained
+as a failed diagnostic, not bypassed with store edits or forced clicks.
+
+This bounded continuation does **not** establish S1's life18 → paidplay21,
+before-payment manual designation, checked save/restore, Undo, or full S1–S12
+acceptance. The existing pinned same-product producer37956261306 runtime is
+reused through the ordinary Actions API; no product or build-input changes.

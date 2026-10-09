@@ -1,4 +1,4 @@
-"""One product-board smoke: trusted K1 -> life 20 to 19 -> Finish.
+"""Bounded product-board continuation: trusted K1 -> life19 -> Finish -> paid play22.
 
 This is a bounded independent smoke, not the unavailable migration scenario
 and not S1-S12 acceptance. Only public observations are written.
@@ -20,10 +20,10 @@ BASE = 'http://127.0.0.1:9515/session/' + SESSION
 spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
-report = {'scope': 'Local product UI smoke only; Undo and S1-S12 unaccepted',
+report = {'scope': 'Local K1 UI continuation to paid play22; S1 life18/play21, restore, Undo and full S1-S12 unaccepted',
           'fixture': '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
-                     for name in ['initial', 'life19', 'finish']}, 'secondary': [],
+                     for name in ['initial', 'life19', 'finish', 'paidplay22']}, 'secondary': [],
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
@@ -112,6 +112,27 @@ def capture(step):
         '--state-script', str(VALIDATION / 'scripts/ci/p1-public-state.js')], check=True)
 
 
+def resolve_control():
+    """Observe completion while waiting for our actual enabled priority control."""
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        state = observe()
+        if state['life'][0] == 22:
+            return None
+        if state['waitingType'] == 'Priority' and state['priorityPlayer'] == 0 and state['stackCount'] == 1:
+            matches = call('/elements', {'using': 'xpath', 'value': '//button[normalize-space()="Resolve"]'})
+            for match in matches:
+                identifier = match['element-6066-11e4-a52e-4f735466cecf']
+                if call('/element/' + identifier + '/displayed') and call('/element/' + identifier + '/enabled'):
+                    latest = observe()
+                    if latest['life'][0] == 22:
+                        return None
+                    if latest['waitingType'] == 'Priority' and latest['priorityPlayer'] == 0 and latest['stackCount'] == 1:
+                        return identifier
+        time.sleep(0.25)
+    raise AssertionError('Ordinary resolution neither completed nor offered an own priority control')
+
+
 stage = 'application-observer'
 exit_code = 0
 try:
@@ -131,7 +152,11 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
       sourceName: v?.source?.name ?? null, stackCount: g?.stack?.length ?? null,
       manualStackEntryId: v?.source?.stackEntryId ?? null,
       resolvingEntryId: g?.resolving_stack_entry?.id ?? null,
-      waitingType: s.waitingFor?.type ?? null};
+      waitingType: s.waitingFor?.type ?? null,
+      priorityPlayer: s.waitingFor?.type === 'Priority' ? s.waitingFor.data.player : null,
+      ownManaCount: g?.players?.[0]?.mana_pool?.mana?.length ?? null,
+      nextCardId: g?.players?.[0]?.hand?.find(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? null,
+      nextInGraveyard: g?.players?.[0]?.graveyard?.some(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? false};
   };
   done(true);
 }, () => done(false));
@@ -173,6 +198,49 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     stage = 'capture-finish'
     capture('finish')
     report['assertions'].append('real Finish click closed the exact resolving entry and returned Priority; ordinary stack stayed empty and life stayed 19')
+    # The native fixture has one remaining generic mana and a +3-life ordinary
+    # spell. Continue from life19, hence 22; this is not the S1 life18 -> 21 path.
+    stage = 'paidplay-select'
+    assert ended['ownManaCount'] == 1 and type(ended['nextCardId']) is int
+    next_id = ended['nextCardId']
+    click('[data-hand-card][data-object-id="' + str(next_id) + '"]')
+    options = element('//button[normalize-space()="Resolution options for Next Ordinary Play"]', 'xpath')
+    call('/element/' + options + '/click', {})
+    normal = element('//button[normalize-space()="Cast normally"]', 'xpath')
+    call('/element/' + normal + '/click', {})
+    stage = 'paidplay-payment'
+    paying = wait_for(lambda s: s['waitingType'] == 'ManaPayment'
+                      or (s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0))
+    if paying['waitingType'] == 'ManaPayment':
+        pay = element('//button[normalize-space()="Pay"]', 'xpath')
+        call('/element/' + pay + '/click', {})
+    paid = wait_for(lambda s: s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0)
+    assert paid['life'][0] == 19 and paid['manualPhase'] != 'open' and paid['resolvingEntryId'] is None
+    assert paid['nextCardId'] is None and paid['nextInGraveyard'] is False
+    report['paid_before_resolution'] = paid
+    stage = 'paidplay-resolve'
+    # Two native priority passes are the finite fixture's normal resolution
+    # path. An automatic pass may finish it between clicks; never click again
+    # after the observed life change.
+    for _ in range(2):
+        resolve = resolve_control()
+        if resolve is None:
+            break
+        before = observe()
+        if before['life'][0] == 22:
+            break
+        if before['waitingType'] != 'Priority' or before['priorityPlayer'] != 0 or before['stackCount'] != 1:
+            continue
+        call('/element/' + resolve + '/click', {})
+        wait_for(lambda s: s['life'][0] == 22 or s['priorityPlayer'] != before['priorityPlayer'])
+    ordinary = wait_for(lambda s: s['life'][0] == 22 and s['stackCount'] == 0 and s['waitingType'] == 'Priority')
+    assert ordinary['ownManaCount'] == 0 and ordinary['resolvingEntryId'] is None
+    assert ordinary['manualPhase'] != 'open' and ordinary['nextInGraveyard'] is True
+    assert ordinary['nextCardId'] is None and ordinary['life'][1] == initial['life'][1]
+    report['stages']['paidplay22'] = {'status': 'passed', 'assertions_completed': True}
+    stage = 'capture-paidplay22'
+    capture('paidplay22')
+    report['assertions'].append('Cast normally paid the remaining one mana; normal priority resolution gained exactly three life to22, moved the next card to graveyard and left no manual carrier')
     report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
     report['status'] = 'passed'
 except Exception as error:

@@ -174,11 +174,11 @@ def main():
             report = json.loads((evidence / 'ui-smoke-report.json').read_text())
         except (OSError, ValueError):
             raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
-        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'])
+        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], paidplay=True)
         proof['stages']['operations'] = 'passed'
         proof['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         proof['stage'] = 'required-images'
-        proof['images'] = checks.validate_required_images(evidence, manifest, proof['consumer_execution'])
+        proof['images'] = checks.validate_required_images(evidence, manifest, proof['consumer_execution'], paidplay=True)
         proof['stages']['images'] = 'passed'
         proof['status'] = 'passed'
     except checks.EvidenceFailure as error:

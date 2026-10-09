@@ -23,7 +23,7 @@ class EvidenceFailure(ValueError):
         super().__init__(reason)
 
 
-def validate_operations(report, consumer, execution):
+def validate_operations(report, consumer, execution, paidplay=False):
     """Require explicit operation completion; image receipts are observations."""
     def reject(reason):
         raise EvidenceFailure('operation-assertions', reason)
@@ -39,12 +39,21 @@ def validate_operations(report, consumer, execution):
     stages = report.get('stages')
     if not isinstance(stages, dict):
         reject('required-operation-stages-missing')
-    for stage in ['initial', 'life19', 'finish']:
+    for stage in ['initial', 'life19', 'finish'] + (['paidplay22'] if paidplay else []):
         item = stages.get(stage)
         if not isinstance(item, dict):
             reject('required-operation-stage-missing:' + stage)
         if item.get('status') != 'passed' or item.get('assertions_completed') is not True:
             reject('required-operation-stage-incomplete:' + stage)
+    if paidplay:
+        paid = report.get('paid_before_resolution')
+        if (not isinstance(paid, dict) or paid.get('life') != [19, 20]
+                or type(paid.get('ownManaCount')) is not int or paid['ownManaCount'] != 0
+                or type(paid.get('stackCount')) is not int or paid['stackCount'] != 1
+                or paid.get('waitingType') != 'Priority' or paid.get('manualPhase') == 'open'
+                or paid.get('resolvingEntryId', 'missing') is not None
+                or paid.get('nextCardId', 'missing') is not None or paid.get('nextInGraveyard') is not False):
+            reject('paid-before-resolution-incomplete')
 
 
 def valid_png(data):
@@ -110,7 +119,7 @@ def finish_matches(initial, ended):
             and type(ended.get('stackCount')) is int and ended['stackCount'] == count)
 
 
-def validate_required_images(root, manifest, execution):
+def validate_required_images(root, manifest, execution, paidplay=False):
     """Recheck the three existing capture receipts and saved public bytes."""
     def reject(reason):
         raise EvidenceFailure('required-images', reason)
@@ -121,7 +130,8 @@ def validate_required_images(root, manifest, execution):
     if not isinstance(steps, list) or any(not isinstance(item, dict) for item in steps):
         reject('required-image-index-invalid')
     observations = {}
-    for step in ['same-source', 'life19', 'finish']:
+    required = ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
+    for step in required:
         matches = [item for item in steps if item.get('step') == step]
         if len(matches) != 1:
             reject('required-image-count:' + step)
@@ -182,7 +192,18 @@ def validate_required_images(root, manifest, execution):
         reject('required-state-content-mismatch:life19')
     if not finish_matches(initial, finish):
         reject('required-state-content-mismatch:finish')
-    return {'required_steps': ['same-source', 'life19', 'finish'], 'verified_count': 3}
+    if paidplay:
+        next_play = observations['paidplay22']
+        if (type(finish.get('ownManaCount')) is not int or finish['ownManaCount'] != 1
+                or type(finish.get('nextCardId')) is not int or finish.get('nextInGraveyard') is not False
+                or next_play['life'] != [22, initial['life'][1]]
+                or next_play['stackCount'] != 0 or next_play['waitingType'] != 'Priority'
+                or next_play['manualPhase'] == 'open' or next_play['resolvingEntryId'] is not None
+                or type(next_play.get('ownManaCount')) is not int or next_play['ownManaCount'] != 0
+                or next_play.get('nextCardId', 'missing') is not None
+                or next_play.get('nextInGraveyard') is not True):
+            reject('required-state-content-mismatch:paidplay22')
+    return {'required_steps': required, 'verified_count': len(required)}
 
 
 def main():
@@ -191,7 +212,7 @@ def main():
     parser.add_argument('--step', required=True)
     parser.add_argument('--state-script', required=True, type=Path)
     args = parser.parse_args()
-    if not re.fullmatch(r'(prepayment|same-source|life19|life18|finish|child|paidplay21|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
+    if not re.fullmatch(r'(prepayment|same-source|life19|life18|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
         raise ValueError('unknown P1 observation step')
     session = os.environ['P1_WEBDRIVER_SESSION']
     if not re.fullmatch('[a-zA-Z0-9-]+', session):

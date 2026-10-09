@@ -1,4 +1,5 @@
 """Offline Finish evidence regressions; synthetic bytes are not product UI PASS."""
+import ast
 import hashlib
 import importlib.util
 import json
@@ -7,6 +8,7 @@ import struct
 import tempfile
 import unittest
 import zlib
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location('capture', Path(__file__).with_name('p1-product-capture.py'))
 capture = importlib.util.module_from_spec(spec)
@@ -14,7 +16,39 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
-    def verify(self, stack_count=0, finish_changes=None, initial_changes=None):
+    def test_priority_control_wait_observes_completion_and_does_not_act_for_opponent(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'resolve_control')
+        code = compile(ast.Module(body=[function], type_ignores=[]), '<reviewed-resolve-control>', 'exec')
+        own = {'life': [19, 20], 'waitingType': 'Priority', 'priorityPlayer': 0, 'stackCount': 1}
+        opponent = dict(own, priorityPlayer=1)
+        final = dict(own, life=[22, 20], stackCount=0)
+        for states, expected in [([own, own], 'native-control'), ([opponent, final], None),
+                                 ([own, final], None), ([opponent], 'timeout')]:
+            with self.subTest(states=states):
+                remaining = list(states)
+                observed, requests, elapsed = [], [], [0]
+                def observe():
+                    state = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+                    observed.append(state)
+                    return state
+                def call(path, data=None):
+                    self.assertEqual(observed[-1]['priorityPlayer'], 0)
+                    requests.append(path)
+                    return [{'element-6066-11e4-a52e-4f735466cecf': 'native-control'}] if path == '/elements' else True
+                def sleep(seconds):
+                    elapsed[0] += seconds
+                namespace = {'observe': observe, 'call': call,
+                             'time': SimpleNamespace(monotonic=lambda: elapsed[0], sleep=sleep)}
+                exec(code, namespace)
+                if expected == 'timeout':
+                    with self.assertRaises(AssertionError):
+                        namespace['resolve_control']()
+                else:
+                    self.assertEqual(namespace['resolve_control'](), expected)
+                self.assertFalse(any(path.endswith('/click') for path in requests))
+
+    def verify(self, stack_count=0, finish_changes=None, initial_changes=None, paidplay=False, paid_changes=None):
         product = {'sha': 'unit-product', 'tree': 'unit-tree'}
         execution = {'validation_sha': 'unit-consumer', 'run_id': 1, 'run_attempt': 1}
         manifest = {'consumer': product, 'runtime': product, 'validation': {'sha': 'unit-producer'},
@@ -25,7 +59,11 @@ class FinishEvidenceTests(unittest.TestCase):
         initial.update(initial_changes or {})
         life = dict(initial, life=[19, 20])
         finish = dict(life, manualPhase='closed', waitingType='Priority', resolvingEntryId=None)
+        if paidplay:
+            finish.update(ownManaCount=1, nextCardId=11, nextInGraveyard=False)
         finish.update(finish_changes or {})
+        paid = dict(finish, life=[22, 20], ownManaCount=0, nextCardId=None, nextInGraveyard=True)
+        paid.update(paid_changes or {})
         def chunk(kind, data):
             return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
         png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
@@ -33,7 +71,10 @@ class FinishEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             entries = []
-            for step, state in [('same-source', initial), ('life19', life), ('finish', finish)]:
+            states = [('same-source', initial), ('life19', life), ('finish', finish)]
+            if paidplay:
+                states.append(('paidplay22', paid))
+            for step, state in states:
                 item = {'step': step, 'status': 'observation-only', 'exit_code': 0,
                         'consumer': product, 'runtime': product, 'validation': manifest['validation'],
                         'consumer_execution': execution, 'served': {'engine_wasm_bg.wasm': 'unit-runtime'}}
@@ -45,7 +86,35 @@ class FinishEvidenceTests(unittest.TestCase):
                     item[kind] = {'path': relative, 'sha256': hashlib.sha256(data).hexdigest()}
                 entries.append(item)
             (root / 'step-index.json').write_text(json.dumps(entries))
-            return capture.validate_required_images(root, manifest, execution)
+            return capture.validate_required_images(root, manifest, execution, paidplay=paidplay)
+
+    def test_paid_continuation_requires_four_current_execution_receipts(self):
+        self.assertEqual(self.verify(paidplay=True)['verified_count'], 4)
+
+    def test_paid_continuation_rejects_unpaid_unresolved_or_manual_state(self):
+        faults = [{'life': [21, 20]}, {'life': [22, 19]}, {'ownManaCount': 1},
+                  {'ownManaCount': False}, {'stackCount': 1}, {'manualPhase': 'open'},
+                  {'resolvingEntryId': 9}, {'waitingType': 'ManaPayment'},
+                  {'nextCardId': 11}, {'nextInGraveyard': False}]
+        for change in faults:
+            with self.subTest(change=change), self.assertRaises(capture.EvidenceFailure):
+                self.verify(paidplay=True, paid_changes=change)
+        with self.assertRaises(capture.EvidenceFailure):
+            self.verify(paidplay=True, finish_changes={'ownManaCount': 0})
+
+    def test_paid_operation_requires_payment_before_resolution(self):
+        paid = {'life': [19, 20], 'ownManaCount': 0, 'stackCount': 1, 'waitingType': 'Priority',
+                'manualPhase': 'closed', 'resolvingEntryId': None, 'nextCardId': None, 'nextInGraveyard': False}
+        report = {'status': 'passed', 'consumer': {}, 'consumer_execution': {}, 'secondary': [],
+                  'primary': {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'},
+                  'stages': {name: {'status': 'passed', 'assertions_completed': True}
+                             for name in ['initial', 'life19', 'finish', 'paidplay22']},
+                  'paid_before_resolution': paid}
+        capture.validate_operations(report, {}, {}, paidplay=True)
+        for change in [{'ownManaCount': 1}, {'stackCount': 0}, {'life': [22, 20]},
+                       {'manualPhase': 'open'}, {'nextInGraveyard': True}]:
+            with self.subTest(change=change), self.assertRaises(capture.EvidenceFailure):
+                capture.validate_operations(dict(report, paid_before_resolution=dict(paid, **change)), {}, {}, paidplay=True)
 
     def test_empty_stack_finishes_the_already_popped_occurrence(self):
         self.assertEqual(self.verify()['verified_count'], 3)
