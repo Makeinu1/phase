@@ -29,7 +29,9 @@ class FinishEvidenceTests(unittest.TestCase):
                      'element': lambda selector, using: 'private-native-card-reference',
                      'prepare_hand_click': lambda selector, identifier: preparations.append(selector),
                      'hit_observation': lambda selector, **kwargs: {'centerHitsTarget': True, 'expectedWebDriverPointHitsTarget': True},
-                     'call': lambda path, data=None: requests.append((path, data))}
+                     'call': lambda path, data=None: requests.append((path, data)),
+                     'start_native_input_observation': lambda selector: {'installed': True},
+                     'finish_native_input_observation': lambda: {'events': [], 'dropped': 0, 'publicStateAfterCommand': {'life': [19,20]}}}
         exec(compile(ast.Module(body=[function], type_ignores=[]), '<ordinary-native-double-click>', 'exec'), namespace)
         namespace['click'](selector, double=True)
         self.assertEqual(preparations, [selector])
@@ -40,6 +42,7 @@ class FinishEvidenceTests(unittest.TestCase):
         self.assertTrue(all(a['button'] == 0 for a in actions if a['type'] in {'pointerDown', 'pointerUp'}))
         self.assertEqual(report['click_commands'][0]['kind'], 'native-pointer-double-click')
         self.assertEqual(report['click_commands'][0]['status'], 'completed')
+        self.assertEqual(report['click_commands'][0]['native_input_observation']['publicStateAfterCommand']['life'], [19,20])
         self.assertNotIn('private-native-card-reference', json.dumps(report))
         requests.clear()
         namespace['hit_observation'] = lambda selector, **kwargs: {'centerHitsTarget': True, 'expectedWebDriverPointHitsTarget': False}
@@ -47,6 +50,29 @@ class FinishEvidenceTests(unittest.TestCase):
             namespace['click'](selector, double=True)
         self.assertEqual(requests, [])
         self.assertEqual(report['click_commands'][-1]['reason'], 'native-origin-obstructed')
+        namespace['hit_observation'] = lambda selector, **kwargs: {'centerHitsTarget': True, 'expectedWebDriverPointHitsTarget': True}
+        finished = []
+        namespace['finish_native_input_observation'] = lambda: finished.append(True) or {'events': [], 'dropped': 0}
+        def fail_actions(path, data=None):
+            report['webdriver_error'] = {'error': 'invalid argument'}
+            raise RuntimeError('native actions failed')
+        namespace['call'] = fail_actions
+        with self.assertRaisesRegex(RuntimeError, 'native actions failed'):
+            namespace['click'](selector, double=True)
+        self.assertEqual(finished, [True])
+        self.assertEqual(report['click_commands'][-1]['status'], 'failed')
+        self.assertEqual(report['click_commands'][-1]['native_input_observation']['events'], [])
+        def fail_collector():
+            report['webdriver_error'] = {'error': 'javascript error'}
+            raise RuntimeError('collector failed')
+        namespace['finish_native_input_observation'] = fail_collector
+        with self.assertRaisesRegex(RuntimeError, 'native actions failed'):
+            namespace['click'](selector, double=True)
+        self.assertEqual(report['click_commands'][-1]['error'], {'error': 'invalid argument'})
+        self.assertEqual(report['webdriver_error'], {'error': 'invalid argument'})
+        self.assertEqual(report['click_commands'][-1]['native_input_observation_error_type'], 'RuntimeError')
+
+
 
     def test_click_commands_identify_button_operation_and_keep_original_error_when_diagnostic_fails(self):
         module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())

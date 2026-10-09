@@ -186,6 +186,42 @@ def prepare_hand_click(selector, identifier):
     raise AssertionError('Native hovered hand card did not settle visibly without obstruction')
 
 
+def start_native_input_observation(selector):
+    # Passive capture of real browser input only; no event dispatch or product writes.
+    return call('/execute/sync', {'script': """
+const selector = arguments[0];
+const types = ['pointerdown', 'pointerup', 'click', 'dblclick', 'gotpointercapture', 'lostpointercapture'];
+const events = [], identities = new WeakMap(); let nextIdentity = 1, dropped = 0;
+const identify = node => {
+  if (!(node instanceof Element)) return null;
+  if (!identities.has(node)) identities.set(node, nextIdentity++);
+  const card = node.closest('[data-hand-card]');
+  return {tag: node.tagName, identity: identities.get(node),
+    ownCardId: card?.matches(selector) ? Number(card.getAttribute('data-object-id')) : null,
+    isRequestedCard: node.matches(selector), withinRequestedCard: !!card?.matches(selector)};
+};
+const listener = event => {
+  if (events.length >= 40) { dropped++; return; }
+  events.push({type: event.type, detail: event.detail, trusted: event.isTrusted,
+    button: event.button, clientPoint: {x: event.clientX, y: event.clientY},
+    browserTimestamp: event.timeStamp, observedAt: performance.now(),
+    target: identify(event.target), pointTop: identify(document.elementFromPoint(event.clientX, event.clientY)),
+    publicStateBeforeHandler: window.__p1Observe()});
+};
+for (const type of types) document.addEventListener(type, listener, {capture: true, passive: true});
+window.__p1NativeInputObservation = () => {
+  for (const type of types) document.removeEventListener(type, listener, true);
+  delete window.__p1NativeInputObservation;
+  return {events, dropped, publicStateAfterCommand: window.__p1Observe()};
+};
+return {installed: true, maxEvents: 40};
+""", 'args': [selector]})
+
+
+def finish_native_input_observation():
+    return call('/execute/sync', {'script': 'return window.__p1NativeInputObservation();', 'args': []})
+
+
 def click(selector, using='css selector', double=False):
     identifier = element(selector, using)
     if selector.startswith('[data-hand-card]'):
@@ -203,16 +239,29 @@ def click(selector, using='css selector', double=False):
         raise AssertionError('Existing ordinary card native origin is obstructed')
     try:
         if double:
+            command['native_input_observation'] = start_native_input_observation(selector)
             # Existing HandCard.onDoubleClick calls the same ordinary playCard
             # as the menu's Cast normally button. Native pointer input reaches
             # the browser's normal event target; it never forces a DOM handler.
-            call('/actions', {'actions': [{'type': 'pointer', 'id': 'p1-hand-pointer',
-                'parameters': {'pointerType': 'mouse'}, 'actions': [
-                    {'type': 'pointerMove', 'duration': 0,
-                     'origin': {'element-6066-11e4-a52e-4f735466cecf': identifier}, 'x': 0, 'y': 0},
-                    {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0},
-                    {'type': 'pause', 'duration': 80},
-                    {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0}]}]})
+            try:
+                call('/actions', {'actions': [{'type': 'pointer', 'id': 'p1-hand-pointer',
+                    'parameters': {'pointerType': 'mouse'}, 'actions': [
+                        {'type': 'pointerMove', 'duration': 0,
+                         'origin': {'element-6066-11e4-a52e-4f735466cecf': identifier}, 'x': 0, 'y': 0},
+                        {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0},
+                        {'type': 'pause', 'duration': 80},
+                        {'type': 'pointerDown', 'button': 0}, {'type': 'pointerUp', 'button': 0}]}]})
+            finally:
+                original_native_error = report.get('webdriver_error')
+                try:
+                    command['native_input_observation'] = finish_native_input_observation()
+                except Exception as diagnostic_error:
+                    command['native_input_observation_error_type'] = type(diagnostic_error).__name__
+                finally:
+                    if original_native_error is None:
+                        report.pop('webdriver_error', None)
+                    else:
+                        report['webdriver_error'] = original_native_error
         else:
             call('/element/' + identifier + '/click', {})
         command['status'] = 'completed'
@@ -286,10 +335,15 @@ try:
     # engine/store state and never exposes actor/context/receipt wire data.
     ready = call('/execute/async', {'script': """
 const done = arguments[arguments.length - 1];
-import('/src/stores/gameStore.ts').then(({useGameStore}) => {
+Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'),
+  import('/src/hooks/usePlayerId.ts'), import('/src/viewmodel/cardActionChoice.ts')]).then(
+  ([{useGameStore}, {useUiStore}, {getPlayerId, getCanActForWaitingState}, {resolveSingleActionDispatch}]) => {
   window.__p1Observe = () => {
     const s = useGameStore.getState(), g = s.gameState;
     const v = g?.derived?.manual_resolution;
+    const nextId = g?.players?.[0]?.hand?.find(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? null;
+    const nextObject = nextId === null ? null : g?.objects?.[nextId];
+    const nextActions = nextId === null ? [] : s.legalActionsByObject?.[String(nextId)] ?? [];
     return {life: g?.players?.map(p => p.life) ?? [],
       manualPhase: v?.phase ?? null, sourceId: v?.source?.sourceId ?? null,
       sourceName: v?.source?.name ?? null, stackCount: g?.stack?.length ?? null,
@@ -299,6 +353,12 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
       priorityPlayer: s.waitingFor?.type === 'Priority' ? s.waitingFor.data.player : null,
       ownManaCount: g?.players?.[0]?.mana_pool?.mana?.length ?? null,
       nextCardId: g?.players?.[0]?.hand?.find(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? null,
+      nextPlayObservation: {localPlayerId: getPlayerId(), canActForWaitingState: getCanActForWaitingState(),
+        debugInteractionMode: useUiStore.getState().debugInteractionMode, nextObjectExists: !!nextObject,
+        legalActionCount: nextActions.length, legalActionTypes: nextActions.slice(0,20).map(a => a.type),
+        legalActionObjectIds: nextActions.slice(0,20).map(a => a.data?.object_id ?? null),
+        automaticActionType: nextObject ? resolveSingleActionDispatch(nextActions, nextObject)?.type ?? null : null,
+        pendingChoiceObjectId: useUiStore.getState().pendingAbilityChoice?.objectId ?? null},
       nextInGraveyard: g?.players?.[0]?.graveyard?.some(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? false};
   };
   done(true);
@@ -347,6 +407,11 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     assert ended['ownManaCount'] == 1 and type(ended['nextCardId']) is int
     next_id = ended['nextCardId']
     click('[data-hand-card][data-object-id="' + str(next_id) + '"]', double=True)
+    command = report['click_commands'][-1]
+    events = command['native_input_observation']['events']
+    command['dblclick_received_by_requested_card'] = any(e['type'] == 'dblclick' and e['trusted']
+        and e['target']['withinRequestedCard'] for e in events if e.get('target'))
+    assert command['dblclick_received_by_requested_card'], 'Native pointer pair did not deliver a trusted dblclick to the requested card'
     stage = 'paidplay-payment'
     paying = wait_for(lambda s: s['waitingType'] == 'ManaPayment'
                       or (s['waitingType'] == 'Priority' and s['stackCount'] == 1 and s['ownManaCount'] == 0))

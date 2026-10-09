@@ -203,3 +203,18 @@ by the own life19 HUD at the native click point (559, 640). That options/manual
 entry obstruction remains an unresolved UI issue. The ordinary double-click
 checks its exact native pointer origin before dispatch and does not bypass an
 obstructed target. This desktop route does not establish iOS or whole-UI quality.
+
+### Native input diagnosis after run37974221677
+The next validation keeps the exact same input path, timings, product and
+runtime. Passive capture listeners retain at most40 real pointerdown/up,
+click/dblclick and capture-change events: trusted flag, detail, native point,
+local DOM identity, own requested card ID and public state before handlers.
+Listeners are removed after the command; no event is dispatched or prevented,
+no product handler is invoked, and no store or engine state is changed. The
+immediate after-command public state records own next-card legal action types
+and source object IDs, existing ordinary-choice result, local authorization
+and debug mode. A missing trusted dblclick fails immediately in the normal
+input stage; payment waits are unchanged. A DOM dblclick alone is not proof of
+React handler entry or engine dispatch. If the event is delivered but the
+public guards do not explain the non-transition, actual handler/dispatch
+observation is still required; no success is inferred from static source.
