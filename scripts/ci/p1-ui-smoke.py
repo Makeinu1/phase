@@ -84,11 +84,9 @@ def element(selector, using='css selector'):
     raise AssertionError('Required product control did not become visible and enabled')
 
 
-def click(selector):
-    identifier = element(selector)
-    # Public geometry only. Keep native WebDriver clicking, so an obstruction
-    # remains observable rather than being bypassed with a scripted click.
-    report['click_observation'] = call('/execute/sync', {'script': '''
+def hit_observation(selector):
+    # Public geometry only; no scrolling, focus or application-state changes.
+    return call('/execute/sync', {'script': '''
 const target = document.querySelector(arguments[0]);
 const r = target.getBoundingClientRect();
 const x = (Math.max(0, r.left) + Math.min(innerWidth, r.right)) / 2;
@@ -98,11 +96,60 @@ const describe = e => e ? {tag: e.tagName, id: e.id,
  className: typeof e.className === 'string' ? e.className : '',
  ariaLabel: e.getAttribute('aria-label'), text: (e.innerText ?? '').slice(0, 300)} : null;
 return {selector: arguments[0], viewport: {width: innerWidth, height: innerHeight},
+ scroll: {x: scrollX, y: scrollY},
  rect: {left: r.left, top: r.top, right: r.right, bottom: r.bottom},
  center: {x, y}, target: describe(target), top: describe(top),
  centerHitsTarget: !!top && (top === target || target.contains(top))};
 ''', 'args': [selector]})
-    call('/element/' + identifier + '/click', {})
+
+
+def prepare_hand_click(selector, identifier):
+    # The real product uses Motion hand/card layout and cursor previews.
+    # Hover does not itself expand the hand. Move the native pointer, then observe
+    # a stable in-viewport hit target before the actual click. Partially clipped
+    # hand cards remain legitimate product controls; record clipping, not reject it.
+    # Never mutate the DOM, remove an overlay, or force a scripted click.
+    report['hand_click_preparation'] = {'kind': 'native-hover-and-visible-stability',
+                                        'before_hover': hit_observation(selector)}
+    call('/actions', {'actions': [{'type': 'pointer', 'id': 'p1-hand-pointer',
+        'parameters': {'pointerType': 'mouse'}, 'actions': [
+            {'type': 'pointerMove', 'duration': 250,
+             'origin': {'element-6066-11e4-a52e-4f735466cecf': identifier}, 'x': 0, 'y': 0}]}]})
+    deadline, previous, consecutive = time.monotonic() + 10, None, 0
+    while time.monotonic() < deadline:
+        current = hit_observation(selector)
+        report['hand_click_preparation']['last_observation'] = current
+        rect, viewport = current['rect'], current['viewport']
+        stable = tuple(round(rect[key], 1) for key in ['left', 'top', 'right', 'bottom']) + (
+            viewport['width'], viewport['height'], current['scroll']['x'], current['scroll']['y'])
+        report['hand_click_preparation']['fully_visible'] = (rect['left'] >= 0 and rect['top'] >= 0
+                         and rect['right'] <= viewport['width'] and rect['bottom'] <= viewport['height'])
+        if current['centerHitsTarget']:
+            consecutive = consecutive + 1 if stable == previous else 1
+            previous = stable
+            if consecutive >= 3:
+                report['hand_click_preparation']['status'] = 'stable-visible-unobstructed'
+                return
+        else:
+            consecutive, previous = 0, None
+        time.sleep(0.15)
+    report['hand_click_preparation']['status'] = 'not-stable-visible-unobstructed'
+    raise AssertionError('Native hovered hand card did not settle visibly without obstruction')
+
+
+def click(selector):
+    identifier = element(selector)
+    if selector.startswith('[data-hand-card]'):
+        prepare_hand_click(selector, identifier)
+    report['click_observation'] = hit_observation(selector)
+    try:
+        call('/element/' + identifier + '/click', {})
+    except RuntimeError:
+        try:
+            report['click_observation_after_failure'] = hit_observation(selector)
+        except Exception as error:
+            report['click_observation_after_failure_error_type'] = type(error).__name__
+        raise
 
 
 def capture(step):

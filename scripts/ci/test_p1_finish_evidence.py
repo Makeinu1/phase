@@ -16,6 +16,40 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_native_hand_hover_waits_for_stable_hit_and_preserves_obstruction(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'prepare_hand_click')
+        code = compile(ast.Module(body=[function], type_ignores=[]), '<reviewed-hand-stability>', 'exec')
+        hit = {'rect': {'left': 10, 'top': 850, 'right': 110, 'bottom': 1050},
+               'viewport': {'width': 1440, 'height': 1000}, 'scroll': {'x': 0, 'y': 0}, 'centerHitsTarget': True}
+        moving = dict(hit, rect=dict(hit['rect'], top=830, bottom=1030))
+        blocked = dict(hit, centerHitsTarget=False)
+        for states, succeeds in [([hit, moving, hit, hit, hit], True), ([blocked], False)]:
+            with self.subTest(succeeds=succeeds):
+                remaining, requests, elapsed, report = list(states), [], [0], {}
+                def observation(selector):
+                    return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+                def call(path, data=None):
+                    requests.append((path, data))
+                def sleep(seconds):
+                    elapsed[0] += seconds
+                namespace = {'report': report, 'hit_observation': observation, 'call': call,
+                             'time': SimpleNamespace(monotonic=lambda: elapsed[0], sleep=sleep)}
+                exec(code, namespace)
+                if succeeds:
+                    namespace['prepare_hand_click']('[data-hand-card]', 'native-card')
+                    self.assertEqual(report['hand_click_preparation']['status'], 'stable-visible-unobstructed')
+                    self.assertFalse(report['hand_click_preparation']['fully_visible'])
+                else:
+                    with self.assertRaises(AssertionError):
+                        namespace['prepare_hand_click']('[data-hand-card]', 'native-card')
+                    self.assertFalse(report['hand_click_preparation']['last_observation']['centerHitsTarget'])
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0][0], '/actions')
+                self.assertEqual(requests[0][1]['actions'][0]['actions'][0]['type'], 'pointerMove')
+                self.assertEqual(requests[0][1]['actions'][0]['actions'][0]['origin'],
+                                 {'element-6066-11e4-a52e-4f735466cecf': 'native-card'})
+
     def test_priority_control_wait_observes_completion_and_does_not_act_for_opponent(self):
         module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
         function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'resolve_control')
