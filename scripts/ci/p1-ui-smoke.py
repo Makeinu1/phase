@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(os.environ['MANUAL_EVIDENCE'])
@@ -17,6 +18,8 @@ SESSION = os.environ['P1_WEBDRIVER_SESSION']
 BASE = 'http://127.0.0.1:9515/session/' + SESSION
 report = {'scope': 'Local product UI smoke only; Undo and S1-S12 unaccepted',
           'fixture': '1c.K1', 'status': 'starting', 'assertions': [],
+          'stages': {name: {'status': 'not_run', 'assertions_completed': False}
+                     for name in ['initial', 'life19', 'finish']}, 'secondary': [],
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
@@ -24,8 +27,28 @@ def call(path, data=None):
     request = urllib.request.Request(BASE + path,
         data=json.dumps(data).encode() if data is not None else None,
         headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=65) as response:
-        value = json.load(response)['value']
+    try:
+        with urllib.request.urlopen(request, timeout=65) as response:
+            value = json.load(response)['value']
+    except urllib.error.HTTPError as error:
+        # Inspect the response in memory; retain only allowlisted W3C codes
+        # and fixed categories, never a raw message, body, stack or session.
+        try:
+            value = json.loads(error.read(65536)).get('value', {})
+            known = {'element click intercepted', 'element not interactable',
+                'invalid argument', 'no such element', 'stale element reference',
+                'javascript error', 'timeout', 'unknown error'}
+            code = value.get('error')
+            message = str(value.get('message', ''))
+            category = ('click-received-by-other-element' if 'Other element would receive the click' in message
+                else 'element-not-clickable-at-point' if 'is not clickable at point' in message
+                else 'element-not-interactable' if 'element not interactable' in message
+                else 'unclassified-webdriver-error')
+            report['webdriver_error'] = {'http_status': error.code,
+                'error': code if code in known else 'unrecognized-error', 'category': category}
+        except (ValueError, TypeError, AttributeError):
+            report['webdriver_error'] = {'http_status': error.code, 'error': 'unreadable-response'}
+        raise RuntimeError('WebDriver command failed; see safe ui-smoke-report') from None
     if isinstance(value, dict) and 'error' in value:
         raise RuntimeError('WebDriver command failed: ' + value['error'])
     return value
@@ -58,7 +81,24 @@ def element(selector, using='css selector'):
 
 
 def click(selector):
-    call('/element/' + element(selector) + '/click', {})
+    identifier = element(selector)
+    # Public geometry only. Keep native WebDriver clicking, so an obstruction
+    # remains observable rather than being bypassed with a scripted click.
+    report['click_observation'] = call('/execute/sync', {'script': '''
+const target = document.querySelector(arguments[0]);
+const r = target.getBoundingClientRect();
+const x = (Math.max(0, r.left) + Math.min(innerWidth, r.right)) / 2;
+const y = (Math.max(0, r.top) + Math.min(innerHeight, r.bottom)) / 2;
+const top = document.elementFromPoint(x, y);
+const describe = e => e ? {tag: e.tagName, id: e.id,
+ className: typeof e.className === 'string' ? e.className : '',
+ ariaLabel: e.getAttribute('aria-label'), text: (e.innerText ?? '').slice(0, 300)} : null;
+return {selector: arguments[0], viewport: {width: innerWidth, height: innerHeight},
+ rect: {left: r.left, top: r.top, right: r.right, bottom: r.bottom},
+ center: {x, y}, target: describe(target), top: describe(top),
+ centerHitsTarget: !!top && (top === target || target.contains(top))};
+''', 'args': [selector]})
+    call('/element/' + identifier + '/click', {})
 
 
 def capture(step):
@@ -68,7 +108,11 @@ def capture(step):
         '--state-script', str(VALIDATION / 'scripts/ci/p1-public-state.js')], check=True)
 
 
+stage = 'application-observer'
+exit_code = 0
 try:
+    report['consumer'] = json.loads((ROOT / 'manifest.json').read_text())['consumer']
+    report['consumer_execution'] = json.loads(Path(os.environ['P1_BROWSER_BOOT']).read_text())['consumer_execution']
     call('/window/rect', {'width': 1440, 'height': 1000})
     # This closure reads existing public store fields; it never seeds or mutates
     # engine/store state and never exposes actor/context/receipt wire data.
@@ -87,35 +131,63 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
 }, () => done(false));
 """, 'args': []})
     assert ready, 'Public observer module could not load'
+    stage = 'initial'
     initial = wait_for(lambda s: s['manualPhase'] == 'open' and s['life'][:1] == [20])
     assert initial['sourceId'] is not None
     panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
     element(panel, 'xpath')
+    report['stages']['initial'] = {'status': 'passed', 'assertions_completed': True}
+    stage = 'capture-same-source'
     capture('same-source')
+    stage = 'player-area-select'
     report['assertions'].append('trusted fixture reached Manual Open with own life 20')
     click('[data-testid="player-area-0"] > button[aria-pressed]')
     amount = element(panel + '//input[@type="number"]', 'xpath')
     call('/element/' + amount + '/clear', {})
     call('/element/' + amount + '/value', {'text': '1'})
     call('/element/' + element(panel + '//button[@type="submit"]', 'xpath') + '/click', {})
+    stage = 'life19'
     after_life = wait_for(lambda s: s['life'][:1] == [19] and s['manualPhase'] == 'open')
     assert after_life['sourceId'] == initial['sourceId']
+    report['stages']['life19'] = {'status': 'passed', 'assertions_completed': True}
+    stage = 'capture-life19'
     capture('life19')
     report['assertions'].append('real Apply click lost one life on the same open source')
     # Locate the existing visible Finish button, then issue a real WebDriver click.
+    stage = 'finish'
     finish = element(panel + '//button[normalize-space()="Finish"]', 'xpath')
     call('/element/' + finish + '/click', {})
     ended = wait_for(lambda s: s['manualPhase'] in [None, 'closed']
                      and s['stackCount'] == initial['stackCount'] - 1)
     assert ended['life'][0] == 19
+    report['stages']['finish'] = {'status': 'passed', 'assertions_completed': True}
+    stage = 'capture-finish'
     capture('finish')
     report['assertions'].append('real Finish click closed and removed exactly one stack entry; life stayed 19')
+    report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
     report['status'] = 'passed'
 except Exception as error:
+    exit_code = 1
     report['status'] = 'failed'
     report['error_type'] = type(error).__name__
-    raise
+    reason = ('required-capture-failed' if stage.startswith('capture-')
+              else 'webdriver-command-failed' if 'webdriver_error' in report
+              else 'operation-assertion-failed' if isinstance(error, AssertionError)
+              else 'scenario-command-failed')
+    report['primary'] = {'stage': stage, 'code': 1, 'reason': reason}
+    if stage == 'capture-finish' and all(item['assertions_completed'] is True for item in report['stages'].values()):
+        report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
+        report['secondary'].append({'stage': stage, 'code': 1, 'reason': 'required-capture-failed'})
+        report['status'] = 'incomplete'
 finally:
     report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    report['consumer'] = json.loads((ROOT / 'manifest.json').read_text())['consumer']
-    (ROOT / 'ui-smoke-report.json').write_text(json.dumps(report, indent=2) + '\n')
+    try:
+        (ROOT / 'ui-smoke-report.json').write_text(json.dumps(report, indent=2) + '\n')
+    except Exception:
+        report['secondary'].append({'stage': 'ui-smoke-report', 'code': 1, 'reason': 'required-report-save-failed'})
+        exit_code = exit_code or 1
+        report['status'] = 'incomplete' if report['primary']['code'] == 0 else 'failed'
+        # Fixed, structured fallback only; no exception text or transport data.
+        print(json.dumps({'primary': report['primary'], 'secondary': report['secondary'],
+                          'status': report['status'], 'effective_exit': exit_code}))
+raise SystemExit(exit_code)

@@ -152,3 +152,21 @@ console error categories and diagnostic PNG hash before session cleanup. Console
 messages and request bodies are not persisted. `diagnostic-failure.png` is a
 labelled failure observation, never an acceptance snapshot or step-index entry.
 The diagnostic retains source/runtime verification and does not extend timeouts.
+
+### Producer reuse and native-click diagnosis
+
+The next push uses the exact completed producer run 37936994773 / artifact
+11621113630 through the normal GitHub Actions REST download endpoint and the
+existing contents-read GITHUB_TOKEN. No permissions are added. A single denied
+download stops the run without compiling a replacement. ZIP digest/size,
+producer run/head, manifest source/tree, toolchain, input hashes, unchanged
+producer script/guard, both build configurations and every runtime byte are
+checked before installing the runtime in a fresh immutable consumer. Only
+manifest/runtime files are imported; earlier screenshots and consumer receipts
+are not carried into the new consumer evidence.
+
+The real player-area click remains a native WebDriver click. The safe smoke
+report now retains its public hit-test geometry and selected W3C HTTP error
+code and fixed message classification, omitting raw messages, response bodies,
+stack traces and session identifiers.
+An intercepted click is not replaced with JavaScript or store mutation.

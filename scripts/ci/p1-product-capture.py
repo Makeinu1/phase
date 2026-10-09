@@ -12,7 +12,152 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
+import zlib
 import urllib.request
+
+
+class EvidenceFailure(ValueError):
+    def __init__(self, stage, reason):
+        self.stage, self.reason = stage, reason
+        super().__init__(reason)
+
+
+def validate_operations(report, consumer, execution):
+    """Require explicit operation completion; image receipts are observations."""
+    def reject(reason):
+        raise EvidenceFailure('operation-assertions', reason)
+    if not isinstance(report, dict) or report.get('status') != 'passed':
+        reject('operation-report-not-passed')
+    if report.get('consumer') != consumer or report.get('consumer_execution') != execution:
+        reject('operation-report-provenance-mismatch')
+    primary = report.get('primary')
+    if (not isinstance(primary, dict) or type(primary.get('code')) is not int
+            or primary['code'] != 0 or primary.get('reason') != 'completed'
+            or primary.get('stage') != 'operations-complete' or report.get('secondary') != []):
+        reject('operation-primary-not-success')
+    stages = report.get('stages')
+    if not isinstance(stages, dict):
+        reject('required-operation-stages-missing')
+    for stage in ['initial', 'life19', 'finish']:
+        item = stages.get(stage)
+        if not isinstance(item, dict):
+            reject('required-operation-stage-missing:' + stage)
+        if item.get('status') != 'passed' or item.get('assertions_completed') is not True:
+            reject('required-operation-stage-incomplete:' + stage)
+
+
+def valid_png(data):
+    """Check saved PNG chunks/CRC and compressed pixels with the stdlib."""
+    if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return False
+    offset, chunks, compressed = 8, [], bytearray()
+    while offset + 12 <= len(data):
+        length = struct.unpack('>I', data[offset:offset + 4])[0]
+        end = offset + 12 + length
+        if end > len(data):
+            return False
+        kind, content = data[offset + 4:offset + 8], data[offset + 8:end - 4]
+        if zlib.crc32(kind + content) != struct.unpack('>I', data[end - 4:end])[0]:
+            return False
+        if not chunks and (kind != b'IHDR' or length != 13
+                or not all(struct.unpack('>II', content[:8]))):
+            return False
+        if kind == b'IHDR':
+            if chunks:
+                return False
+            width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', content)
+            # Chromium screenshots use non-interlaced RGB/RGBA, eight bits.
+            if depth != 8 or color not in {2, 6} or (compression, filtering, interlace) != (0, 0, 0):
+                return False
+            row_bytes = 1 + width * (3 if color == 2 else 4)
+            pixel_bytes = row_bytes * height
+            if pixel_bytes > 32 * 1024 * 1024:
+                return False
+        chunks.append(kind)
+        if kind == b'IDAT':
+            compressed.extend(content)
+        offset = end
+        if kind == b'IEND':
+            if length != 0 or offset != len(data) or not compressed:
+                return False
+            try:
+                decoder = zlib.decompressobj()
+                pixels = decoder.decompress(compressed, pixel_bytes + 1)
+                return (len(pixels) == pixel_bytes and decoder.eof and not decoder.unused_data
+                        and all(pixels[row * row_bytes] <= 4 for row in range(height)))
+            except zlib.error:
+                return False
+    return False
+
+
+def validate_required_images(root, manifest, execution):
+    """Recheck the three existing capture receipts and saved public bytes."""
+    def reject(reason):
+        raise EvidenceFailure('required-images', reason)
+    try:
+        steps = json.loads((root / 'step-index.json').read_text())
+    except (OSError, ValueError):
+        reject('required-image-index-unreadable')
+    if not isinstance(steps, list) or any(not isinstance(item, dict) for item in steps):
+        reject('required-image-index-invalid')
+    observations = {}
+    for step in ['same-source', 'life19', 'finish']:
+        matches = [item for item in steps if item.get('step') == step]
+        if len(matches) != 1:
+            reject('required-image-count:' + step)
+        item = matches[0]
+        if (item.get('status') != 'observation-only' or type(item.get('exit_code')) is not int
+                or item['exit_code'] != 0):
+            reject('required-image-receipt-invalid:' + step)
+        if (item.get('runtime') != manifest['runtime'] or item.get('consumer') != manifest['consumer']
+                or item.get('validation') != manifest['validation']
+                or item.get('consumer_execution') != execution
+                or not isinstance(item.get('served'), dict)
+                or item['served'].get('engine_wasm_bg.wasm')
+                    != manifest['artifacts']['engine_wasm_bg.wasm']['sha256']):
+            reject('required-image-provenance-mismatch:' + step)
+        for kind, relative in [('screenshot', 'screenshots/' + step + '.png'),
+                               ('state', 'states/' + step + '.json')]:
+            receipt = item.get(kind)
+            if not isinstance(receipt, dict) or receipt.get('path') != relative:
+                reject('required-' + kind + '-receipt-invalid:' + step)
+            try:
+                data = (root / relative).read_bytes()
+            except OSError:
+                reject('required-' + kind + '-missing:' + step)
+            if not data:
+                reject('required-' + kind + '-empty:' + step)
+            if hashlib.sha256(data).hexdigest() != receipt.get('sha256'):
+                reject('required-' + kind + '-hash-mismatch:' + step)
+            if kind == 'screenshot' and not valid_png(data):
+                reject('required-screenshot-invalid-png:' + step)
+            if kind == 'state':
+                try:
+                    state = json.loads(data)
+                except ValueError:
+                    reject('required-state-invalid:' + step)
+                if (not isinstance(state, dict) or not isinstance(state.get('life'), list)
+                        or len(state['life']) != 2 or any(type(life) is not int for life in state['life'])
+                        or type(state.get('stackCount')) is not int
+                        or (state.get('manualPhase') is not None and not isinstance(state['manualPhase'], str))
+                        or state.get('manualPhase') not in {'open', 'closed', None}
+                        or 'manualPhase' not in state or 'sourceId' not in state
+                        or (state['sourceId'] is not None and type(state['sourceId']) is not int)
+                        or 'sourceName' not in state or 'waitingType' not in state
+                        or (state['sourceName'] is not None and not isinstance(state['sourceName'], str))
+                        or (state['waitingType'] is not None and not isinstance(state['waitingType'], str))):
+                    reject('required-state-invalid:' + step)
+                observations[step] = state
+    initial, life, finish = (observations[step] for step in ['same-source', 'life19', 'finish'])
+    if initial['life'][0] != 20 or initial['manualPhase'] != 'open' or initial['sourceId'] is None:
+        reject('required-state-content-mismatch:same-source')
+    if life['life'][0] != 19 or life['manualPhase'] != 'open' or life['sourceId'] != initial['sourceId']:
+        reject('required-state-content-mismatch:life19')
+    if (finish['life'][0] != 19 or finish['manualPhase'] not in {None, 'closed'}
+            or finish['stackCount'] != initial['stackCount'] - 1):
+        reject('required-state-content-mismatch:finish')
+    return {'required_steps': ['same-source', 'life19', 'finish'], 'verified_count': 3}
 
 
 def main():
@@ -98,6 +243,7 @@ def main():
     steps.append({'step': args.step, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'route': route, 'runtime': manifest['runtime'], 'consumer': manifest['consumer'],
                   'validation': manifest['validation'], 'served': served,
+                  'consumer_execution': boot['consumer_execution'],
                   'state_script_sha256': hashlib.sha256(script.encode()).hexdigest(),
                   'screenshot': {'path': str(target.relative_to(root)), 'sha256': hashlib.sha256(pixels).hexdigest()},
                   'state': {'path': str(state.relative_to(root)), 'sha256': hashlib.sha256(state.read_bytes()).hexdigest()},

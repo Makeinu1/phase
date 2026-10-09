@@ -1,6 +1,7 @@
 """Consume this job's newly built immutable runtime on the normal Local board."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -62,21 +63,70 @@ def main():
     source, evidence = args.source.resolve(), args.evidence.resolve()
     manifest = json.loads((evidence / 'manifest.json').read_text())
     if manifest['status'] != 'built' or manifest['consumer']['sha'] != args.candidate_sha:
-        raise ValueError('build this exact candidate in this job first')
+        raise ValueError('verified runtime for this exact candidate required')
     environment = dict(os.environ, MANUAL_EXPECTED_SOURCE_SHA=args.candidate_sha,
         MANUAL_EVIDENCE=str(evidence), CARGO_BUILD_JOBS='1', CARGO_INCREMENTAL='0',
         CARGO_TARGET_DIR=str(evidence / 'target'), RUNNER_TEMP=os.environ.get('RUNNER_TEMP', '/tmp'))
     proof = {'scope': 'one Local UI smoke; not S1-S12 or Undo acceptance',
-             'consumer': manifest['consumer'], 'stage': 'starting', 'status': 'running'}
+             'consumer': manifest['consumer'], 'stage': 'starting', 'status': 'running', 'secondary': [],
+             'stages': {'runtime': 'passed', 'application': 'not_run', 'operations': 'not_run', 'images': 'not_run'},
+             'consumer_execution': {'validation_sha': subprocess.check_output(
+                 ['git', '-C', str(VALIDATION), 'rev-parse', 'HEAD'], text=True).strip(),
+                 'run_id': os.environ.get('GITHUB_RUN_ID'), 'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT')}}
+    effective_exit = 0
+    spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
+    checks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checks)
+    spec = importlib.util.spec_from_file_location('p1_browser_results', VALIDATION / 'scripts/ci/p1-product-browser.py')
+    results = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(results)
+
+    class StageStop(Exception):
+        pass
 
     def guarded(label, command, extra=None):
         proof['stage'] = label
         result = subprocess.run(['python3', str(VALIDATION / 'scripts/ci/manual-integration-guard.py'),
             label, *command], cwd=source, env=dict(environment, **(extra or {})),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        (evidence / (label + '.control.log')).write_bytes(result.stdout)
-        if result.returncode:
-            raise RuntimeError('guarded stage failed: ' + label)
+        proof['primary'] = {'stage': label, 'code': result.returncode,
+            'reason': 'completed' if result.returncode == 0 else 'guarded-command-failed'}
+        browser_report_failed = False
+        if label == 'p1-ui-smoke':
+            try:
+                browser, saved = results.load_result(evidence / 'browser-boot.json', evidence / 'p1-ui-smoke.log')
+                if not saved:
+                    browser_report_failed = True
+                    proof['secondary'].append({'stage': 'browser-boot-report', 'code': 1, 'reason': 'required-report-save-failed'})
+                if browser.get('stages', {}).get('application') == 'passed':
+                    proof['stages']['application'] = 'passed'
+                if (browser.get('consumer') != manifest['consumer']
+                        or browser.get('consumer_execution') != proof['consumer_execution']
+                        or (result.returncode == 0 and (browser.get('status') != 'scenario-exited'
+                            or type(browser.get('effective_exit')) is not int or browser['effective_exit'] != 0))):
+                    browser_report_failed = True
+                    proof['secondary'].append({'stage': 'browser-boot-report', 'code': 1, 'reason': 'required-report-incomplete'})
+                primary = browser['primary']
+                if results.safe_primary(primary):
+                    proof['primary'] = results.safe_primary(primary)
+                # Copy only safe, structured secondary fields from this local helper.
+                allowed = {'diagnostic-save-failed', 'failure-report-unreadable', 'session-cleanup-failed',
+                           'process-cleanup-failed', 'required-report-save-failed', 'required-capture-failed'}
+                for item in browser.get('secondary', []):
+                    if (isinstance(item, dict) and item.get('reason') in allowed
+                            and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
+                                'process-cleanup', 'browser-boot-report', 'capture-finish', 'ui-smoke-report'} and type(item.get('code')) is int):
+                        proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                browser_report_failed = True
+                proof['secondary'].append({'stage': 'browser-boot-report', 'code': 1, 'reason': 'required-report-unreadable'})
+        try:
+            (evidence / (label + '.control.log')).write_bytes(result.stdout)
+        except Exception:
+            proof['secondary'].append({'stage': label + '-control-log', 'code': 1, 'reason': 'required-control-log-save-failed'})
+            raise StageStop()
+        if result.returncode or browser_report_failed:
+            raise StageStop()
 
     try:
         fixtures = evidence / 'private-fixtures'
@@ -118,15 +168,54 @@ def main():
             '--entry-route', '/game/p1-ci-smoke?mode=local&manual=1&p1Fixture=1c.K1',
             '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
             {key: str(value) for key, value in tools.items()})
+        proof['stages']['application'] = 'passed'
+        proof['stage'] = 'operation-assertions'
+        try:
+            report = json.loads((evidence / 'ui-smoke-report.json').read_text())
+        except (OSError, ValueError):
+            raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
+        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'])
+        proof['stages']['operations'] = 'passed'
+        proof['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
+        proof['stage'] = 'required-images'
+        proof['images'] = checks.validate_required_images(evidence, manifest, proof['consumer_execution'])
+        proof['stages']['images'] = 'passed'
         proof['status'] = 'passed'
+    except checks.EvidenceFailure as error:
+        failure = {'stage': error.stage, 'code': 1, 'reason': error.reason}
+        if error.stage == 'required-images':
+            proof['secondary'].append(failure)
+        else:
+            proof['primary'] = failure
+        effective_exit = 1
+        proof['status'] = 'incomplete' if proof.get('primary', {}).get('code') == 0 else 'failed'
+    except StageStop:
+        code = proof['primary']['code']
+        effective_exit = code if type(code) is int and 1 <= code <= 255 else 1
+        proof['status'] = 'incomplete' if code == 0 else 'failed'
     except Exception as error:
         proof['status'] = 'failed'
         proof['error_type'] = type(error).__name__
-        raise
+        failure = {'stage': proof['stage'], 'code': 1, 'reason': 'consumer-stage-failed'}
+        if proof.get('primary', {}).get('code', 0) != 0:
+            proof['secondary'].append(failure)
+        else:
+            proof['primary'] = failure
+        code = proof['primary']['code']
+        effective_exit = code if type(code) is int and 1 <= code <= 255 else 1
     finally:
         # Never serialize checkpoints, actor capabilities, request wire data,
         # browser profiles, session identifiers or raw transport into artifacts.
-        (evidence / 'ci-ui-smoke-report.json').write_text(json.dumps(proof, indent=2) + '\n')
+        proof['effective_exit'] = effective_exit
+        try:
+            (evidence / 'ci-ui-smoke-report.json').write_text(json.dumps(proof, indent=2) + '\n')
+        except Exception:
+            proof['secondary'].append({'stage': 'ci-ui-smoke-report', 'code': 1, 'reason': 'required-report-save-failed'})
+            effective_exit = effective_exit or 1
+            proof['status'] = 'incomplete' if proof.get('primary', {}).get('code') == 0 else 'failed'
+            print(json.dumps({'primary': proof.get('primary'), 'secondary': proof['secondary'],
+                              'status': proof['status'], 'effective_exit': effective_exit}))
+    raise SystemExit(effective_exit)
 
 
 if __name__ == '__main__':

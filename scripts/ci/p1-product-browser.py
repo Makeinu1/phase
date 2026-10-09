@@ -89,6 +89,49 @@ return {url: location.href.split(/[?#]/, 1)[0], state, observerError,
     (root / 'browser-failure.json').write_text(json.dumps(diagnostic, indent=2) + '\n')
 
 
+PRIMARY_STAGES = {'scenario', 'application-start', 'browser-boot-report', 'source-after',
+    'application-observer', 'initial', 'player-area-select', 'life19', 'finish',
+    'capture-same-source', 'capture-life19', 'capture-finish', 'operations-complete'}
+PRIMARY_REASONS = {'completed', 'scenario-exit-nonzero', 'required-capture-failed',
+    'webdriver-command-failed', 'operation-assertion-failed', 'scenario-command-failed',
+    'required-report-save-failed', 'consumer-source-changed', 'scenario-launch-failed',
+    'application-start-failed'}
+
+
+def safe_primary(value):
+    if (isinstance(value, dict) and type(value.get('code')) is int
+            and isinstance(value.get('stage'), str) and isinstance(value.get('reason'), str)
+            and value.get('stage') in PRIMARY_STAGES and value.get('reason') in PRIMARY_REASONS
+            and ((value['code'] == 0 and value['reason'] == 'completed'
+                  and value['stage'] in {'scenario', 'operations-complete'})
+                 or (1 <= value['code'] <= 255 and value['reason'] != 'completed'
+                     and value['stage'] != 'operations-complete'))):
+        return {key: value[key] for key in ['stage', 'code', 'reason']}
+    return None
+
+
+def load_result(report_path, fallback_path):
+    """Read a report or fixed JSON fallback; never promote fallback to PASS."""
+    try:
+        report = json.loads(report_path.read_text())
+        if isinstance(report, dict) and safe_primary(report.get('primary')):
+            return report, True
+    except (OSError, ValueError):
+        pass
+    try:
+        for line in reversed(fallback_path.read_text().splitlines()):
+            try:
+                candidate = json.loads(line)
+            except ValueError:
+                continue
+            if (isinstance(candidate, dict) and safe_primary(candidate.get('primary'))
+                    and candidate.get('status') in {'failed', 'incomplete'}):
+                return candidate, False
+    except OSError:
+        pass
+    raise ValueError('required-result-unreadable')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
@@ -125,7 +168,10 @@ def main():
              'scenario_sha256': hashlib.sha256(scenario.read_bytes()).hexdigest(),
              'navigation_url': 'http://127.0.0.1:5173' + args.entry_route,
              'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-             'fresh_session_after_install': True, 'exit_code': None, 'status': 'starting'}
+             'fresh_session_after_install': True, 'exit_code': None, 'status': 'starting',
+             'secondary': [], 'stages': {'application': 'not_run', 'scenario': 'not_run'}, 'consumer_execution': {
+                 'validation_sha': subprocess.check_output(['git', '-C', str(validation), 'rev-parse', 'HEAD'], text=True).strip(),
+                 'run_id': os.environ.get('GITHUB_RUN_ID'), 'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT')}}
     processes, session = [], None
 
     def call(endpoint, data=None):
@@ -138,6 +184,8 @@ def main():
             raise ValueError('WebDriver failed')
         return value
 
+    stage = 'application-start'
+    effective_exit = 0
     try:
         for command in [['pnpm', '--dir', 'client', 'dev', '--host', '127.0.0.1', '--port', '5173', '--strictPort'],
                         [os.environ['BOOTSTRAP_CHROMEDRIVER'], '--port=9515', '--log-path=/dev/null']]:
@@ -162,45 +210,90 @@ def main():
         call('/session/' + session + '/url', {'url': proof['navigation_url']})
         proof['navigation_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         proof['status'] = 'fresh-product-session'
+        proof['stages']['application'] = 'passed'
+        stage = 'browser-boot-report'
         proof_path.write_text(json.dumps(proof, indent=2) + '\n')
+        stage = 'scenario'
         environment = dict(os.environ, P1_WEBDRIVER_SESSION=session, P1_BROWSER_BOOT=str(proof_path),
                            P1_CONSUMER_SOURCE=str(source), MANUAL_EVIDENCE=str(root))
         with (root / 'product-scenario.log').open('wb') as log:
             result = subprocess.run(['python3', str(scenario)], cwd=source, env=environment,
                                     stdout=log, stderr=subprocess.STDOUT, timeout=1200)
         proof['exit_code'] = result.returncode
+        proof['stages']['scenario'] = 'passed' if result.returncode == 0 else 'failed'
+        proof['primary'] = {'stage': 'scenario', 'code': result.returncode if 0 <= result.returncode <= 255 else 1,
+            'reason': 'completed' if result.returncode == 0 else 'scenario-exit-nonzero'}
+        # Preserve the bounded smoke's actual operation/capture failure, if saved.
+        if result.returncode != 0 and scenario.name == 'p1-ui-smoke.py':
+            try:
+                report, saved = load_result(root / 'ui-smoke-report.json', root / 'product-scenario.log')
+                proof['primary'] = safe_primary(report['primary'])
+                if not saved:
+                    proof['secondary'].append({'stage': 'scenario-report', 'code': 1, 'reason': 'required-report-save-failed'})
+                for item in report.get('secondary', []):
+                    if (isinstance(item, dict) and item.get('stage') in {'capture-finish', 'ui-smoke-report'}
+                            and item.get('reason') in {'required-capture-failed', 'required-report-save-failed'}):
+                        proof['secondary'].append({'stage': item['stage'], 'code': 1, 'reason': item['reason']})
+            except (OSError, ValueError, KeyError, TypeError):
+                proof['secondary'].append({'stage': 'scenario-report', 'code': 1, 'reason': 'failure-report-unreadable'})
+        effective_exit = result.returncode if 0 <= result.returncode <= 255 else 1
+        stage = 'source-after'
         proof['source_after'] = identity(source)
         if proof['source_after'] != manifest['consumer']:
             raise ValueError('consumer changed during scenario')
         proof['status'] = 'scenario-exited'
-        raise SystemExit(result.returncode)
-    except Exception as error:
+    except Exception:
+        reason = ('required-report-save-failed' if stage == 'browser-boot-report'
+                  else 'consumer-source-changed' if stage == 'source-after'
+                  else 'scenario-launch-failed' if stage == 'scenario'
+                  else 'application-start-failed')
+        failure = {'stage': stage, 'code': 1, 'reason': reason}
+        if proof.get('primary', {}).get('code', 0) != 0:
+            proof['secondary'].append(failure)
+        else:
+            proof['primary'] = failure
+        effective_exit = effective_exit or 1
         proof['status'] = 'failed'
-        proof['error'] = type(error).__name__
-        proof['exit_code'] = 1
-        raise
+        proof['exit_code'] = proof['primary']['code']
     finally:
         if session:
-            if proof['exit_code'] != 0:
+            if effective_exit != 0:
                 try:
                     capture_failure(root, source, manifest, proof, session, call)
-                except Exception as error:
-                    proof['diagnostic_error_type'] = type(error).__name__
+                except Exception:
+                    proof['secondary'].append({'stage': 'diagnostic-collector', 'code': 1,
+                                                'reason': 'diagnostic-save-failed'})
             try:
                 request = urllib.request.Request('http://127.0.0.1:9515/session/' + session, method='DELETE')
                 urllib.request.urlopen(request, timeout=10).close()
             except Exception:
-                pass
+                proof['secondary'].append({'stage': 'browser-cleanup', 'code': 1, 'reason': 'session-cleanup-failed'})
+                effective_exit = effective_exit or 1
         import signal
         for process in processes:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
-        proof_path.write_text(json.dumps(proof, indent=2) + '\n')
+            try:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+            except Exception:
+                proof['secondary'].append({'stage': 'process-cleanup', 'code': 1, 'reason': 'process-cleanup-failed'})
+                effective_exit = effective_exit or 1
+        proof['effective_exit'] = effective_exit
+        if effective_exit and proof['primary']['code'] == 0:
+            proof['status'] = 'incomplete'
+        try:
+            proof_path.write_text(json.dumps(proof, indent=2) + '\n')
+        except Exception:
+            proof['secondary'].append({'stage': 'browser-boot-report', 'code': 1, 'reason': 'required-report-save-failed'})
+            effective_exit = effective_exit or 1
+            proof['status'] = 'incomplete' if proof['primary']['code'] == 0 else 'failed'
+            print(json.dumps({'primary': proof['primary'], 'secondary': proof['secondary'],
+                              'status': proof['status'], 'effective_exit': effective_exit}))
+    raise SystemExit(effective_exit)
 
 
 if __name__ == '__main__':

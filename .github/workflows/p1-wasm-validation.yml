@@ -21,7 +21,7 @@ permissions:
 # Change these two literals only after receiving the reviewed product SHA.
 env:
   P1_PUSH_CANDIDATE_SHA: e2da1a62edf3fb12250f9fdacff63884dd9634c8
-  P1_PUSH_MODE: build
+  P1_PUSH_MODE: reuse
 
 jobs:
   candidate-runtime:
@@ -58,7 +58,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.23.3
+      - name: Verify and reuse the reviewed producer through normal Actions
+        if: ${{ github.event_name == 'push' && env.P1_PUSH_MODE == 'reuse' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 validation-source/scripts/ci/p1-runtime-reuse.py \
+            --source "$GITHUB_WORKSPACE/product-source" --evidence "$RUNNER_TEMP/p1-evidence"
       - name: Guarded preflight or one fresh candidate build
+        if: ${{ github.event_name != 'push' || env.P1_PUSH_MODE != 'reuse' }}
         env:
           P1_CANDIDATE_SHA: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
           P1_PREFLIGHT_ONLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.preflight_only) || (github.event_name == 'push' && env.P1_PUSH_MODE != 'build') }}
@@ -68,8 +76,8 @@ jobs:
           python3 validation-source/scripts/ci/p1-wasm-validation.py "$mode" \
             --source "$GITHUB_WORKSPACE/product-source" --candidate-sha "$P1_CANDIDATE_SHA" \
             --evidence "$RUNNER_TEMP/p1-evidence"
-      - name: Consume the same job runtime on the real Local product board
-        if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.preflight_only) || (github.event_name == 'push' && env.P1_PUSH_MODE == 'build') }}
+      - name: Consume the verified runtime on the real Local product board
+        if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.preflight_only) || (github.event_name == 'push' && (env.P1_PUSH_MODE == 'build' || env.P1_PUSH_MODE == 'reuse')) }}
         env:
           P1_CANDIDATE_SHA: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
         run: |
@@ -82,6 +90,7 @@ jobs:
         with:
           name: p1-candidate-runtime-evidence
           path: |
+            ${{ runner.temp }}/p1-evidence/runtime-reuse.json
             ${{ runner.temp }}/p1-evidence/manifest.json
             ${{ runner.temp }}/p1-evidence/p1-source-preflight.json
             ${{ runner.temp }}/p1-evidence/p1-source-preflight.log
