@@ -33,7 +33,8 @@ Then run `install-runtime` with the same arguments. This verifies the producer
 manifest, all WASM/glue/snippet hashes, and the consumer SHA before installing
 only ignored generated artifacts. Consumer replay does not rebuild Rust.
 
-The fork workflow's push mode currently builds the pinned candidate.
+The fork workflow's push mode currently replays the same pinned product from
+one completed, verified producer artifact through the normal Actions API.
 Its `P1_PUSH_CANDIDATE_SHA` and `P1_PUSH_MODE` literals can be changed to the final
 reviewed SHA and `build` for a single CI build. This push path works for a newly
 added workflow without putting it on the default branch. Dispatch is an optional
@@ -134,8 +135,14 @@ subset and its hashes. Source cleanliness and SHA/tree checks remain mandatory.
 `p1-ui-smoke.py` uses the existing product entrance
 `/game/p1-ci-smoke?mode=local&manual=1&p1Fixture=1c.K1`. It reads only public store
 fields, clicks the real player-area selection, Apply and Finish controls, and
-asserts Manual Open at life 20, same-source life 19, and one removed stack
-entry at Finish with life still 19. The existing capture helper saves the three
+asserts Manual Open at life 20, same-source life 19, and release of the exact
+resolving entry at Finish with life still 19 and Priority restored. Begin already
+popped that occurrence: `1c.K1` has zero ordinary stack entries and holds it in
+`resolving_stack_entry`. Finish keeps the ordinary stack count unchanged. Both
+the live predicate and saved-image verifier check its public ID, closed phase,
+cleared resolving entry and retained source. Empty/nonempty ordinary stacks and
+unfinished states have offline RED/GREEN regressions in `test_p1_finish_evidence.py`.
+The existing capture helper saves the three
 PNG/public-state pairs and their source/runtime/time/hash provenance.
 
 This independently specified smoke does not replace the unavailable migrated
@@ -155,8 +162,9 @@ The diagnostic retains source/runtime verification and does not extend timeouts.
 
 ### Producer reuse and native-click diagnosis
 
-The next push uses the exact completed producer run 37936994773 / artifact
-11621113630 through the normal GitHub Actions REST download endpoint and the
+The next push uses the exact completed producer run 37956261306 / artifact
+11630543757 for unchanged product `6f707b2b0e90cf69d05e57e4fd286a0fb73cecc0`
+through the normal GitHub Actions REST download endpoint and the
 existing contents-read GITHUB_TOKEN. No permissions are added. A single denied
 download stops the run without compiling a replacement. ZIP digest/size,
 producer run/head, manifest source/tree, toolchain, input hashes, unchanged

@@ -91,6 +91,25 @@ def valid_png(data):
     return False
 
 
+def finish_matches(initial, ended):
+    """Begin already popped this occurrence; Finish releases its carrier.
+
+    Ordinary stack entries, whether zero or nonzero, are not the resolving
+    entry. Require its exact public identity to disappear without popping them.
+    """
+    entry = initial.get('manualStackEntryId')
+    count = initial.get('stackCount')
+    return (initial.get('manualPhase') == 'open' and type(entry) is int
+            and initial.get('resolvingEntryId') == entry
+            and type(count) is int and count >= 0
+            and ended.get('manualPhase') == 'closed' and ended.get('waitingType') == 'Priority'
+            and ended.get('life', [])[:1] == [19]
+            and ended.get('sourceId') == initial.get('sourceId')
+            and ended.get('manualStackEntryId') == entry
+            and 'resolvingEntryId' in ended and ended['resolvingEntryId'] is None
+            and type(ended.get('stackCount')) is int and ended['stackCount'] == count)
+
+
 def validate_required_images(root, manifest, execution):
     """Recheck the three existing capture receipts and saved public bytes."""
     def reject(reason):
@@ -139,7 +158,9 @@ def validate_required_images(root, manifest, execution):
                     reject('required-state-invalid:' + step)
                 if (not isinstance(state, dict) or not isinstance(state.get('life'), list)
                         or len(state['life']) != 2 or any(type(life) is not int for life in state['life'])
-                        or type(state.get('stackCount')) is not int
+                        or type(state.get('stackCount')) is not int or state['stackCount'] < 0
+                        or any(key not in state or (state[key] is not None and type(state[key]) is not int)
+                               for key in ['manualStackEntryId', 'resolvingEntryId'])
                         or (state.get('manualPhase') is not None and not isinstance(state['manualPhase'], str))
                         or state.get('manualPhase') not in {'open', 'closed', None}
                         or 'manualPhase' not in state or 'sourceId' not in state
@@ -150,12 +171,16 @@ def validate_required_images(root, manifest, execution):
                     reject('required-state-invalid:' + step)
                 observations[step] = state
     initial, life, finish = (observations[step] for step in ['same-source', 'life19', 'finish'])
-    if initial['life'][0] != 20 or initial['manualPhase'] != 'open' or initial['sourceId'] is None:
+    if (initial['life'][0] != 20 or initial['manualPhase'] != 'open' or initial['sourceId'] is None
+            or type(initial['manualStackEntryId']) is not int
+            or initial['resolvingEntryId'] != initial['manualStackEntryId']):
         reject('required-state-content-mismatch:same-source')
-    if life['life'][0] != 19 or life['manualPhase'] != 'open' or life['sourceId'] != initial['sourceId']:
+    if (life['life'][0] != 19 or life['manualPhase'] != 'open' or life['sourceId'] != initial['sourceId']
+            or life['manualStackEntryId'] != initial['manualStackEntryId']
+            or life['resolvingEntryId'] != initial['manualStackEntryId']
+            or life['stackCount'] != initial['stackCount']):
         reject('required-state-content-mismatch:life19')
-    if (finish['life'][0] != 19 or finish['manualPhase'] not in {None, 'closed'}
-            or finish['stackCount'] != initial['stackCount'] - 1):
+    if not finish_matches(initial, finish):
         reject('required-state-content-mismatch:finish')
     return {'required_steps': ['same-source', 'life19', 'finish'], 'verified_count': 3}
 

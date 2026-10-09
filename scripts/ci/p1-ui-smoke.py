@@ -4,6 +4,7 @@ This is a bounded independent smoke, not the unavailable migration scenario
 and not S1-S12 acceptance. Only public observations are written.
 """
 import datetime
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,9 @@ ROOT = Path(os.environ['MANUAL_EVIDENCE'])
 VALIDATION = Path(__file__).resolve().parents[2]
 SESSION = os.environ['P1_WEBDRIVER_SESSION']
 BASE = 'http://127.0.0.1:9515/session/' + SESSION
+spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
+CHECKS = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(CHECKS)
 report = {'scope': 'Local product UI smoke only; Undo and S1-S12 unaccepted',
           'fixture': '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
@@ -125,6 +129,8 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     return {life: g?.players?.map(p => p.life) ?? [],
       manualPhase: v?.phase ?? null, sourceId: v?.source?.sourceId ?? null,
       sourceName: v?.source?.name ?? null, stackCount: g?.stack?.length ?? null,
+      manualStackEntryId: v?.source?.stackEntryId ?? null,
+      resolvingEntryId: g?.resolving_stack_entry?.id ?? null,
       waitingType: s.waitingFor?.type ?? null};
   };
   done(true);
@@ -134,6 +140,8 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     stage = 'initial'
     initial = wait_for(lambda s: s['manualPhase'] == 'open' and s['life'][:1] == [20])
     assert initial['sourceId'] is not None
+    assert initial['stackCount'] == 0, 'K1 Begin already popped the sole ordinary stack entry'
+    assert type(initial['manualStackEntryId']) is int and initial['resolvingEntryId'] == initial['manualStackEntryId']
     panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
     element(panel, 'xpath')
     report['stages']['initial'] = {'status': 'passed', 'assertions_completed': True}
@@ -149,6 +157,8 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     stage = 'life19'
     after_life = wait_for(lambda s: s['life'][:1] == [19] and s['manualPhase'] == 'open')
     assert after_life['sourceId'] == initial['sourceId']
+    assert after_life['stackCount'] == initial['stackCount']
+    assert after_life['resolvingEntryId'] == after_life['manualStackEntryId'] == initial['manualStackEntryId']
     report['stages']['life19'] = {'status': 'passed', 'assertions_completed': True}
     stage = 'capture-life19'
     capture('life19')
@@ -157,13 +167,12 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     stage = 'finish'
     finish = element(panel + '//button[normalize-space()="Finish"]', 'xpath')
     call('/element/' + finish + '/click', {})
-    ended = wait_for(lambda s: s['manualPhase'] in [None, 'closed']
-                     and s['stackCount'] == initial['stackCount'] - 1)
+    ended = wait_for(lambda s: CHECKS.finish_matches(initial, s))
     assert ended['life'][0] == 19
     report['stages']['finish'] = {'status': 'passed', 'assertions_completed': True}
     stage = 'capture-finish'
     capture('finish')
-    report['assertions'].append('real Finish click closed and removed exactly one stack entry; life stayed 19')
+    report['assertions'].append('real Finish click closed the exact resolving entry and returned Priority; ordinary stack stayed empty and life stayed 19')
     report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
     report['status'] = 'passed'
 except Exception as error:
