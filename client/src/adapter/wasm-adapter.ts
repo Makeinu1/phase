@@ -45,6 +45,7 @@ import {
   isActionOutcome,
   isStateLostMessage,
   nextSnapshotSeq,
+  sameLocalContinuationValue,
 } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
@@ -298,7 +299,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       if (!currentOwner()) current = null;
       if (current && this.localContext) {
         const expected = this.localContext;
-        const matching = JSON.stringify(current.context) === JSON.stringify(expected);
+        const matching = sameLocalContinuationValue(current.context, expected);
         const rekey = restoring && current.context.ownerLineage === expected.ownerLineage
           && current.context.restoreEpoch === expected.restoreEpoch + 1 && current.context.adapterGeneration === expected.adapterGeneration + 1;
         if (!matching && !rekey) current = null;
@@ -320,11 +321,11 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         engineSnapshot = this.localLatest.engineSnapshot;
       }
       const latest = engineSnapshot !== null && (!this.localLatest?.engineSnapshot || engineSnapshot.seq >= this.localLatest.engineSnapshot.seq);
-      const receipt = attempt && JSON.stringify(reply.receipt?.attempt) !== JSON.stringify(attempt)
+      const receipt = attempt && !sameLocalContinuationValue(reply.receipt?.attempt, attempt)
         ? { attempt, status: "indeterminate" as const, result: null, rejection: null }
         : reply.receipt;
       const appliedResult = currentOwner() && current && engineSnapshot && attempt && receipt?.status === "completed"
-        && JSON.stringify(attempt.context) === JSON.stringify(this.localContext)
+        && sameLocalContinuationValue(attempt.context, this.localContext)
         && receipt.result && !deliveredResults.has(attempt) ? receipt.result : null;
       if (appliedResult && attempt) deliveredResults.add(attempt);
       const publication: LocalContinuationPublication = { ...reply, current, engineSnapshot,
@@ -338,7 +339,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const capture = (key: object, submission: InteractionSubmission, source: ManualResolutionSource): LocalOriginalAttempt => {
       const existing = this.localAttempts.get(key);
       if (existing) {
-        if (JSON.stringify(existing.submission) !== JSON.stringify(submission) || JSON.stringify(existing.source) !== JSON.stringify(source)) throw new Error("Local original intent changed");
+        if (!sameLocalContinuationValue(existing.submission, submission) || !sameLocalContinuationValue(existing.source, source)) throw new Error("Local original intent changed");
         return existing;
       }
       if (!currentOwner() || !this.localContext) throw new Error("Authenticated Local continuation unavailable");

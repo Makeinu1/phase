@@ -61,6 +61,7 @@ import init, {
 
 import {
   isActionOutcome,
+  sameLocalContinuationValue,
   type ActionRejection,
   type AiActionProposal,
   type GameAction,
@@ -227,7 +228,7 @@ function localOutcome(id: number, outcome: unknown, restored = false): LocalCont
   }
   if (reply.receipt?.status === "pending") localPending = reply.receipt.attempt;
   else if (reply.receipt && reply.receipt.status !== "indeterminate"
-    && localPending && JSON.stringify(localPending) === JSON.stringify(reply.receipt.attempt)) localPending = null;
+    && localPending && sameLocalContinuationValue(localPending, reply.receipt.attempt)) localPending = null;
   result(id, reply);
   return reply;
 }

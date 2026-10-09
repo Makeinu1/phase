@@ -302,6 +302,23 @@ describe("Local continuation Worker custody and lifecycle (mock native boundary)
     expect(life).toBe(20);
   });
 
+  it("releases custody after a terminal echo with the same values in a different key order", async () => {
+    const reordered = { source: { ...attempt.source }, submission: attempt.submission,
+      attemptId: attempt.attemptId, context: { ...context } };
+    submit.mockImplementation((_actor, request) => {
+      if (request.operation === "register") status = "pending";
+      if (request.operation === "apply") { life -= 1; status = "completed"; }
+      return nativeReply(request.operation === "apply" ? reordered : attempt, request.operation === "apply");
+    });
+    await send({ type: "submitInteraction", id: 2, actor: 0, submission: envelope("register") });
+    const applying = send({ type: "submitInteraction", id: 3, actor: 0, submission: envelope("apply") });
+    queued.shift()!(); await applying;
+    expect(life).toBe(19);
+    await send({ type: "submitAction", id: 4, actor: 0, action: { type: "PassPriority" } });
+    expect(raw).toHaveBeenCalledOnce();
+    expect(reply(4).type).toBe("result");
+  });
+
   it("never enqueues a late apply after native lookup certifies original absence", async () => {
     await send({ type: "submitInteraction", id: 2, actor: 0, submission: envelope("lookup") });
     await send({ type: "submitInteraction", id: 3, actor: 0, submission: envelope("apply") });

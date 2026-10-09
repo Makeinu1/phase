@@ -1753,6 +1753,72 @@ describe("WasmAdapter Local continuation original receipts (mock Worker client)"
     });
   });
 
+  it.each(["delivered", "ACK-lost"] as const)("accepts native receipt key order after an %s life commit and looks up without reapplying", async (delivery) => {
+    // Bootstrap and public snapshots use serde_json::Value (sorted keys),
+    // while native receipts/current context serialize their typed structs.
+    const bootstrapContext: LocalCapture = { adapterGeneration: 0, interactionSessionId: context.interactionSessionId,
+      ownerLineage: context.ownerLineage, restoreEpoch: 0 };
+    const publicSource: ManualResolutionSource = { actor: 0, cardId: 1, castTurnJournalIndex: 0,
+      name: "Fixture", sourceId: 40, sourceIncarnation: 2, stackEntryId: 44 };
+    const initial = response(null, "completed", 20, 1, false, bootstrapContext);
+    initial.current!.snapshot.state.derived!.manual_resolution!.source = publicSource;
+    mockWorkerClient.initializeExperimentalLocalGame.mockResolvedValue({ events: [], log_entries: [], localContinuationContext: bootstrapContext });
+    mockWorkerClient.readLocalCurrent.mockResolvedValue(initial);
+    let applications = 0;
+    let original!: LocalOriginalAttempt;
+    const result = lossResult(19);
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      const nativeAttempt = { context: { ...context }, attemptId: original.attemptId,
+        submission: original.submission, source: { ...source } };
+      expect(nativeAttempt).toEqual(original);
+      expect(JSON.stringify(nativeAttempt)).not.toBe(JSON.stringify(original));
+      if (envelope.operation === "apply") {
+        applications += 1;
+        if (delivery === "ACK-lost") throw new Error("ACK lost after native commit");
+      }
+      return response(nativeAttempt, applications ? "completed" : "pending", applications ? 19 : 20,
+        applications ? 2 : 1, envelope.operation === "apply", context, result);
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = retainPublications(capability);
+    const input = submission("frame.1");
+    const submitted = await capability.submitInteraction(input, publicSource);
+    expect(submitted.receipt?.status).toBe(delivery === "delivered" ? "completed" : "indeterminate");
+    const recovered = await capability.lookupInteraction(input);
+    expect(recovered.receipt?.status).toBe("completed");
+    expect(recovered.engineSnapshot!.state.players[0]!.life).toBe(19);
+    expect(useGameStore.getState().gameState!.players[0]!.life).toBe(19);
+    expect(useGameStore.getState().eventHistory).toEqual(result.events);
+    expect(useGameStore.getState().logHistory).toHaveLength(1);
+    expect(applications).toBe(1);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "apply", "lookup"]);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it.each(["source-value", "extra-source-key", "amount-value", "extra-context-key", "authority-value"] as const)(
+    "keeps a %s receipt indeterminate despite accepting native key order", async (difference) => {
+      mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+        if (envelope.operation === "restore") throw new Error("unexpected restore");
+        const mismatched = structuredClone(envelope.attempt);
+        if (difference === "source-value") mismatched.source.sourceId += 1;
+        if (difference === "extra-source-key") Object.assign(mismatched.source, { unexpected: 1 });
+        if (difference === "amount-value") mismatched.submission.response = { type: "manualResolution",
+          data: { decision: { type: "loseOwnLife", data: { amount: 2 } } } };
+        if (difference === "extra-context-key") Object.assign(mismatched.context, { unexpected: 1 });
+        if (difference === "authority-value") Object.assign(mismatched.context, { ownerLineage: "other.owner" });
+        return response(mismatched, "completed", 20, 1);
+      });
+      const { adapter, capability } = await admitted();
+      const outcome = await capability.submitInteraction(submission("frame.1"), source);
+      expect(outcome.receipt?.status).toBe("indeterminate");
+      expect(outcome.appliedResult).toBeNull();
+      expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register"]);
+      adapter.dispose();
+    },
+  );
+
   it.each(["life", "finish"] as const)("looks up the retained hand cast after a watchdog snapshot clears it and a later %s attempt becomes unresolved", async (operation) => {
     const handSource = { ...source, stackEntryId: null, castTurnJournalIndex: null };
     const handInput: InteractionSubmission = { interactionId: "hand.frame" as InteractionId,

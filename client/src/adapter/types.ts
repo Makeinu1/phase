@@ -4762,6 +4762,22 @@ export interface SubmitResult {
   log_entries?: GameLogEntry[];
 }
 
+// Native structs and serde_json::Value can order the same wire keys differently.
+// Compare every key/value while retaining array order and exact primitive types.
+export function sameLocalContinuationValue(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameLocalContinuationValue(value, right[index]));
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = Object.keys(leftRecord);
+  return keys.length === Object.keys(rightRecord).length && keys.every((key) =>
+    Object.prototype.hasOwnProperty.call(rightRecord, key) && sameLocalContinuationValue(leftRecord[key], rightRecord[key]));
+}
+
 /** Equality fences captured from the admitted Worker; these are not credentials. */
 export interface LocalCapture {
   readonly ownerLineage: string;
