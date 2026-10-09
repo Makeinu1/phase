@@ -70,15 +70,32 @@ def main():
                 raise ValueError('runtime content mismatch: ' + name)
         destination = source / 'client/src/wasm'
         destination.mkdir(parents=True, exist_ok=True)
-        for name in manifest['artifacts']:
-            if not name.endswith(('.js', '.wasm', '.ts')) or '..' in Path(name).parts:
+        installed_artifacts = {}
+        for name, value in manifest['artifacts'].items():
+            if (not name.endswith(('.js', '.wasm', '.d.ts'))
+                    or Path(name).is_absolute() or '..' in Path(name).parts):
                 raise ValueError('unexpected runtime path')
+            # Generated declarations are producer evidence, not executable
+            # runtime. Keep the consumer's tracked declarations unchanged.
+            if name.endswith('.d.ts'):
+                continue
             path = destination / name
+            relative = str(path.relative_to(source))
+            if git(source, 'ls-files', '--', relative):
+                raise ValueError('executable runtime would overwrite tracked source: ' + name)
+            if name.startswith('snippets/'):
+                exclude = Path(git(source, 'rev-parse', '--git-path', 'info/exclude'))
+                if not exclude.is_absolute():
+                    exclude = source / exclude
+                with exclude.open('a') as output:
+                    output.write('\n/client/src/wasm/snippets/\n')
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(evidence / 'runtime' / name, path)
+            installed_artifacts[name] = value
         if identity(source) != product:
             raise ValueError('consumer tracked source changed during runtime installation')
-        (evidence / 'consumer-install.json').write_text(json.dumps({'consumer': product, 'exit_code': 0}) + '\n')
+        (evidence / 'consumer-install.json').write_text(json.dumps({'consumer': product,
+            'installed_artifacts': installed_artifacts, 'exit_code': 0}) + '\n')
         return
 
     manifest_path = evidence / 'manifest.json'

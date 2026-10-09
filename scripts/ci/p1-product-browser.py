@@ -46,7 +46,11 @@ def main():
     installed = json.loads((root / 'consumer-install.json').read_text())
     if manifest['status'] != 'built' or identity(source) != manifest['consumer'] or installed['consumer'] != manifest['consumer']:
         raise ValueError('install the new candidate runtime first')
-    for name, item in manifest['artifacts'].items():
+    runtime_artifacts = {name: item for name, item in manifest['artifacts'].items()
+                         if name.endswith(('.js', '.wasm'))}
+    if installed.get('installed_artifacts') != runtime_artifacts:
+        raise ValueError('incomplete executable runtime installation')
+    for name, item in runtime_artifacts.items():
         if hashlib.sha256((source / 'client/src/wasm' / name).read_bytes()).hexdigest() != item['sha256']:
             raise ValueError('installed runtime mismatch')
     proof_path = root / 'browser-boot.json'

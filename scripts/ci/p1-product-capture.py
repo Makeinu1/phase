@@ -33,6 +33,10 @@ def main():
     installed = json.loads((root / 'consumer-install.json').read_text())
     if installed['consumer'] != manifest['consumer'] or installed['exit_code'] != 0:
         raise ValueError('consumer installation evidence missing')
+    runtime_artifacts = {name: item for name, item in manifest['artifacts'].items()
+                         if name.endswith(('.js', '.wasm'))}
+    if installed.get('installed_artifacts') != runtime_artifacts:
+        raise ValueError('incomplete executable runtime installation')
     boot_path = Path(os.environ['P1_BROWSER_BOOT'])
     boot = json.loads(boot_path.read_text())
     source = Path(os.environ['P1_CONSUMER_SOURCE']).resolve()
@@ -48,7 +52,7 @@ def main():
             return subprocess.check_output(['git', '-C', str(source), *argv], text=True).strip()
         if git('status', '--porcelain') or {'sha': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}')} != manifest['consumer']:
             raise ValueError('consumer source changed')
-        for name, item in manifest['artifacts'].items():
+        for name, item in runtime_artifacts.items():
             if hashlib.sha256((source / 'client/src/wasm' / name).read_bytes()).hexdigest() != item['sha256']:
                 raise ValueError('installed runtime changed')
     check_source()

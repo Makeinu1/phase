@@ -88,9 +88,8 @@ browser session after installation, navigates the application entrance, and invo
 that finite scenario. The session ID stays in the child environment, never in
 saved logs. A boot receipt binds source, manifest, Vite process and session hash;
 the original scenario log and exit are saved even on failure. This is a local
-consumer path; the workflow currently runs the producer only. Connect its
-consumer step after receiving the fixture contract, retaining the same explicit
-artifact allowlist already prepared there.
+consumer path. The workflow connects the bounded smoke described below; the
+full acceptance scenario still requires its fixture contract and reviewed runner.
 
 At each expected state, the scenario calls `p1-product-capture.py --evidence
 EVIDENCE --step NAME --state-script READ_ONLY_SCRIPT`. Allowed steps are
@@ -117,6 +116,13 @@ It generates the existing 145 native trusted fixtures through the focused
 runtime, installs frozen client dependencies, and obtains the exact matching
 Chrome for Testing / ChromeDriver 154.0.8037.92 from official vendor metadata.
 All expensive stages retain the unchanged source/resource/process guard.
+
+The installer verifies every generated artifact against the producer manifest,
+but copies only executable JS/WASM (including generated snippets) into the
+consumer. Generated `.d.ts` declarations stay in producer evidence, preserving
+the product's tracked declarations byte for byte. `consumer-install.json` records
+the exact executable subset; browser boot and each capture require that complete
+subset and its hashes. Source cleanliness and SHA/tree checks remain mandatory.
 
 `p1-ui-smoke.py` uses the existing product entrance
 `/game/p1-ci-smoke?mode=local&manual=1&p1Fixture=1c.K1`. It reads only public store
