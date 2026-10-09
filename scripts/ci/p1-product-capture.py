@@ -23,7 +23,7 @@ class EvidenceFailure(ValueError):
         super().__init__(reason)
 
 
-def validate_operations(report, consumer, execution, paidplay=False):
+def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False):
     """Require explicit operation completion; image receipts are observations."""
     def reject(reason):
         raise EvidenceFailure('operation-assertions', reason)
@@ -39,7 +39,7 @@ def validate_operations(report, consumer, execution, paidplay=False):
     stages = report.get('stages')
     if not isinstance(stages, dict):
         reject('required-operation-stages-missing')
-    for stage in ['initial', 'life19', 'finish'] + (['paidplay22'] if paidplay else []):
+    for stage in ['initial', 'life19', 'finish'] + (['paidplay22'] if paidplay else []) + (['checked-restore-k1', 'fixture-opponent-pass'] if restore_driver else []):
         item = stages.get(stage)
         if not isinstance(item, dict):
             reject('required-operation-stage-missing:' + stage)
@@ -54,6 +54,45 @@ def validate_operations(report, consumer, execution, paidplay=False):
                 or paid.get('resolvingEntryId', 'missing') is not None
                 or paid.get('nextCardId', 'missing') is not None or paid.get('nextInGraveyard') is not False):
             reject('paid-before-resolution-incomplete')
+    if restore_driver:
+        restore = report.get('checked_restore_k1')
+        checks = restore.get('contextChecks') if isinstance(restore, dict) else None
+        expected_checks = {'sameOwner', 'newSession', 'nextRestoreEpoch', 'nextAdapterGeneration'}
+        if (not paidplay or not isinstance(restore, dict) or restore.get('ok') is not True
+                or restore.get('method') != 'existing-live-export-and-authenticated-checked-restore'
+                or not isinstance(checks, dict) or set(checks) != expected_checks
+                or any(value is not True for value in checks.values())
+                or not isinstance(restore.get('checkpoint_sha256'), str)
+                or not re.fullmatch('[0-9a-f]{64}', restore['checkpoint_sha256'])):
+            reject('checked-restore-k1-incomplete')
+        before, after = restore.get('before'), restore.get('after')
+        preserved = ['life', 'manualPhase', 'sourceId', 'sourceName', 'stackCount', 'manualStackEntryId',
+                     'resolvingEntryId', 'waitingType', 'priorityPlayer', 'ownManaCount', 'nextCardId']
+        if (not isinstance(before, dict) or not isinstance(after, dict)
+                or before.get('life') != [20, 20] or before.get('manualPhase') != 'open'
+                or type(before.get('sourceId')) is not int or type(before.get('manualStackEntryId')) is not int
+                or before.get('resolvingEntryId') != before['manualStackEntryId']
+                or type(before.get('stackCount')) is not int or before['stackCount'] != 0
+                or type(before.get('ownManaCount')) is not int or before['ownManaCount'] != 1
+                or type(before.get('nextCardId')) is not int
+                or any(key not in before or key not in after or before[key] != after[key] for key in preserved)):
+            reject('checked-restore-k1-public-occurrence-mismatch')
+        driver = report.get('fixture_opponent_driver')
+        if (not isinstance(driver, dict) or driver.get('ok') is not True
+                or driver.get('mode') != 'explicit-local-fixture-opponent-driver'
+                or driver.get('action') != 'PassPriority' or type(driver.get('actor')) is not int or driver['actor'] != 1
+                or type(driver.get('commands')) is not int or driver['commands'] != 1
+                or driver.get('opponent_ui') is not False or driver.get('two_client') is not False):
+            reject('fixture-opponent-driver-incomplete')
+        pending = driver.get('before')
+        if (not isinstance(pending, dict) or pending.get('waitingType') != 'Priority'
+                or type(pending.get('priorityPlayer')) is not int or pending['priorityPlayer'] != 1
+                or type(pending.get('stackCount')) is not int or pending['stackCount'] != 1
+                or type(pending.get('ownManaCount')) is not int or pending['ownManaCount'] != 0
+                or pending.get('life') != [19, 20] or pending.get('manualPhase') == 'open'
+                or pending.get('resolvingEntryId', 'missing') is not None
+                or pending.get('nextCardId', 'missing') is not None or pending.get('nextInGraveyard') is not False):
+            reject('fixture-opponent-driver-boundary-mismatch')
 
 
 def valid_png(data):

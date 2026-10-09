@@ -297,6 +297,53 @@ def click(selector, using='css selector', double=False):
         raise
 
 
+def checked_restore_current_k1():
+    return call('/execute/async', {'script': """
+const done = arguments[arguments.length - 1];
+(async () => {
+  const {useGameStore} = await import('/src/stores/gameStore.ts');
+  const {adapter, gameMode} = useGameStore.getState();
+  const cap = adapter?.localContinuation?.();
+  if (gameMode !== 'local' || !cap || typeof adapter.exportPersistenceState !== 'function') throw new Error('Restore entrance unavailable');
+  const beforeState = window.__p1Observe();
+  if (beforeState.manualPhase !== 'open' || beforeState.life[0] !== 20 || beforeState.stackCount !== 0
+      || beforeState.resolvingEntryId !== beforeState.manualStackEntryId) throw new Error('Expected live K1');
+  const before = await cap.readCurrent();
+  const checkpoint = await adapter.exportPersistenceState();
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(checkpoint));
+  const restored = await cap.restore(checkpoint);
+  const a = before.current?.context, b = restored.current?.context;
+  const afterState = window.__p1Observe();
+  done({ok: true, method: 'existing-live-export-and-authenticated-checked-restore',
+    checkpoint_sha256: Array.from(new Uint8Array(digest), n => n.toString(16).padStart(2,'0')).join(''),
+    contextChecks: {sameOwner: !!a && !!b && a.ownerLineage === b.ownerLineage,
+      newSession: !!a && !!b && a.interactionSessionId !== b.interactionSessionId,
+      nextRestoreEpoch: !!a && !!b && b.restoreEpoch === a.restoreEpoch + 1,
+      nextAdapterGeneration: !!a && !!b && b.adapterGeneration === a.adapterGeneration + 1},
+    before: beforeState, after: afterState});
+})().catch(e => done({ok: false, error_type: e?.name ?? 'Error'}));
+""", 'args': []})
+
+
+def drive_fixture_opponent_pass_once():
+    # Explicit fixture participant driver, not an opponent UI click or shared client.
+    return call('/execute/async', {'script': """
+const done = arguments[arguments.length - 1];
+(async () => {
+  const {useGameStore} = await import('/src/stores/gameStore.ts');
+  const {dispatchAction} = await import('/src/game/dispatch.ts');
+  const before = window.__p1Observe();
+  if (useGameStore.getState().gameMode !== 'local' || before.waitingType !== 'Priority'
+      || before.priorityPlayer !== 1 || before.stackCount !== 1 || before.ownManaCount !== 0
+      || before.life[0] !== 19 || before.manualPhase === 'open' || before.resolvingEntryId !== null)
+    throw new Error('Unexpected opponent driver state');
+  await dispatchAction({type: 'PassPriority'}, 1);
+  done({ok: true, mode: 'explicit-local-fixture-opponent-driver', action: 'PassPriority', actor: 1,
+    before, after: window.__p1Observe(), commands: 1, opponent_ui: false, two_client: false});
+})().catch(e => done({ok: false, error_type: e?.name ?? 'Error'}));
+""", 'args': []})
+
+
 def capture(step):
     call('/execute/async', {'script': 'const done = arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));', 'args': []})
     subprocess.run(['python3', str(VALIDATION / 'scripts/ci/p1-product-capture.py'),
@@ -370,6 +417,15 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
     assert initial['sourceId'] is not None
     assert initial['stackCount'] == 0, 'K1 Begin already popped the sole ordinary stack entry'
     assert type(initial['manualStackEntryId']) is int and initial['resolvingEntryId'] == initial['manualStackEntryId']
+    stage = 'checked-restore-k1'
+    restore = checked_restore_current_k1()
+    report['checked_restore_k1'] = restore
+    assert restore.get('ok') is True and all(value is True for value in restore['contextChecks'].values())
+    initial = wait_for(lambda current: current == restore['after'])
+    for key in ['life', 'manualPhase', 'sourceId', 'sourceName', 'stackCount', 'manualStackEntryId', 'resolvingEntryId', 'waitingType', 'priorityPlayer', 'ownManaCount', 'nextCardId']:
+        assert restore['before'][key] == restore['after'][key], 'K1 restore changed a public occurrence field'
+    report['stages']['checked-restore-k1'] = {'status': 'passed', 'assertions_completed': True}
+    report['assertions'].append('Live engine persistence exported in memory and authenticated K1 checked restore preserved public occurrence/Begin state while renewing session, epoch and adapter generation; subsequent Apply/Finish use current real UI')
     panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
     element(panel, 'xpath')
     report['stages']['initial'] = {'status': 'passed', 'assertions_completed': True}
@@ -422,9 +478,24 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
     assert paid['life'][0] == 19 and paid['manualPhase'] != 'open' and paid['resolvingEntryId'] is None
     assert paid['nextCardId'] is None and paid['nextInGraveyard'] is False
     report['paid_before_resolution'] = paid
+    if paid['priorityPlayer'] == 0:
+        stage = 'paidplay-own-pass-before-driver'
+        resolve = resolve_control()
+        assert resolve is not None
+        before_own_pass = observe()
+        assert before_own_pass['priorityPlayer'] == 0 and before_own_pass['stackCount'] == 1
+        call('/element/' + resolve + '/click', {})
+        report['own_pass_before_driver'] = {'method': 'native-own-Resolve', 'before': before_own_pass}
+        wait_for(lambda current: current['waitingType'] == 'Priority' and current['priorityPlayer'] == 1
+                 and current['stackCount'] == 1 and current['ownManaCount'] == 0)
+    stage = 'fixture-opponent-pass'
+    driver = drive_fixture_opponent_pass_once()
+    report['fixture_opponent_driver'] = driver
+    assert driver.get('ok') is True and type(driver.get('commands')) is int and driver['commands'] == 1
+    report['stages']['fixture-opponent-pass'] = {'status': 'passed', 'assertions_completed': True}
     stage = 'paidplay-resolve'
-    # Two native priority passes are the finite fixture's normal resolution
-    # path. An automatic pass may finish it between clicks; never click again
+    # Explicit fixture opponent pass uses the ordinary command pipeline. Any
+    # remaining own pass still uses the actual UI; never click again
     # after the observed life change.
     for _ in range(2):
         resolve = resolve_control()

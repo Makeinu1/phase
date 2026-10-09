@@ -260,6 +260,52 @@ class FinishEvidenceTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(capture.EvidenceFailure):
                 capture.validate_operations(dict(report, paid_before_resolution=dict(paid, **change)), {}, {}, paidplay=True)
 
+    def test_bounded_restore_and_driver_require_complete_nonvacuous_receipts(self):
+        k1 = {'life': [20,20], 'manualPhase': 'open', 'sourceId': 1, 'sourceName': 'P1 Self Loss',
+              'stackCount': 0, 'manualStackEntryId': 1, 'resolvingEntryId': 1,
+              'waitingType': 'ManualResolution', 'priorityPlayer': None, 'ownManaCount': 1, 'nextCardId': 2}
+        paid = {'life': [19,20], 'manualPhase': 'closed', 'stackCount': 1, 'ownManaCount': 0,
+                'waitingType': 'Priority', 'priorityPlayer': 1, 'resolvingEntryId': None,
+                'nextCardId': None, 'nextInGraveyard': False}
+        report = {'status': 'passed', 'consumer': {}, 'consumer_execution': {}, 'secondary': [],
+                  'primary': {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'},
+                  'stages': {name: {'status': 'passed', 'assertions_completed': True} for name in
+                             ['initial','life19','finish','paidplay22','checked-restore-k1','fixture-opponent-pass']},
+                  'paid_before_resolution': paid,
+                  'checked_restore_k1': {'ok': True, 'method': 'existing-live-export-and-authenticated-checked-restore',
+                    'checkpoint_sha256': 'a'*64, 'contextChecks': {key: True for key in
+                        ['sameOwner','newSession','nextRestoreEpoch','nextAdapterGeneration']}, 'before': k1, 'after': k1},
+                  'fixture_opponent_driver': {'ok': True, 'mode': 'explicit-local-fixture-opponent-driver',
+                    'action': 'PassPriority', 'actor': 1, 'commands': 1, 'opponent_ui': False, 'two_client': False,
+                    'before': paid, 'after': {'life': [22,20]}}}
+        capture.validate_operations(report, {}, {}, paidplay=True, restore_driver=True)
+        changes = [(['checked_restore_k1'], None),
+                   (['stages','checked-restore-k1','status'], 'skipped'),
+                   (['stages','fixture-opponent-pass','assertions_completed'], False),
+                   (['checked_restore_k1','contextChecks'], {}),
+                   (['checked_restore_k1','contextChecks','newSession'], False),
+                   (['checked_restore_k1','contextChecks','extra'], True),
+                   (['checked_restore_k1','checkpoint_sha256'], 'invalid'),
+                   (['checked_restore_k1','after','sourceId'], 9),
+                   (['fixture_opponent_driver'], None),
+                   (['fixture_opponent_driver','actor'], 0),
+                   (['fixture_opponent_driver','actor'], True),
+                   (['fixture_opponent_driver','action'], 'BeginResolveAll'),
+                   (['fixture_opponent_driver','commands'], 2),
+                   (['fixture_opponent_driver','commands'], True),
+                   (['fixture_opponent_driver','opponent_ui'], True),
+                   (['fixture_opponent_driver','two_client'], True),
+                   (['fixture_opponent_driver','before','priorityPlayer'], 0),
+                   (['fixture_opponent_driver','before','ownManaCount'], 1),
+                   (['fixture_opponent_driver','before','resolvingEntryId'], 1)]
+        for keys, value in changes:
+            changed = json.loads(json.dumps(report))
+            target = changed
+            for key in keys[:-1]: target = target[key]
+            target[keys[-1]] = value
+            with self.subTest(keys=keys, value=value), self.assertRaises(capture.EvidenceFailure):
+                capture.validate_operations(changed, {}, {}, paidplay=True, restore_driver=True)
+
     def test_empty_stack_finishes_the_already_popped_occurrence(self):
         self.assertEqual(self.verify()['verified_count'], 3)
 

@@ -174,7 +174,8 @@ def main():
             report = json.loads((evidence / 'ui-smoke-report.json').read_text())
         except (OSError, ValueError):
             raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
-        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], paidplay=True)
+        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], paidplay=True, restore_driver=True)
+        proof['bounded_support'] = {'restore': 'live-K1-authenticated-checked-restore', 'opponent': 'explicit-fixture-driver', 'opponent_ui': False, 'two_client': False}
         proof['stages']['operations'] = 'passed'
         proof['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         proof['stage'] = 'required-images'

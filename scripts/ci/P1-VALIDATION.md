@@ -218,3 +218,20 @@ input stage; payment waits are unchanged. A DOM dblclick alone is not proof of
 React handler entry or engine dispatch. If the event is delivered but the
 public guards do not explain the non-transition, actual handler/dispatch
 observation is still required; no success is inferred from static source.
+
+### Bounded live K1 restore and explicit fixture opponent participant
+The next validation exports the current live K1 trusted persistence through
+`exportPersistenceState` and restores that same in-memory checkpoint through
+`localContinuation().restore`. No raw checkpoint/context is written to evidence.
+It requires preserved public source/carrier/Begin/wait/life and changed opaque
+session plus epoch/generation increments, then performs real Apply and Finish
+with current UI. This is live K1 checked restore evidence; old-generation
+rejection, K0/K2/K3, legacy input, and full S8 remain outside this bounded run.
+The existing local fixture has no opponent-seat UI. For one actual pending
+Priority1/stack1/mana0/life19 state only, a clearly recorded fixture opponent
+driver submits one ordinary `dispatchAction({type: 'PassPriority'}, 1)`. It uses
+the existing adapter/Worker/native/snapshot pipeline. It does not directly
+change state, invoke playCard, use Resolve All, emulate an ACK, or claim an
+opponent UI click or two-client/S9 acceptance. Any remaining own pass is a
+native UI click. The final four captures require genuine life22/graveyard/stack0
+and no manual carrier; driver assistance must remain visible in evidence.
