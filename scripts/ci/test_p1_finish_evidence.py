@@ -1,8 +1,10 @@
 """Offline Finish evidence regressions; synthetic bytes are not product UI PASS."""
 import ast
 import hashlib
+import html
 import importlib.util
 import json
+import re
 from pathlib import Path
 import struct
 import tempfile
@@ -16,6 +18,22 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_click_error_keeps_native_point_and_interceptor_without_raw_private_attributes(self):
+        module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'click_error_details')
+        namespace = {'re': re, 'html': html}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<safe-native-click-error>', 'exec'), namespace)
+        message = ('Element <div class="card" data-object-id="11"> is not clickable at point (866, 913). '
+                   'Other element would receive the click: <section id="guide" class="overlay" '
+                   'aria-label="Finish &amp; continue" data-private-capability="secret-token">')
+        details = namespace['click_error_details'](message)
+        self.assertEqual(details['native_click_point'], {'x': 866, 'y': 913})
+        self.assertEqual(details['interceptor_at_error'], {'tag': 'SECTION', 'id': 'guide',
+                         'class': 'overlay', 'aria-label': 'Finish & continue'})
+        self.assertEqual(details['target_at_error'], {'tag': 'DIV', 'class': 'card'})
+        self.assertNotIn('secret-token', json.dumps(details))
+        self.assertEqual(namespace['click_error_details']('unrelated private receipt body'), {})
+
     def test_native_hand_hover_waits_for_stable_hit_and_preserves_obstruction(self):
         module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
         function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'prepare_hand_click')

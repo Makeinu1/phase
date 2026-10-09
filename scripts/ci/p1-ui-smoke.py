@@ -4,9 +4,13 @@ This is a bounded independent smoke, not the unavailable migration scenario
 and not S1-S12 acceptance. Only public observations are written.
 """
 import datetime
+import base64
+import hashlib
+import html
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -25,6 +29,26 @@ report = {'scope': 'Local K1 UI continuation to paid play22; S1 life18/play21, r
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
                      for name in ['initial', 'life19', 'finish', 'paidplay22']}, 'secondary': [],
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+
+
+def click_error_details(message):
+    """Retain only native click point and public tag identity, never raw HTML."""
+    details = {}
+    point = re.search(r'at point \((-?\d+),\s*(-?\d+)\)', message)
+    if point:
+        details['native_click_point'] = {'x': int(point[1]), 'y': int(point[2])}
+    for key, prefix in [('target_at_error', 'Element '),
+                        ('interceptor_at_error', 'Other element would receive the click: ')]:
+        tag = re.search(re.escape(prefix) + r'<([A-Za-z][A-Za-z0-9-]*)([^>]{0,4096})>', message)
+        if not tag:
+            continue
+        identity = {'tag': tag[1].upper()}
+        for attr in ['id', 'class', 'aria-label', 'data-testid']:
+            value = re.search(r'(?:^|\s)' + re.escape(attr) + r'=([\"\x27])(.*?)\1', tag[2])
+            if value:
+                identity[attr] = html.unescape(value[2])[:400]
+        details[key] = identity
+    return details
 
 
 def call(path, data=None):
@@ -50,6 +74,9 @@ def call(path, data=None):
                 else 'unclassified-webdriver-error')
             report['webdriver_error'] = {'http_status': error.code,
                 'error': code if code in known else 'unrecognized-error', 'category': category}
+            if code == 'element click intercepted':
+                report['webdriver_error'].update(click_error_details(message))
+                report['webdriver_error']['received_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         except (ValueError, TypeError, AttributeError):
             report['webdriver_error'] = {'http_status': error.code, 'error': 'unreadable-response'}
         raise RuntimeError('WebDriver command failed; see safe ui-smoke-report') from None
@@ -84,7 +111,7 @@ def element(selector, using='css selector'):
     raise AssertionError('Required product control did not become visible and enabled')
 
 
-def hit_observation(selector):
+def hit_observation(selector, native_point=None):
     # Public geometry only; no scrolling, focus or application-state changes.
     return call('/execute/sync', {'script': '''
 const target = document.querySelector(arguments[0]);
@@ -93,14 +120,31 @@ const x = (Math.max(0, r.left) + Math.min(innerWidth, r.right)) / 2;
 const y = (Math.max(0, r.top) + Math.min(innerHeight, r.bottom)) / 2;
 const top = document.elementFromPoint(x, y);
 const describe = e => e ? {tag: e.tagName, id: e.id,
- className: typeof e.className === 'string' ? e.className : '',
+ className: typeof e.className === 'string' ? e.className.slice(0, 400) : '',
  ariaLabel: e.getAttribute('aria-label'), text: (e.innerText ?? '').slice(0, 300)} : null;
+const rectValue = v => ({left: v.left, top: v.top, right: v.right, bottom: v.bottom});
+const clientRects = Array.from(target.getClientRects()).slice(0, 10).map(rectValue);
+const first = clientRects[0];
+const expectedPoint = first ? {
+ x: Math.floor((Math.max(0, first.left) + Math.min(innerWidth, first.right)) / 2),
+ y: Math.floor((Math.max(0, first.top) + Math.min(innerHeight, first.bottom)) / 2)} : null;
+const point = arguments[1];
+const atNativePoint = point ? document.elementFromPoint(point.x, point.y) : null;
+const ancestors = [];
+for (let e = atNativePoint; e && ancestors.length < 8; e = e.parentElement) {
+ const d = describe(e); delete d.text; ancestors.push(d);
+}
 return {selector: arguments[0], viewport: {width: innerWidth, height: innerHeight},
+ sampledAt: new Date().toISOString(), browserTimeMs: performance.now(),
  scroll: {x: scrollX, y: scrollY},
- rect: {left: r.left, top: r.top, right: r.right, bottom: r.bottom},
+ rect: rectValue(r), clientRects, expectedWebDriverPoint: expectedPoint,
+ clippedViewport: {left: Math.max(0, r.left), top: Math.max(0, r.top),
+  right: Math.min(innerWidth, r.right), bottom: Math.min(innerHeight, r.bottom)},
  center: {x, y}, target: describe(target), top: describe(top),
+ nativePoint: point, nativePointTop: describe(atNativePoint), nativePointAncestors: ancestors,
+ nativePointHitsTarget: !!atNativePoint && (atNativePoint === target || target.contains(atNativePoint)),
  centerHitsTarget: !!top && (top === target || target.contains(top))};
-''', 'args': [selector]})
+''', 'args': [selector, native_point]})
 
 
 def prepare_hand_click(selector, identifier):
@@ -145,10 +189,28 @@ def click(selector):
     try:
         call('/element/' + identifier + '/click', {})
     except RuntimeError:
+        original_error = dict(report.get('webdriver_error', {}))
         try:
-            report['click_observation_after_failure'] = hit_observation(selector)
+            report['click_observation_after_failure'] = hit_observation(selector,
+                original_error.get('native_click_point'))
+            if original_error.get('error') == 'element click intercepted':
+                diagnostic = {'kind': 'immediate post-interception diagnostic; not acceptance',
+                              'requested_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+                pixels = base64.b64decode(call('/screenshot'), validate=True)
+                diagnostic['received_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                if not CHECKS.valid_png(pixels):
+                    raise ValueError('Invalid diagnostic PNG')
+                target = ROOT / 'screenshots/diagnostic-click-intercepted.png'
+                if target.exists():
+                    raise ValueError('Do not overwrite a click diagnostic')
+                target.write_bytes(pixels)
+                diagnostic['screenshot'] = {'path': 'screenshots/diagnostic-click-intercepted.png',
+                                          'sha256': hashlib.sha256(pixels).hexdigest()}
+                report['click_interception_diagnostic'] = diagnostic
         except Exception as error:
             report['click_observation_after_failure_error_type'] = type(error).__name__
+        finally:
+            report['webdriver_error'] = original_error
         raise
 
 
