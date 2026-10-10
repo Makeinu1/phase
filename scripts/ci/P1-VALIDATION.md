@@ -363,3 +363,31 @@ comparison; full1c is PARTIAL. Same qL1/qL2 redelivery, lookup before/after
 qL2 completion, qL2 pending/notApplied, oldbinding-newattempt atomicrefusal,
 and old19 result projection notoverwriting18 remain separate unproved gates.
 No read-only lookup is relabelled as redelivery or adapterhistoricalpublish.
+
+## Same-original terminal queries and atomic refusals on afe3
+
+A fresh manual-originals browser case reuses the actual prepayment1c UI journey
+and the same reviewed product/runtime. At actual life19, the first completed
+Apply1 original is registered, applied and looked up once each. At actual18,
+both completed Apply1 originals receive those same three queries. Each must
+return its historical result (19 or18), appliedResult null and one LoseLife
+EffectResolved, while the current UI, full native GameState and replay stay
+unchanged. These are native terminal queries; they do not publish an old reply
+through the adapter. No missing pending interval is inferred from transport.
+
+At19, two register-only refusals use fresh attempt IDs: actor1 with a valid
+current opportunity must fail admission, and actor0 with the first completed
+Apply's old submission binding must return raw notApplied with
+invalid_interaction_response. UI, native GameState, replay and publication
+counts must stay unchanged. The ledger is not claimed unchanged. The next
+real UI Apply1 must still succeed to18, followed by Finish and normal N21.
+Final native replay must contain exactly two ApplyManualLifeLoss actions and
+one FinishManualResolution. Seven strict PNG/state/index receipts remain
+required. The new native phases retain their own primary failure stages.
+
+This finite case does not accept full1c, qL2 precommit custody, historical
+adapter publication, refusal UI, or whole P1. Current source gaps are the
+adapter's register-pending reply going directly to apply without publication,
+and terminal client reconciliation returning its cached result before an
+adapter lookup. Those require independent product review and matching runtime
+before their acceptance gates can be closed.

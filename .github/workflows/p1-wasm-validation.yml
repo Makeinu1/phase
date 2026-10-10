@@ -137,6 +137,20 @@ jobs:
             ${{ runner.temp }}/p1-evidence/p1-browser-tools.json
             ${{ runner.temp }}/p1-evidence/p1-ui-smoke.json
             ${{ runner.temp }}/p1-evidence/controls/auto-s/manifest.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/manifest.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/consumer-install.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/browser-failure.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/product-scenario.log
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/step-index.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/p1-ui-smoke.control.log
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/p1-ui-smoke.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/p1-ui-smoke.jsonl
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/p1-ui-smoke.log
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/capture-failure-*.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/screenshots/*.png
+            ${{ runner.temp }}/p1-evidence/controls/manual-originals/states/*.json
             ${{ runner.temp }}/p1-evidence/controls/auto-s/consumer-install.json
             ${{ runner.temp }}/p1-evidence/controls/auto-s/browser-boot.json
             ${{ runner.temp }}/p1-evidence/controls/auto-s/browser-failure.json

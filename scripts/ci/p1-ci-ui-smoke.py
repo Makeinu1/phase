@@ -167,7 +167,10 @@ def main():
             str(Path(environment['RUNNER_TEMP']) / 'p1-browser-tools'), str(evidence / 'browser-tools.json')])
         browser_proof = json.loads((evidence / 'browser-tools.json').read_text())
         tools = {key: browser_proof[key]['path'] for key in ['P1_CHROME_BINARY', 'BOOTSTRAP_CHROMEDRIVER']}
-        for case in ['auto-s','auto-n']:
+        for case in ['manual-originals']:
+            manual = case == 'manual-originals'
+            if manual:
+                proof['scope'] = checks.NATIVE_ORIGINAL_SCOPE
             proof['case'] = case
             browser_evidence = evidence / 'controls' / case
             browser_evidence.mkdir(parents=True)
@@ -176,9 +179,10 @@ def main():
             proof['stage'] = 'product-browser'
             guarded('p1-ui-smoke', ['python3', str(VALIDATION / 'scripts/ci/p1-product-browser.py'),
                 '--source', str(source), '--evidence', str(browser_evidence),
-                '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture=1a.B',
+                '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture='+('1c.B' if manual else '1a.B'),
                 '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
-                dict({key: str(value) for key, value in tools.items()}, P1_UI_CASE=case))
+                dict({key: str(value) for key, value in tools.items()},
+                    P1_UI_CASE='prepayment1c' if manual else case, P1_NATIVE_CHECKS='1' if manual else '0'))
             # Each fresh case retains its own guarded attempt in its directory;
             # the unchanged guard still refuses a retry within that same case.
             proof['stages']['application'] = 'passed'
@@ -187,13 +191,18 @@ def main():
                 report = json.loads((browser_evidence / 'ui-smoke-report.json').read_text())
             except (OSError, ValueError):
                 raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
-            checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], control=case)
+            checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=manual, control=None if manual else case)
+            if manual:
+                checks.validate_native_original_checks(report, final=True)
             proof['cases'][case] = {'status':'operations-complete','operations':'passed','images':'not_run'}
             proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}
             proof['stage'] = 'required-images'
-            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], control=case)
+            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], s1_1c=manual, control=None if manual else case)
             proof['cases'][case] = {'status':'passed','images':images,'normal_ui':True,
-                'initial_fixture':'1a.B-fresh-before-designation-payment','opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False}
+                'initial_fixture':('1c.B' if manual else '1a.B')+'-fresh-before-designation-payment','opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False}
+            if manual:
+                proof['cases'][case].update(refusal_ui=False,refusal_boundary='real-Worker-register-only',
+                    qL2_precommit_custody=False,adapter_historical_publication=False,full_1c_accepted=False)
         proof['stages']['operations'] = 'passed'
         proof['stages']['images'] = 'passed'
         proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}

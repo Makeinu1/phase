@@ -27,6 +27,7 @@ spec.loader.exec_module(CHECKS)
 AUTO_CONTROL = os.environ.get('P1_UI_CASE') if os.environ.get('P1_UI_CASE') in {'auto-s','auto-n'} else None
 SPLIT_APPLY = os.environ.get('P1_UI_CASE') == 'prepayment1c'
 PREPAYMENT = SPLIT_APPLY or os.environ.get('P1_UI_CASE') == 'prepayment1a'
+NATIVE_CHECKS = SPLIT_APPLY and os.environ.get('P1_NATIVE_CHECKS') == '1'
 report = {'scope': CHECKS.AUTO_CONTROLS_SCOPE if AUTO_CONTROL else (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
           'control_case': AUTO_CONTROL, 'fixture': '1a.B' if AUTO_CONTROL else ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
@@ -489,8 +490,9 @@ const done = arguments[arguments.length-1];
 import('/src/stores/gameStore.ts').then(({useGameStore}) => {
  const cap = useGameStore.getState().adapter?.localContinuation?.();
  if (!cap) return done(false);
- const unique = new Map(), originals = []; let delivered = 0, publications = 0;
+ const unique = new Map(), originals = []; let delivered = 0, publications = 0, latest = null;
  const stop = cap.subscribe(p => {
+  latest = p;
   publications++;
   const r = p.receipt;
   if (r?.status !== 'completed') return;
@@ -506,8 +508,81 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
   if (p.appliedResult) delivered++;
  });
  window.__p1ReceiptSummary = () => ({completed: [...unique.values()], appliedResults: delivered});
- window.__p1StopReceipts = () => { stop(); originals.length = 0; unique.clear();
-  delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
+ window.__p1StopReceipts = () => { stop(); originals.length = 0; unique.clear(); latest = null;
+  delete window.__p1NativeChecks; delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
+ window.__p1NativeChecks = async phase => {
+  const [{unwrapClientGameState}, {sameLocalContinuationValue}] = await Promise.all([
+   import('/src/adapter/wasm-adapter.ts'), import('/src/adapter/types.ts')]);
+  const adapter = useGameStore.getState().adapter, engine = adapter?.getEngineClient();
+  const losses = originals.filter(r => r.attempt.submission.response.type==='manualResolution'
+   && r.attempt.submission.response.data.decision.type==='loseOwnLife'
+   && r.attempt.submission.response.data.decision.data.amount===1
+   && r.result?.events?.some(e=>e.type==='LifeChanged' && e.data.player_id===0));
+  const total = phase==='before-second' ? 19 : phase==='after-second' ? 18 : null;
+  if (!engine || total===null || losses.length !== (total===19 ? 1 : 2)) throw new Error('Native original phase unavailable');
+  const counts = () => ({publications,appliedResults:delivered,completed:unique.size});
+  const digest = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),n=>n.toString(16).padStart(2,'0')).join('');
+  const checkpoint = async () => {
+   const replay = await engine.exportReplayLog(), parsed = JSON.parse(replay);
+   if (!Array.isArray(parsed.actions)) throw new Error('Replay actions unavailable');
+   return {stateSha256:await digest(await adapter.exportPersistenceState()),replaySha256:await digest(replay),replayActions:parsed.actions.length};
+  };
+  const before = window.__p1Observe(), countsBefore = counts(), hashesBefore = await checkpoint();
+  if (before.life[0]!==total || before.manualPhase!=='open') throw new Error('Expected actual Manual current');
+  const queries = [];
+  for (const [index, original] of losses.entries()) for (const operation of ['register','apply','lookup']) {
+   const reply = await engine.submitLocalContinuation(0,{type:'localContinuation',operation,attempt:original.attempt});
+   const current = reply.current && unwrapClientGameState(reply.current.snapshot.state);
+   if (reply.receipt?.status!=='completed' || reply.appliedResult!==null || reply.receipt.rejection!==null
+    || !sameLocalContinuationValue(original.attempt,reply.receipt.attempt)
+    || !sameLocalContinuationValue(original.result,reply.receipt.result)
+    || current?.players?.[0]?.life!==total) throw new Error('Original resend changed certified result');
+   queries.push({subject:index===0?'qL1':'qL2',operation,status:reply.receipt.status,
+    sameOriginal:true,sameOriginalResult:true,appliedResultNull:true,rejectionNull:true,
+    historicalLife:original.result.events.filter(e=>e.type==='LifeChanged' && e.data.player_id===0).map(e=>({amount:e.data.amount,total:e.data.new_total})),
+    loseLifeEffects:original.result.events.filter(e=>e.type==='EffectResolved' && e.data.kind==='LoseLife' && e.data.source_id===original.attempt.source.sourceId).length,
+    currentLife:current.players.map(p=>p.life),sameSource:sameLocalContinuationValue(original.attempt.source,current.derived?.manual_resolution?.source)});
+  }
+  const afterResends = window.__p1Observe(), countsAfterResends = counts(), hashesAfterResends = await checkpoint();
+  if (!sameLocalContinuationValue(before,afterResends) || !sameLocalContinuationValue(countsBefore,countsAfterResends)
+   || !sameLocalContinuationValue(hashesBefore,hashesAfterResends)) throw new Error('Original resends changed resident/publication/replay');
+  const result = {phase,method:'same-actual-UI-original-native-register-apply-lookup',before,after:afterResends,
+   countsBefore,countsAfter:countsAfterResends,hashesBefore,hashesAfter:hashesAfterResends,
+   queries,adapterPublishedHistoricalReply:false,qL2PrecommitCustodyProven:false};
+  if (total===19) {
+   const first = losses[0], frame = latest?.current, state = frame && unwrapClientGameState(frame.snapshot.state);
+   const opportunity = frame?.snapshot.viewerInteraction?.opportunities.find(o=>o.response.type==='schema'
+    && o.response.data.spec.type==='manualResolution' && o.response.data.candidates.some(c=>c.surfaces.some(s=>s.type==='action' && s.data.code==='finishManualResolution')));
+   if (!opportunity || opportunity.interactionId===first.attempt.submission.interactionId
+    || state?.players?.[0]?.life!==19 || !sameLocalContinuationValue(first.attempt.source,state.derived?.manual_resolution?.source)) throw new Error('Fresh Manual source/frame unavailable');
+   const fresh = {context:frame.context,attemptId:crypto.randomUUID(),source:first.attempt.source,
+    submission:{interactionId:opportunity.interactionId,response:{type:'manualResolution',data:{decision:{type:'loseOwnLife',data:{amount:1}}}}}};
+   const old = {context:frame.context,attemptId:crypto.randomUUID(),source:first.attempt.source,submission:first.attempt.submission};
+   if (old.attemptId===fresh.attemptId || old.attemptId===first.attempt.attemptId) throw new Error('Distinct negative attempt required');
+   let actorRejected = false;
+   try { await engine.submitLocalContinuation(1,{type:'localContinuation',operation:'register',attempt:fresh}); }
+   catch (e) { if (e?.message!=='Authenticated Local continuation unavailable') throw new Error('Unexpected admission failure'); actorRejected=true; }
+   if (!actorRejected) throw new Error('Wrong actor admitted');
+   const actorAfter = window.__p1Observe(), actorCountsAfter = counts(), actorHashesAfter = await checkpoint();
+   if (!sameLocalContinuationValue(before,actorAfter) || !sameLocalContinuationValue(countsBefore,actorCountsAfter)
+    || !sameLocalContinuationValue(hashesBefore,actorHashesAfter)) throw new Error('Admission refusal changed state');
+   const refused = await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'register',attempt:old});
+   const current = refused.current && unwrapClientGameState(refused.current.snapshot.state);
+   if (refused.receipt?.status!=='notApplied' || refused.receipt.rejection?.code!=='invalid_interaction_response'
+    || refused.receipt.result!==null || refused.appliedResult!==null || !sameLocalContinuationValue(old,refused.receipt.attempt)
+    || !sameLocalContinuationValue(frame.context,refused.current?.context) || current?.players?.[0]?.life!==19) throw new Error('Old interaction not atomically refused');
+   const oldAfter = window.__p1Observe(), oldCountsAfter = counts(), oldHashesAfter = await checkpoint();
+   if (!sameLocalContinuationValue(before,oldAfter) || !sameLocalContinuationValue(countsBefore,oldCountsAfter)
+    || !sameLocalContinuationValue(hashesBefore,oldHashesAfter)) throw new Error('Old interaction refusal changed GameState/replay');
+   result.refusals={method:'real-Worker-register-only-admission-and-old-interaction',calls:2,actor:1,
+    admissionErrorMatched:true,admissionReceiptReturned:false,freshInteractionDifferentFromOld:true,
+    oldBindingNewAttempt:true,separateNegativeAttempts:true,currentContextMatched:true,sameOriginal:true,
+    rawOldStatus:refused.receipt.status,oldRejection:refused.receipt.rejection.code,resultNull:true,appliedResultNull:true,
+    actorAfter,actorCountsAfter,actorHashesAfter,oldAfter,oldCountsAfter,oldHashesAfter,
+    gameStateUnchanged:true,ledgerUnchangedClaim:false,refusalUi:false};
+  }
+  return result;
+ };
  window.__p1LookupFirst = async () => {
   const [{unwrapClientGameState}, {sameLocalContinuationValue}] = await Promise.all([
    import('/src/adapter/wasm-adapter.ts'), import('/src/adapter/types.ts')]);
@@ -605,6 +680,12 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
         passed(stage)
         stage = 'capture-life' + str(total)
         capture('life' + str(total))
+        if NATIVE_CHECKS:
+            stage = 'native-original-checks'
+            phase = 'before-second' if total == 19 else 'after-second'
+            checked = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1NativeChecks(arguments[0]).then(done,()=>done(null));", 'args': [phase]})
+            report.setdefault('native_original_checks', []).append(checked)
+            CHECKS.validate_native_original_checks(report, complete=total == 18)
     if SPLIT_APPLY:
         stage = 'historical-lookup'
         lookup = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1LookupFirst().then(done,()=>done(null));", 'args': []})
@@ -642,6 +723,24 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     assert ordinary['publicEvents']['sourceDepartures'] == 1 and ordinary['publicEvents']['manualTerminals'] == 1
     assert ordinary['publicEvents']['nextDepartures'] == 1
     report['ordinary_completed'] = ordinary
+    if NATIVE_CHECKS:
+        stage = 'native-final-replay'
+        replay = call('/execute/async', {'script': '''
+const done=arguments[arguments.length-1];
+(async()=>{
+ const {useGameStore}=await import('/src/stores/gameStore.ts');
+ const text=await useGameStore.getState().adapter.getEngineClient().exportReplayLog();
+ const parsed=JSON.parse(text), entry=arguments[0];
+ if (!Array.isArray(parsed.actions)) throw new Error('Replay actions unavailable');
+ const matching=parsed.actions.filter(a=>a.actor===0 && a.action?.data?.stack_entry_id===entry);
+ const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));
+ done({method:'real-Worker-read-only-replay',sha256:Array.from(new Uint8Array(digest),n=>n.toString(16).padStart(2,'0')).join(''),
+  actions:parsed.actions.length,manualLife:matching.filter(a=>a.action.type==='ApplyManualLifeLoss').length,
+  manualFinish:matching.filter(a=>a.action.type==='FinishManualResolution').length});
+})().catch(()=>done(null));
+''', 'args': [began['manualStackEntryId']]})
+        report['native_final_replay'] = replay
+        CHECKS.validate_native_original_checks(report, final=True)
     report['receipt_summary'] = call('/execute/sync', {'script': 'return window.__p1ReceiptSummary();', 'args': []})
     rs = report['receipt_summary']
     assert len(rs['completed']) == (4 if SPLIT_APPLY else 3) and rs['appliedResults'] == (4 if SPLIT_APPLY else 3)

@@ -7,6 +7,7 @@ import html
 import importlib.util
 import json
 import re
+import subprocess
 from pathlib import Path
 import struct
 import tempfile
@@ -20,6 +21,24 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_native_probe_uses_actual_nested_manual_schema(self):
+        source=Path(__file__).with_name('p1-ui-smoke.py').read_text()
+        expression=re.search(r'const opportunity = (.*?);',source,re.S).group(1)
+        fixture={'snapshot':{'viewerInteraction':{'opportunities':[
+            {'spec':{'type':'manualResolution'},'response':{'type':'schema','data':{'spec':{'type':'ordinary'},'candidates':[]}}},
+            {'response':{'type':'schema','data':{'spec':{'type':'manualResolution'},'candidates':[
+                {'surfaces':[{'type':'action','data':{'code':'finishManualResolution'}}]}]}}}]}}}
+        program='const frame='+json.dumps(fixture)+'; const selected=('+expression+');\n'
+        program+="require('node:assert/strict').strictEqual(selected,frame.snapshot.viewerInteraction.opportunities[1]);\n"
+        subprocess.run(['node','-e',program],check=True,capture_output=True)
+
+    def test_native_probe_failure_stage_survives_browser_report_validation(self):
+        spec=importlib.util.spec_from_file_location('native_browser_checks',Path(__file__).with_name('p1-product-browser.py'))
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        for stage in ['native-original-checks','native-final-replay']:
+            primary=dict(stage=stage,code=1,reason='operation-assertion-failed')
+            self.assertEqual(module.safe_primary(primary),primary)
+
     def test_case_guards_preserve_no_retry_rule_without_colliding_between_cases(self):
         module = ast.parse(Path(__file__).with_name('p1-ci-ui-smoke.py').read_text())
         main = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
@@ -450,6 +469,58 @@ class FinishEvidenceTests(unittest.TestCase):
             nativeAppliedResultNull=True,nativeRejectionNull=True,cacheOriginalBinding=True,nativeStatus='completed',cacheStatus='completed',
             historicalLifeChanges=[{'amount':-1,'total':19}],historicalTerminalCount=0,currentLife=[18,20],currentSourceId=7,currentEntryId=9,currentPhase='open',adapterPublishedHistoricalReply=False)
         return report
+
+    def native_original_report(self):
+        report=self.s1_1c_report(); groups=[]
+        for phase,total,count,key in [('before-second',19,2,'life_first'),('after-second',18,3,'life_applied')]:
+            counts=dict(publications=count,appliedResults=count,completed=count)
+            hashes=dict(stateSha256='a'*64,replaySha256='b'*64,replayActions=8+count)
+            queries=[dict(subject=subject,operation=operation,status='completed',currentLife=[total,20],
+                historicalLife=[{'amount':-1,'total':19 if subject=='qL1' else 18}],loseLifeEffects=1,
+                sameOriginal=True,sameOriginalResult=True,appliedResultNull=True,rejectionNull=True,sameSource=True)
+                for subject in (['qL1'] if total==19 else ['qL1','qL2']) for operation in ['register','apply','lookup']]
+            group=dict(phase=phase,method='same-actual-UI-original-native-register-apply-lookup',before=report[key],after=report[key],
+                countsBefore=counts,countsAfter=counts,hashesBefore=hashes,hashesAfter=hashes,queries=queries,
+                adapterPublishedHistoricalReply=False,qL2PrecommitCustodyProven=False)
+            if total==19:
+                group['refusals']=dict(method='real-Worker-register-only-admission-and-old-interaction',calls=2,actor=1,
+                    admissionErrorMatched=True,freshInteractionDifferentFromOld=True,oldBindingNewAttempt=True,separateNegativeAttempts=True,
+                    currentContextMatched=True,sameOriginal=True,resultNull=True,appliedResultNull=True,gameStateUnchanged=True,
+                    admissionReceiptReturned=False,ledgerUnchangedClaim=False,refusalUi=False,
+                    rawOldStatus='notApplied',oldRejection='invalid_interaction_response',
+                    actorAfter=report[key],actorCountsAfter=counts,actorHashesAfter=hashes,
+                    oldAfter=report[key],oldCountsAfter=counts,oldHashesAfter=hashes)
+            groups.append(group)
+        report['native_original_checks']=groups
+        report['native_final_replay']=dict(method='real-Worker-read-only-replay',sha256='c'*64,actions=18,manualLife=2,manualFinish=1)
+        return report
+
+    def test_native_originals_require_both_phases_distinct_resends_and_atomic_refusals(self):
+        report=self.native_original_report()
+        capture.validate_operations(report,{}, {},s1_1c=True)
+        capture.validate_native_original_checks(report,final=True)
+        partial=json.loads(json.dumps(report));partial['native_original_checks']=partial['native_original_checks'][:1]
+        capture.validate_native_original_checks(partial,complete=False)
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_native_original_checks(partial)
+        faults=[(['native_original_checks',0,'queries',1,'operation'],'lookup'),
+            (['native_original_checks',1,'queries',0,'currentLife'],[19,20]),
+            (['native_original_checks',1,'queries',3,'historicalLife'],[{'amount':-1,'total':19}]),
+            (['native_original_checks',0,'queries',0,'loseLifeEffects'],0),
+            (['native_original_checks',0,'hashesAfter','replaySha256'],'d'*64),
+            (['native_original_checks',0,'refusals','rawOldStatus'],'not-applied'),
+            (['native_original_checks',0,'refusals','oldRejection'],'stale_interaction'),
+            (['native_original_checks',0,'refusals','oldBindingNewAttempt'],False),
+            (['native_original_checks',0,'refusals','admissionReceiptReturned'],True),
+            (['native_original_checks',0,'refusals','oldCountsAfter','appliedResults'],3),
+            (['native_original_checks',0,'refusals','actorHashesAfter','stateSha256'],'d'*64),
+            (['native_original_checks',1,'adapterPublishedHistoricalReply'],True),
+            (['native_original_checks',0,'qL2PrecommitCustodyProven'],True),
+            (['native_final_replay','manualLife'],3),(['native_final_replay','manualFinish'],0)]
+        for path,value in faults:
+            changed=json.loads(json.dumps(report));node=changed
+            for key in path[:-1]:node=node[key]
+            node[path[-1]]=value
+            with self.subTest(path=path),self.assertRaises(capture.EvidenceFailure):capture.validate_native_original_checks(changed,final=True)
 
     def test_s1_1c_rejects_old_receipt_replay_and_ui_regression(self):
         report=self.s1_1c_report()

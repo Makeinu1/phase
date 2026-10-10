@@ -26,6 +26,7 @@ S1_1A_SCOPE = 'S1-1a and S12c prepayment Manual UI with explicit fixture opponen
 
 AUTO_CONTROLS_SCOPE = 'Fixed afe3 ordinary Auto S20-to18 and standalone N20-to23 real own UI with explicit fixture B pass; not Manual/negative/full P1 acceptance'
 S1_1C_SCOPE = 'S1-1c native original receipt lookup and client terminal cache reconciliation with latest UI18, prepayment Manual UI and paid play21; not adapter historical reply publication or full P1 acceptance'
+NATIVE_ORIGINAL_SCOPE = 'Fixed afe3 actual UI qL1/qL2 terminal native resends and register-only refusals with fresh UI continuation; not qL2 precommit custody, adapter historical publication, wrong-actor UI, or full P1 acceptance'
 
 
 class EvidenceFailure(ValueError):
@@ -265,6 +266,61 @@ def validate_historical_lookup(report):
     # During the live journey cleanup happens in finally; final aggregate requires it.
     if report.get('status') == 'passed':
         require(report.get('receipt_observer_stopped') is True, 'receipt-observer-not-stopped')
+
+def validate_native_original_checks(report, complete=True, final=False):
+    def require(value, reason):
+        if not value:
+            raise EvidenceFailure('operation-assertions', 'native-original-' + reason)
+    groups = report.get('native_original_checks')
+    require(isinstance(groups, list) and len(groups) == (2 if complete else 1), 'phase-count')
+    for index, group in enumerate(groups):
+        require(isinstance(group, dict), 'phase-missing')
+        phase, total, count = ('before-second',19,2) if index == 0 else ('after-second',18,3)
+        boundary = report.get('life_first' if index == 0 else 'life_applied')
+        require(isinstance(boundary,dict) and boundary.get('life') == [total,20]
+            and group.get('before') == boundary and group.get('after') == boundary, 'current-state-changed')
+        require(group.get('phase') == phase and group.get('method') == 'same-actual-UI-original-native-register-apply-lookup'
+            and group.get('adapterPublishedHistoricalReply') is False and group.get('qL2PrecommitCustodyProven') is False, 'scope')
+        expected_counts = dict(publications=count,appliedResults=count,completed=count)
+        require(group.get('countsBefore') == expected_counts and group.get('countsAfter') == expected_counts
+            and all(type(v) is int for v in group['countsBefore'].values()), 'delivery-counts')
+        hashes = group.get('hashesBefore')
+        require(isinstance(hashes,dict) and set(hashes)=={'stateSha256','replaySha256','replayActions'}
+            and all(isinstance(hashes[k],str) and re.fullmatch('[0-9a-f]{64}',hashes[k]) for k in ['stateSha256','replaySha256'])
+            and type(hashes['replayActions']) is int and hashes['replayActions'] > 0
+            and group.get('hashesAfter') == hashes, 'state-or-replay-changed')
+        queries = group.get('queries')
+        expected = [(subject,operation) for subject in (['qL1'] if index==0 else ['qL1','qL2'])
+                    for operation in ['register','apply','lookup']]
+        require(isinstance(queries,list) and len(queries)==len(expected), 'resend-count')
+        for query,(subject,operation) in zip(queries,expected):
+            require(isinstance(query,dict) and query.get('subject')==subject and query.get('operation')==operation
+                and query.get('status')=='completed' and query.get('currentLife')==[total,20]
+                and query.get('historicalLife')==[{'amount':-1,'total':19 if subject=='qL1' else 18}]
+                and type(query.get('loseLifeEffects')) is int and query['loseLifeEffects']==1, 'original-result')
+            require(all(query.get(k) is True for k in ['sameOriginal','sameOriginalResult','appliedResultNull','rejectionNull','sameSource']), 'original-binding')
+        if index==0:
+            refusal=group.get('refusals')
+            require(isinstance(refusal,dict) and refusal.get('method')=='real-Worker-register-only-admission-and-old-interaction'
+                and type(refusal.get('calls')) is int and refusal['calls']==2
+                and type(refusal.get('actor')) is int and refusal['actor']==1, 'refusal-method')
+            require(all(refusal.get(k) is True for k in ['admissionErrorMatched','freshInteractionDifferentFromOld','oldBindingNewAttempt',
+                'separateNegativeAttempts','currentContextMatched','sameOriginal','resultNull','appliedResultNull','gameStateUnchanged']), 'refusal-not-certified')
+            require(all(refusal.get(k) is False for k in ['admissionReceiptReturned','ledgerUnchangedClaim','refusalUi'])
+                and refusal.get('rawOldStatus')=='notApplied' and refusal.get('oldRejection')=='invalid_interaction_response', 'refusal-classification')
+            for prefix in ['actor','old']:
+                require(refusal.get(prefix+'After')==boundary and refusal.get(prefix+'CountsAfter')==expected_counts
+                    and refusal.get(prefix+'HashesAfter')==hashes, 'refusal-atomicity')
+        else:
+            require('refusals' not in group, 'unexpected-extra-refusal')
+    if final:
+        replay=report.get('native_final_replay')
+        require(isinstance(replay,dict) and replay.get('method')=='real-Worker-read-only-replay'
+            and isinstance(replay.get('sha256'),str) and re.fullmatch('[0-9a-f]{64}',replay['sha256'])
+            and type(replay.get('actions')) is int and replay['actions']>0
+            and type(replay.get('manualLife')) is int and replay['manualLife']==2
+            and type(replay.get('manualFinish')) is int and replay['manualFinish']==1, 'final-manual-replay-counts')
+
 
 def valid_png(data):
     """Check saved PNG chunks/CRC and compressed pixels with the stdlib."""
