@@ -29,6 +29,7 @@ AUTO_CONTROLS_SCOPE = 'Fixed afe3 ordinary Auto S20-to18 and standalone N20-to23
 S1_1C_SCOPE = 'S1-1c native original receipt lookup and client terminal cache reconciliation with latest UI18, prepayment Manual UI and paid play21; not adapter historical reply publication or full P1 acceptance'
 RECORDED_1C_SCOPE = 'Matching candidate ordinary recorded start Manual20-to19-to18 Finish paid21 with actual original native resends registered-pending custody old-binding refusal and adapter historical publication; not full P1 or engine-in-flight acceptance'
 NATIVE_ORIGINAL_SCOPE = 'Fixed afe3 actual UI qL1/qL2 terminal native resends and register-only refusals with fresh UI continuation; not qL2 precommit custody, adapter historical publication, wrong-actor UI, or full P1 acceptance'
+MANUAL_SOURCE_TEXT_SCOPE = 'Matching runtime existing checked-native 1c.B ordinary Manual designation payment Begin20 with nonempty source text wide/narrow; source layout only, not recorded ordinary start, Apply, Finish, receipts or full P1 acceptance'
 
 
 class EvidenceFailure(ValueError):
@@ -62,10 +63,35 @@ def validate_manual_visual_observation(value, require_visible=False):
     require(inside(card) and inside(details), 'source-content-outside-source')
     require(disjoint(card, details) and disjoint(source, form), 'source-form-overlap')
     lines = value.get('lines')
-    require(isinstance(lines, list) and len(lines) >= 2, 'source-text-lines-unavailable')
+    blocks = value.get('textBlocks')
+    require(isinstance(blocks, list) and [block.get('kind') for block in blocks
+            if isinstance(block, dict)] == ['title','oracle'], 'source-text-blocks-unavailable')
+    for block in blocks:
+        length = block.get('textLength')
+        block_lines = block.get('lines')
+        require(block.get('present') is True and type(length) is int and length >= 0
+                and isinstance(block_lines, list), 'source-text-block-unavailable:' + block['kind'])
+        require((length > 0 and len(block_lines) > 0) or
+                (block['kind'] == 'oracle' and length == 0 and len(block_lines) == 0),
+                'source-text-lines-unavailable:' + block['kind'])
+    require(isinstance(lines, list) and lines == [line for block in blocks for line in block['lines']],
+            'source-text-lines-unavailable')
+    canonical=value.get('canonicalSourceText')
+    require(isinstance(canonical,dict) and isinstance(canonical.get('source_name'),str)
+            and canonical['source_name'] and isinstance(canonical.get('card_data_sha256'),str)
+            and re.fullmatch(r'[0-9a-f]{64}',canonical['card_data_sha256'])
+            and canonical.get('oracle_text_kind') in {'null','empty','nonempty'}
+            and type(canonical.get('oracle_text_length')) is int and canonical['oracle_text_length'] >= 0
+            and (canonical['oracle_text_length'] > 0) == (canonical['oracle_text_kind'] == 'nonempty'),
+            'source-canonical-text-unavailable')
+    require(value.get('titleMatchesFixture') is True
+            and blocks[1]['textLength'] == canonical['oracle_text_length'], 'source-text-does-not-match-fixture')
+    require(value.get('oracleTextCoverage') == ('observed' if blocks[1]['textLength'] > 0
+            else 'not-present-in-fixture'), 'source-oracle-coverage-unavailable')
     for line in lines:
         require(isinstance(line, dict) and all(type(line.get(k)) in {int, float} for k in
-                ['left', 'right', 'top', 'bottom']) and inside(line) and disjoint(line, form),
+                ['left', 'right', 'top', 'bottom']) and line['right'] > line['left']
+                and line['bottom'] > line['top'] and inside(line) and disjoint(line, form),
                 'source-text-outside-or-overlapping')
     if require_visible:
         visible=value.get('visible')
@@ -81,18 +107,83 @@ def validate_manual_visual_observation(value, require_visible=False):
                 'source-horizontal-overflow:' + prefix)
 
 
-def validate_manual_visual(report):
+def validate_manual_visual(report, source_text=None, source_only=False):
     observations = report.get('manual_visual')
     required = {'same-source', 'life19', 'life18', 'historical-lookup', 'registered-pending', 'manual-source-narrow'}
+    if source_only: required={'same-source','manual-source-narrow'}
     if (not isinstance(observations, dict) or set(observations) != required
             or report.get('viewport_restored') is not True):
         raise EvidenceFailure('manual-visual', 'required-visual-observations-missing')
     for key,value in observations.items():
         validate_manual_visual_observation(value, require_visible=key=='manual-source-narrow')
+        if source_text is not None and value['canonicalSourceText'] != source_text:
+            raise EvidenceFailure('manual-visual','source-canonical-proof-mismatch')
     wide = observations['same-source'].get('viewport', {}).get('width')
     narrow = observations['manual-source-narrow'].get('viewport', {}).get('width')
     if type(wide) is not int or wide < 1400 or type(narrow) is not int or not 360 <= narrow <= 500:
         raise EvidenceFailure('manual-visual', 'wide-and-narrow-viewports-not-observed')
+
+
+def validate_source_text_positive(report, consumer, execution, source_text):
+    def require(value,reason):
+        if not value: raise EvidenceFailure('manual-visual',reason)
+    require(report.get('scope')==MANUAL_SOURCE_TEXT_SCOPE and report.get('fixture')=='1c.B'
+            and report.get('source_text_only') is True and report.get('status')=='passed'
+            and report.get('consumer')==consumer and report.get('consumer_execution')==execution
+            and report.get('primary')=={'stage':'operations-complete','code':0,'reason':'completed'}
+            and report.get('secondary')==[], 'source-text-positive-provenance')
+    require(source_text.get('oracle_text_kind')=='nonempty' and source_text.get('oracle_text_length',0)>0,
+            'source-text-positive-requires-nonempty-oracle')
+    for stage in ['prepayment','manual-options','manual-cast','initial']:
+        require(report.get('stages',{}).get(stage)=={'status':'passed','assertions_completed':True},
+                'source-text-positive-stage:'+stage)
+    pre,paid,began=(report.get(key,{}) for key in ['prepayment','manual_paid_before_begin','begin'])
+    source=pre.get('sourceCardId')
+    require(type(source) is int and pre.get('sourceInHand') is True and pre.get('waitingType')=='Priority'
+            and pre.get('priorityPlayer')==0 and pre.get('stackCount')==0 and pre.get('manualPhase') is None,
+            'source-text-positive-prepayment')
+    for state,mana in [(pre,2),(paid,1),(began,1)]:
+        require(state.get('life')==[20,20] and state.get('ownManaCount')==mana,'source-text-positive-life-mana')
+    require(paid.get('sourceId')==source and paid.get('manualPhase')=='armed'
+            and paid.get('stackCount')==1 and paid.get('resolvingEntryId') is None,'source-text-positive-payment')
+    require(began.get('sourceId')==source and began.get('manualPhase')=='open' and began.get('stackCount')==0
+            and type(began.get('manualStackEntryId')) is int
+            and began.get('resolvingEntryId')==began['manualStackEntryId'],'source-text-positive-carrier')
+    events=began.get('publicEvents',{})
+    require(events.get('lifeChanges')==[] and events.get('sourceDepartures')==0 and events.get('manualTerminals')==0,
+            'source-text-positive-no-body-commit')
+    require(report.get('prepayment_full_control') is True and report.get('prepayment_scope_visible') is True,
+            'source-text-positive-manual-intent')
+    commands=report.get('click_commands',[])
+    expected={
+        'prepayment-full-control':'[data-mobile-action-right] button[aria-label="Full Control Off"][aria-pressed="false"]',
+        'manual-card-select':'[data-hand-card][data-object-id="'+str(source)+'"]',
+        'manual-options':'//button[normalize-space()="Resolution options for P1 Self Loss"]',
+        'manual-response':'//button[normalize-space()="Resolve"]'}
+    for stage,locator in expected.items():
+        matches=[command for command in commands if command.get('operation')==stage]
+        require(len(matches)==1 and matches[0].get('locator')==locator
+                and matches[0].get('kind')=='native-element-click' and matches[0].get('status')=='completed',
+                'source-text-positive-native:'+stage)
+    cast=[command for command in commands if command.get('operation')=='manual-cast']
+    require([command.get('locator') for command in cast] in
+            [['//button[normalize-space()="Cast with manual resolution"]'],
+             ['//button[normalize-space()="Cast with manual resolution"]','//button[normalize-space()="Pay"]']]
+            and all(command.get('kind')=='native-element-click' and command.get('status')=='completed' for command in cast)
+            and len(commands)==len(expected)+len(cast),'source-text-positive-native:manual-cast')
+    drivers=report.get('fixture_opponent_drivers',[])
+    require(len(drivers)==1,'source-text-positive-driver-count')
+    driver=drivers[0];before=driver.get('before',{});after=driver.get('after',{})
+    require(driver.get('ok') is True and driver.get('actor')==1 and driver.get('action')=='PassPriority'
+            and driver.get('mode')=='explicit-local-fixture-opponent-driver' and driver.get('commands')==1
+            and before.get('waitingType')=='Priority' and before.get('priorityPlayer')==1
+            and all(before.get(key)==paid.get(key) for key in
+                    ['life','ownManaCount','sourceId','manualPhase','stackCount','resolvingEntryId'])
+            and all(after.get(key)==began.get(key) for key in
+                    ['life','ownManaCount','sourceId','manualPhase','stackCount','manualStackEntryId','resolvingEntryId']),
+            'source-text-positive-driver-boundary')
+    require(report.get('receipt_observer_stopped') is True,'source-text-positive-observer-cleanup')
+    validate_manual_visual(report,source_text=source_text,source_only=True)
 
 
 def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False, s1_1a=False, s1_1c=False, control=None, recorded_1c=False):
@@ -617,7 +708,7 @@ def validate_recorded_prep(report, journey=False):
         if operation=='recorded-land-play':require(matches[0].get('native_double_click_verified') is True,'unverified-land-double-click')
 
 
-def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False, s1_1c=False, control=None, recorded_prep=False, recorded_1c=False, manual_visual=False):
+def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False, s1_1c=False, control=None, recorded_prep=False, recorded_1c=False, manual_visual=False, source_text_only=False):
     """Recheck the three existing capture receipts and saved public bytes."""
     def reject(reason):
         raise EvidenceFailure('required-images', reason)
@@ -631,6 +722,7 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
     required = ['recorded-initial','recorded-main','recorded-ready'] if recorded_prep else ['control-initial','control-completed'] if control else ['prepayment','same-source','life18','finish','paidplay21'] + (['life19','historical-lookup'] if s1_1c else []) if s1_1a or s1_1c else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
     if recorded_1c: required=['recorded-initial','recorded-main','recorded-ready','registered-pending']+required
     if manual_visual: required += ['manual-source-narrow']
+    if source_text_only: required=['prepayment','same-source','manual-source-narrow']
     for step in required:
         matches = [item for item in steps if item.get('step') == step]
         if len(matches) != 1:
@@ -685,6 +777,12 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
         validate_recorded_prep(report)
         for step,key in [('recorded-initial','recorded_initial'),('recorded-main','recorded_main'),('recorded-ready','recorded_ready')]:
             if observations[step]!=report.get(key): reject('required-recorded-state-content-mismatch:'+step)
+        return {'required_steps':required,'verified_count':len(required)}
+    if source_text_only:
+        report=json.loads((root/'ui-smoke-report.json').read_text())
+        validate_source_text_positive(report,manifest['consumer'],execution,report.get('canonical_source_text',{}))
+        for step,key in [('prepayment','prepayment'),('same-source','begin'),('manual-source-narrow','begin')]:
+            if observations[step]!=report.get(key):reject('required-source-text-state-mismatch:'+step)
         return {'required_steps':required,'verified_count':len(required)}
     if control:
         report=json.loads((root/'ui-smoke-report.json').read_text())

@@ -26,12 +26,14 @@ spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
 RECORDED_1C = os.environ.get('P1_UI_CASE') == 'recorded-1c'
-MANUAL_VISUAL = RECORDED_1C and os.environ.get('P1_MANUAL_VISUAL') == '1'
+SOURCE_TEXT_POSITIVE = os.environ.get('P1_UI_CASE') == 'manual-source-text'
+MANUAL_VISUAL = (RECORDED_1C or SOURCE_TEXT_POSITIVE) and os.environ.get('P1_MANUAL_VISUAL') == '1'
+CANONICAL_MANUAL_SOURCE_TEXT = json.loads(os.environ['P1_MANUAL_SOURCE_TEXT']) if MANUAL_VISUAL else None
 RECORDED_PREP = os.environ.get('P1_UI_CASE') == 'recorded-prep'
 RECORDED_INPUTS = RECORDED_PREP or RECORDED_1C
 AUTO_CONTROL = os.environ.get('P1_UI_CASE') if os.environ.get('P1_UI_CASE') in {'auto-s','auto-n','auto-v'} else None
 SPLIT_APPLY = RECORDED_1C or os.environ.get('P1_UI_CASE') == 'prepayment1c'
-PREPAYMENT = SPLIT_APPLY or os.environ.get('P1_UI_CASE') == 'prepayment1a'
+PREPAYMENT = SOURCE_TEXT_POSITIVE or SPLIT_APPLY or os.environ.get('P1_UI_CASE') == 'prepayment1a'
 NATIVE_CHECKS = SPLIT_APPLY and os.environ.get('P1_NATIVE_CHECKS') == '1'
 report = {'scope': CHECKS.RECORDED_1C_SCOPE if RECORDED_1C else 'recorded-start-preparation-only' if RECORDED_PREP else (CHECKS.AUTO_V_SCOPE if AUTO_CONTROL=='auto-v' else CHECKS.AUTO_CONTROLS_SCOPE) if AUTO_CONTROL else (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
           'control_case': AUTO_CONTROL, 'fixture': '1c.recorded.B' if RECORDED_INPUTS else ('11c.V.B' if AUTO_CONTROL=='auto-v' else '1a.B') if AUTO_CONTROL else ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
@@ -39,6 +41,11 @@ report = {'scope': CHECKS.RECORDED_1C_SCOPE if RECORDED_1C else 'recorded-start-
                      for name in (['recorded-initial','recorded-main','recorded-ready'] if RECORDED_PREP else ['control-initial','control-full-control','control-paid','control-response','control-completed'] if AUTO_CONTROL else ['prepayment', 'manual-options', 'manual-cast', 'initial'] + (['life19', 'life18', 'historical-lookup'] if SPLIT_APPLY else ['life18']) + ['finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
           'recorded_1c': RECORDED_1C,
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+if SOURCE_TEXT_POSITIVE:
+    report.update(scope=CHECKS.MANUAL_SOURCE_TEXT_SCOPE,fixture='1c.B',source_text_only=True,
+        canonical_source_text=CANONICAL_MANUAL_SOURCE_TEXT,
+        stages={name:{'status':'not_run','assertions_completed':False}
+                for name in ['prepayment','manual-options','manual-cast','initial']})
 
 
 def click_error_details(message):
@@ -412,15 +419,21 @@ const panel = [...document.querySelectorAll('section[aria-labelledby]')]
  .find(e => e.querySelector('h2')?.textContent === 'Manual resolution');
 const source = panel?.querySelector('aside');
 const preview = source?.querySelector('.shrink-0');
-const details = source?.querySelector('h4')?.parentElement;
+const title = [...source?.querySelectorAll('h4') ?? []].find(e => !preview?.contains(e));
+const details = title?.parentElement;
 const form = panel?.querySelector('form');
 if (!source || !preview || !details || !form) return null;
 const rect = e => { const r=e.getBoundingClientRect();
  return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}; };
-const lines = [...details.querySelectorAll('h4,p')].flatMap(e => {
+const textBlocks = ['title','oracle'].map(kind => {
+ const e=kind==='title' ? title : details.querySelector(':scope > p');
+ if(!e) return {kind,present:false,textLength:0,lines:[]};
+ const text=e.textContent.trim();
  const range=document.createRange();range.selectNodeContents(e);
- return [...range.getClientRects()].filter(r=>r.width>0).map(r=>({left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}));
+ const lines=[...range.getClientRects()].filter(r=>r.width>0 && r.height>0).map(r=>({left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}));
+ return {kind,present:true,textLength:text.length,lines};
 });
+const lines=textBlocks.flatMap(block=>block.lines);
 const visible={left:0,top:0,right:innerWidth,bottom:innerHeight};
 for(let ancestor=source.parentElement;ancestor;ancestor=ancestor.parentElement) {
  const style=getComputedStyle(ancestor),r=ancestor.getBoundingClientRect();
@@ -437,14 +450,20 @@ const img=preview.querySelector('img'),fallback=preview.querySelector('[role="im
 const cardContentKind=img?.complete && img.naturalWidth>0 ? 'loaded-image'
  : fallback?.textContent.trim() ? 'artless-fallback' : 'unavailable';
 return {viewport:{width:innerWidth,height:innerHeight},source:rect(source),card:rect(preview),
- details:rect(details),form:rect(form),lines,visible,
+ details:rect(details),form:rect(form),lines,textBlocks,visible,
+ canonicalSourceText:arguments[0],titleMatchesFixture:title.textContent.trim()===arguments[0].source_name,
+ oracleTextCoverage:arguments[0].oracle_text_length>0 ? 'observed' : 'not-present-in-fixture',
  sourceClientWidth:source.clientWidth,sourceScrollWidth:source.scrollWidth,
  panelClientWidth:panel.parentElement.clientWidth,panelScrollWidth:panel.parentElement.scrollWidth,
  cardContentPresent:cardContentKind!=='unavailable',cardContentKind,
  diagnostic:window.__p1Observe().stuckDiagnostic,
  warningVisible:!!document.querySelector('[data-stuck-decision-kind]'),
  warningSuppressed:sessionStorage.getItem('phase-rs:suppress-stuck-decision-toast') !== null};
-''', 'args': []})
+''', 'args': [CANONICAL_MANUAL_SOURCE_TEXT]})
+    # Keep the actual observation even if its validation fails. Text itself is
+    # not copied; block kind, nonempty length and actual Range rectangles suffice.
+    report.setdefault('manual_visual_observation_attempts', []).append(
+        {'stage': stage, 'require_visible': require_visible, 'observation': value})
     CHECKS.validate_manual_visual_observation(value, require_visible=require_visible)
     return value
 
@@ -656,7 +675,7 @@ def run_auto_control():
     report['status']='passed'
 
 
-def run_s1_1a():
+def run_s1_1a(source_text_only=False):
     global stage
     def passed(name):
         report['stages'][name] = {'status': 'passed', 'assertions_completed': True}
@@ -921,6 +940,10 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     capture('same-source')
     if MANUAL_VISUAL:
         capture_narrow_source()
+    if source_text_only:
+        report['primary']={'stage':'operations-complete','code':0,'reason':'completed'}
+        report['status']='passed'
+        return
     panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
     stage = 'player-area-select'
     label = call('/execute/sync', {'script': "return document.querySelector('[data-testid=\"player-area-0\"] > button[aria-pressed]')?.textContent;", 'args': []})
@@ -1130,7 +1153,7 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
     elif AUTO_CONTROL:
         run_auto_control()
     elif PREPAYMENT:
-        run_s1_1a()
+        run_s1_1a(source_text_only=SOURCE_TEXT_POSITIVE)
     else:
         stage = 'initial'
         initial = wait_for(lambda s: s['manualPhase'] == 'open' and s['life'][:1] == [20])
@@ -1252,7 +1275,8 @@ except Exception as error:
               else 'operation-assertion-failed' if isinstance(error, AssertionError)
               else 'scenario-command-failed')
     report['primary'] = {'stage': stage, 'code': 1, 'reason': reason}
-    if stage in {'capture-recorded-ready', 'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'capture-paidplay22'} and all(item['assertions_completed'] is True for item in report['stages'].values()):
+    if (stage in {'capture-recorded-ready', 'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'capture-paidplay22'}
+            or (SOURCE_TEXT_POSITIVE and stage=='capture-manual-source-narrow')) and all(item['assertions_completed'] is True for item in report['stages'].values()):
         report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         report['secondary'].append({'stage': stage, 'code': 1, 'reason': 'required-capture-failed'})
         report['status'] = 'incomplete'

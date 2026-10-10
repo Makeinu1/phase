@@ -234,7 +234,7 @@ def main():
                 if not saved:
                     proof['secondary'].append({'stage': 'scenario-report', 'code': 1, 'reason': 'required-report-save-failed'})
                 for item in report.get('secondary', []):
-                    if (isinstance(item, dict) and item.get('stage') in {'viewport-restore','capture-recorded-ready', 'capture-control-completed', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'}
+                    if (isinstance(item, dict) and item.get('stage') in {'capture-manual-source-narrow','viewport-restore','capture-recorded-ready', 'capture-control-completed', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'}
                             and item.get('reason') in {'viewport-restore-failed','required-capture-failed', 'receipt-observer-cleanup-failed', 'pending-hold-release-failed', 'required-report-save-failed'}):
                         proof['secondary'].append({'stage': item['stage'], 'code': 1, 'reason': item['reason']})
             except (OSError, ValueError, KeyError, TypeError):

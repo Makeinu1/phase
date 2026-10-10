@@ -21,7 +21,7 @@ permissions:
 # Change these two literals only after receiving the reviewed product SHA.
 env:
   P1_PUSH_CANDIDATE_SHA: 407989dad140e2fe08d4924529194273605737e7
-  P1_PUSH_MODE: build
+  P1_PUSH_MODE: reuse
 
 jobs:
   candidate-runtime:
@@ -99,6 +99,23 @@ jobs:
             ${{ runner.temp }}/p1-evidence/p1-manual-visual-feature-off.json
             ${{ runner.temp }}/p1-evidence/p1-manual-visual-feature-off.jsonl
             ${{ runner.temp }}/p1-evidence/p1-manual-visual-feature-off.control.log
+            ${{ runner.temp }}/p1-evidence/p1-manual-source-text-fixtures.json
+            ${{ runner.temp }}/p1-evidence/p1-manual-source-text-fixtures.jsonl
+            ${{ runner.temp }}/p1-evidence/p1-manual-source-text-fixtures.control.log
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/manifest.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/consumer-install.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/browser-failure.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/product-scenario.log
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/step-index.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/p1-ui-smoke.control.log
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/p1-ui-smoke.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/p1-ui-smoke.jsonl
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/p1-ui-smoke.log
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/capture-failure-*.json
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/screenshots/*.png
+            ${{ runner.temp }}/p1-evidence/controls/manual-source-text/states/*.json
             ${{ runner.temp }}/p1-evidence/manifest.json
             ${{ runner.temp }}/p1-evidence/p1-source-preflight.json
             ${{ runner.temp }}/p1-evidence/p1-source-preflight.log

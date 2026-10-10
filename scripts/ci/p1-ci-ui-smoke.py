@@ -120,7 +120,7 @@ def main():
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'viewport-restore','process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'capture-manual-source-narrow','viewport-restore','process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True
@@ -185,6 +185,15 @@ def main():
             fixture_names = ['card-data.json','trusted-game-states.json']
         proof['fixtures'] = {name: hashlib.sha256((fixtures / name).read_bytes()).hexdigest()
             for name in fixture_names}
+        if recorded_1c and os.environ.get('P1_MANUAL_VISUAL') == '1':
+            face=cards['replay self loss'];oracle=face.get('oracle_text')
+            if face.get('name') != 'Replay Self Loss' or (oracle is not None and not isinstance(oracle,str)):
+                raise ValueError('reviewed source text metadata required')
+            oracle_length=len((oracle or '').strip().encode('utf-16-le'))//2
+            proof['manual_source_text']={'source_name':face['name'],
+                'card_data_sha256':proof['fixtures']['recorded-card-data.json'],
+                'oracle_text_kind':'null' if oracle is None else 'nonempty' if oracle_length else 'empty',
+                'oracle_text_length':oracle_length}
         # Only ignored generated fixture bytes enter the immutable consumer.
         # A checkout-local exclude keeps the product's tracked tree unchanged.
         exclude = Path(subprocess.check_output(['git', 'rev-parse', '--git-path', 'info/exclude'],
@@ -227,7 +236,8 @@ def main():
                 '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture='+('1c.recorded.B' if recorded else '1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B'),
                 '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
                 dict({key: str(value) for key, value in tools.items()},
-                    P1_UI_CASE=case if recorded else 'prepayment1c' if manual else case, P1_NATIVE_CHECKS='1' if manual else '0'))
+                    P1_UI_CASE=case if recorded else 'prepayment1c' if manual else case, P1_NATIVE_CHECKS='1' if manual else '0',
+                    P1_MANUAL_SOURCE_TEXT=json.dumps(proof.get('manual_source_text'))))
             # Each fresh case retains its own guarded attempt in its directory;
             # the unchanged guard still refuses a retry within that same case.
             proof['stages']['application'] = 'passed'
@@ -239,7 +249,7 @@ def main():
             if recorded_1c:
                 checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=True, recorded_1c=True)
                 if os.environ.get('P1_MANUAL_VISUAL') == '1':
-                    checks.validate_manual_visual(report)
+                    checks.validate_manual_visual(report,source_text=proof['manual_source_text'])
             elif recorded:
                 checks.validate_recorded_operations(report, manifest['consumer'], proof['consumer_execution'])
             else:
@@ -255,6 +265,47 @@ def main():
             if manual:
                 proof['cases'][case].update(refusal_ui=False,refusal_boundary='real-Worker-register-only',
                     qL2_precommit_custody=recorded_1c,adapter_historical_publication=recorded_1c,full_1c_accepted=False)
+                if os.environ.get('P1_MANUAL_VISUAL') == '1':
+                    proof['cases'][case]['manual_visual_text_coverage'] = {
+                        key: value['oracleTextCoverage'] for key,value in report['manual_visual'].items()}
+                    proof['cases'][case]['nonempty_oracle_wrap_accepted'] = False
+        if recorded_1c and os.environ.get('P1_MANUAL_VISUAL') == '1':
+            positive=evidence/'private-source-text-inputs'
+            guarded('p1-manual-source-text-fixtures',['cargo','test','--locked','-p','phase-engine',
+                '--features','manual_resolution_prototype,test-support','--test','manual_resolution_prototype',
+                'p1_native_journey::paid_manual_begin_life_finish_next_and_checked_checkpoints','--','--exact'],
+                {'P1_FIXTURE_OUTPUT_DIR':str(positive),'RUST_MIN_STACK':'8388608'})
+            bundle=json.loads((positive/'trusted-game-states.json').read_text())
+            if bundle.get('version')!=1 or len(bundle.get('cases',{}))!=145 or '1c.B' not in bundle['cases']:
+                raise ValueError('existing checked-native source fixture required')
+            cards=json.loads((positive/'card-data.json').read_text())
+            faces=[face for face in cards.values() if face.get('name')=='P1 Self Loss']
+            if len(faces)!=1 or not isinstance(faces[0].get('oracle_text'),str) or not faces[0]['oracle_text'].strip():
+                raise ValueError('existing nonempty source oracle required')
+            proof['source_text_positive_fixtures']={name:hashlib.sha256((positive/name).read_bytes()).hexdigest()
+                for name in ['card-data.json','trusted-game-states.json']}
+            canonical={'source_name':'P1 Self Loss','oracle_text_kind':'nonempty',
+                'oracle_text_length':len(faces[0]['oracle_text'].strip().encode('utf-16-le'))//2,
+                'card_data_sha256':proof['source_text_positive_fixtures']['card-data.json']}
+            proof['source_text_positive_text']=canonical
+            shutil.copyfile(positive/'trusted-game-states.json',public/'p1-integration-fixtures/trusted-game-states.json')
+            shutil.copyfile(positive/'card-data.json',public/'card-data.json')
+            browser_evidence=evidence/'controls/manual-source-text'
+            browser_evidence.mkdir(parents=True)
+            for name in ['manifest.json','consumer-install.json']:
+                shutil.copyfile(evidence/name,browser_evidence/name)
+            guarded('p1-ui-smoke',['python3',str(VALIDATION/'scripts/ci/p1-product-browser.py'),
+                '--source',str(source),'--evidence',str(browser_evidence),
+                '--entry-route','/game/p1-manual-source-text?mode=local&manual=1&p1Fixture=1c.B',
+                '--scenario',str(VALIDATION/'scripts/ci/p1-ui-smoke.py')],
+                dict({key:str(value) for key,value in tools.items()},P1_UI_CASE='manual-source-text',
+                     P1_NATIVE_CHECKS='0',P1_MANUAL_SOURCE_TEXT=json.dumps(canonical)))
+            report=json.loads((browser_evidence/'ui-smoke-report.json').read_text())
+            checks.validate_source_text_positive(report,manifest['consumer'],proof['consumer_execution'],canonical)
+            images=checks.validate_required_images(browser_evidence,manifest,proof['consumer_execution'],source_text_only=True)
+            proof['cases']['manual-source-text']={'status':'passed','images':images,'normal_ui':True,
+                'source_text_only':True,'nonempty_oracle_display_accepted':True,'oracle_multiline_wrap_accepted':False,
+                'Apply_Finish_receipts_accepted':False,'recorded_ordinary_start':False,'full_1c_accepted':False}
         proof['stages']['operations'] = 'passed'
         proof['stages']['images'] = 'passed'
         proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}

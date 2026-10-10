@@ -21,6 +21,18 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_actual_manual_observation_retains_geometry_before_rejection(self):
+        tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        node=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='manual_visual_observation')
+        observed={'diagnostic':None,'warningVisible':False,'warningSuppressed':False}
+        report={}
+        namespace={'call':lambda *args:observed,'report':report,'CHECKS':capture,'stage':'capture-same-source',
+            'CANONICAL_MANUAL_SOURCE_TEXT':None}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<actual-manual-observation>','exec'),namespace)
+        with self.assertRaises(capture.EvidenceFailure):namespace['manual_visual_observation']()
+        self.assertEqual(report['manual_visual_observation_attempts'],[
+            {'stage':'capture-same-source','require_visible':False,'observation':observed}])
+
     def test_manual_visual_rejects_false_warning_overlap_and_missing_narrow_view(self):
         import copy
         def rect(left, top, width, height):
@@ -31,18 +43,89 @@ class FinishEvidenceTests(unittest.TestCase):
             panelClientWidth=332,panelScrollWidth=332,cardContentPresent=True,cardContentKind='artless-fallback',diagnostic=None,
             visible=dict(left=0,right=390,top=0,bottom=844),
             warningVisible=False,warningSuppressed=False)
+        value['textBlocks'] = [dict(kind='title',present=True,textLength=16,lines=value['lines'][:1]),
+            dict(kind='oracle',present=True,textLength=62,lines=value['lines'][1:])]
+        value['oracleTextCoverage'] = 'observed'
+        value['canonicalSourceText']={'source_name':'Replay Self Loss','card_data_sha256':'1'*64,
+            'oracle_text_kind':'nonempty','oracle_text_length':62}
+        value['titleMatchesFixture']=True
         capture.validate_manual_visual_observation(value)
         for key, changed in [('diagnostic',{}),('warningVisible',True),('warningSuppressed',True),
                 ('cardContentPresent',False),('cardContentKind','unavailable'),('card',rect(200,10,144,202)),
                 ('details',rect(10,100,280,90)),('form',rect(0,200,300,150)),
                 ('lines',[rect(250,230,200,20),rect(10,260,280,20)]),('sourceScrollWidth',350)]:
             bad=copy.deepcopy(value);bad[key]=changed
+            if key=='lines':
+                bad['textBlocks'][0]['lines']=changed[:1];bad['textBlocks'][1]['lines']=changed[1:]
             with self.subTest(key=key),self.assertRaises(capture.EvidenceFailure):
                 capture.validate_manual_visual_observation(bad)
+        empty=copy.deepcopy(value)
+        empty['textBlocks'][1].update(textLength=0,lines=[])
+        empty['lines']=empty['textBlocks'][0]['lines']
+        empty['oracleTextCoverage']='not-present-in-fixture'
+        empty['canonicalSourceText'].update(oracle_text_kind='null',oracle_text_length=0)
+        capture.validate_manual_visual_observation(empty)
+        for kind,index in [('title',0),('oracle',1)]:
+            bad=copy.deepcopy(value);bad['textBlocks'][index]['lines']=[]
+            bad['lines']=[line for block in bad['textBlocks'] for line in block['lines']]
+            with self.subTest(nonempty_block=kind),self.assertRaises(capture.EvidenceFailure) as error:
+                capture.validate_manual_visual_observation(bad)
+            self.assertEqual(error.exception.reason,'source-text-lines-unavailable:'+kind)
+        for key,changed in [('textLength',0),('present',False)]:
+            bad=copy.deepcopy(empty);bad['textBlocks'][0][key]=changed
+            with self.subTest(missing_title=key),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_manual_visual_observation(bad)
+        bad=copy.deepcopy(empty);bad['oracleTextCoverage']='observed'
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual_observation(bad)
+        bad=copy.deepcopy(empty);bad['canonicalSourceText']=copy.deepcopy(value['canonicalSourceText'])
+        with self.assertRaises(capture.EvidenceFailure) as error:capture.validate_manual_visual_observation(bad)
+        self.assertEqual(error.exception.reason,'source-text-does-not-match-fixture')
+        bad=copy.deepcopy(value);bad['titleMatchesFixture']=False
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual_observation(bad)
         observations={key:copy.deepcopy(value) for key in
             ['same-source','life19','life18','registered-pending','historical-lookup','manual-source-narrow']}
         observations['manual-source-narrow']['viewport']['width']=390
         capture.validate_manual_visual({'manual_visual':observations,'viewport_restored':True})
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual(
+            {'manual_visual':observations,'viewport_restored':True},source_text=empty['canonicalSourceText'])
+        positive={'scope':capture.MANUAL_SOURCE_TEXT_SCOPE,'fixture':'1c.B','source_text_only':True,
+            'status':'passed','consumer':{'sha':'same'},'consumer_execution':{'run':'same'},
+            'primary':{'stage':'operations-complete','code':0,'reason':'completed'},'secondary':[],
+            'stages':{key:{'status':'passed','assertions_completed':True} for key in
+                      ['prepayment','manual-options','manual-cast','initial']},
+            'prepayment':dict(sourceCardId=3,sourceInHand=True,waitingType='Priority',priorityPlayer=0,
+                stackCount=0,manualPhase=None,life=[20,20],ownManaCount=2),
+            'manual_paid_before_begin':dict(sourceId=3,manualPhase='armed',stackCount=1,
+                resolvingEntryId=None,life=[20,20],ownManaCount=1),
+            'begin':dict(sourceId=3,manualPhase='open',stackCount=0,manualStackEntryId=7,
+                resolvingEntryId=7,life=[20,20],ownManaCount=1,
+                publicEvents=dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0)),
+            'prepayment_full_control':True,'prepayment_scope_visible':True,'viewport_restored':True,
+            'manual_visual':{key:copy.deepcopy(observations[key]) for key in ['same-source','manual-source-narrow']}}
+        positive['click_commands']=[dict(operation=stage,kind='native-element-click',status='completed',locator=locator)
+            for stage,locator in [
+                ('prepayment-full-control','[data-mobile-action-right] button[aria-label="Full Control Off"][aria-pressed="false"]'),
+                ('manual-card-select','[data-hand-card][data-object-id="3"]'),
+                ('manual-options','//button[normalize-space()="Resolution options for P1 Self Loss"]'),
+                ('manual-cast','//button[normalize-space()="Cast with manual resolution"]'),
+                ('manual-response','//button[normalize-space()="Resolve"]')]]
+        positive['fixture_opponent_drivers']=[dict(ok=True,actor=1,action='PassPriority',
+            mode='explicit-local-fixture-opponent-driver',commands=1,
+            before=dict(positive['manual_paid_before_begin'],waitingType='Priority',priorityPlayer=1),
+            after=positive['begin'])]
+        positive['receipt_observer_stopped']=True
+        capture.validate_source_text_positive(positive,positive['consumer'],positive['consumer_execution'],value['canonicalSourceText'])
+        for key,field,changed in [('begin','life',[19,20]),('begin','sourceId',4),
+                ('begin','resolvingEntryId',8),('manual_paid_before_begin','ownManaCount',2)]:
+            bad=copy.deepcopy(positive);bad[key][field]=changed
+            with self.subTest(positive_boundary=(key,field)),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_source_text_positive(bad,positive['consumer'],positive['consumer_execution'],value['canonicalSourceText'])
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_source_text_positive(
+            positive,positive['consumer'],positive['consumer_execution'],empty['canonicalSourceText'])
+        for key,changed in [('click_commands',[]),('fixture_opponent_drivers',[]),('receipt_observer_stopped',False)]:
+            bad=copy.deepcopy(positive);bad[key]=changed
+            with self.subTest(missing_positive_proof=key),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_source_text_positive(bad,positive['consumer'],positive['consumer_execution'],value['canonicalSourceText'])
         for clipped in [dict(left=100,right=390,top=0,bottom=844),dict(left=0,right=390,top=0,bottom=250)]:
             bad=copy.deepcopy(value);bad['visible']=clipped
             with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual_observation(bad,require_visible=True)
@@ -588,11 +671,31 @@ class FinishEvidenceTests(unittest.TestCase):
         self.assertEqual(report['primary'],dict(stage='operations-complete',code=0,reason='completed'))
         self.assertEqual(report['status'],'incomplete')
         self.assertEqual(report['secondary'],[dict(stage='capture-recorded-ready',code=1,reason='required-capture-failed')])
+        for complete in [True,False]:
+            report={'stages':{key:{'assertions_completed':True} for key in
+                    ['prepayment','manual-options','manual-cast','initial']},'secondary':[]}
+            if not complete: report['stages']['initial']['assertions_completed']=False
+            namespace=dict(stage='capture-manual-source-narrow',report=report,SOURCE_TEXT_POSITIVE=True,
+                           error=RuntimeError(),CHECKS=capture,exit_code=0)
+            exec(compile(ast.Module(body=handler.body,type_ignores=[]),'<source-final-capture-failure>','exec'),namespace)
+            self.assertEqual(namespace['exit_code'],1)
+            self.assertEqual(report['status'],'incomplete' if complete else 'failed')
+            self.assertEqual(report['primary']['code'],0 if complete else 1)
+            self.assertEqual(report['secondary'],[dict(stage='capture-manual-source-narrow',code=1,
+                reason='required-capture-failed')] if complete else [])
         for name in ['p1-product-browser.py','p1-ci-ui-smoke.py']:
             module=ast.parse(Path(__file__).with_name(name).read_text())
             propagation=[n for n in ast.walk(module) if isinstance(n,ast.If) and 'item.get' in ast.unparse(n.test)
                 and 'capture-control-completed' in ast.unparse(n.test)]
             self.assertTrue(propagation,name)
+            allowed=[n for n in ast.walk(module) if isinstance(n,ast.Assign)
+                     and any(isinstance(target,ast.Name) and target.id=='allowed' for target in n.targets)]
+            for reason in ['required-capture-failed','unreviewed']:
+                item=dict(stage='capture-manual-source-narrow',code=1,reason=reason)
+                proof={'secondary':[]}
+                exec(compile(ast.Module(body=allowed+propagation,type_ignores=[]),'<actual-source-secondary>','exec'),
+                     {'item':item,'proof':proof})
+                self.assertEqual(proof['secondary'],[item] if reason=='required-capture-failed' else [],name)
 
     def auto_report(self,case):
         if case=='auto-v':
