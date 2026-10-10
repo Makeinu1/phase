@@ -89,9 +89,9 @@ return {url: location.href.split(/[?#]/, 1)[0], state, observerError,
     (root / 'browser-failure.json').write_text(json.dumps(diagnostic, indent=2) + '\n')
 
 
-PRIMARY_STAGES = {'historical-lookup', 'capture-historical-lookup', 'prepayment', 'prepayment-full-control', 'manual-card-select', 'manual-options', 'manual-cast', 'manual-response', 'life18', 'paidplay-response', 'scenario', 'application-start', 'browser-boot-report', 'source-after',
+PRIMARY_STAGES = {'control-initial','control-full-control','capture-control-initial','control-normal-direct','control-paid','control-response','control-completed','capture-control-completed','historical-lookup', 'capture-historical-lookup', 'prepayment', 'prepayment-full-control', 'manual-card-select', 'manual-options', 'manual-cast', 'manual-response', 'life18', 'paidplay-response', 'scenario', 'application-start', 'browser-boot-report', 'source-after',
     'application-observer', 'initial', 'player-area-select', 'life19', 'finish',
-    'capture-same-source', 'capture-life19', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'operations-complete',
+    'capture-same-source', 'capture-life19', 'capture-control-completed', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'operations-complete',
     'paidplay-select', 'paidplay-options', 'paidplay-normal', 'paidplay-payment',
     'paidplay-normal-direct', 'checked-restore-k1', 'fixture-opponent-pass', 'paidplay-own-pass-before-driver', 'paidplay-resolve', 'capture-paidplay22'}
 PRIMARY_REASONS = {'native-double-click-not-observed', 'required-control-not-visible-and-enabled', 'full-control-on-not-confirmed', 'completed', 'scenario-exit-nonzero', 'required-capture-failed',
@@ -233,7 +233,7 @@ def main():
                 if not saved:
                     proof['secondary'].append({'stage': 'scenario-report', 'code': 1, 'reason': 'required-report-save-failed'})
                 for item in report.get('secondary', []):
-                    if (isinstance(item, dict) and item.get('stage') in {'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'}
+                    if (isinstance(item, dict) and item.get('stage') in {'capture-control-completed', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'}
                             and item.get('reason') in {'required-capture-failed', 'receipt-observer-cleanup-failed', 'required-report-save-failed'}):
                         proof['secondary'].append({'stage': item['stage'], 'code': 1, 'reason': item['reason']})
             except (OSError, ValueError, KeyError, TypeError):

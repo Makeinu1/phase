@@ -321,6 +321,77 @@ class FinishEvidenceTests(unittest.TestCase):
             receipt_summary=dict(appliedResults=3,completed=[dict(sourceId=7,stackEntryId=None,terminalCount=0,lifeChanges=[]),dict(sourceId=7,stackEntryId=9,terminalCount=0,lifeChanges=[{'amount':-2,'total':18}]),dict(sourceId=7,stackEntryId=9,terminalCount=1,lifeChanges=[])]),
             click_commands=[dict(operation=stage,status='completed',native_double_click_verified=stage=='paidplay-normal-direct') for stage in ['prepayment-full-control','manual-card-select','manual-options','manual-cast','manual-response','player-area-select','life18','finish','paidplay-normal-direct','paidplay-response']])
 
+    def test_completed_auto_capture_failure_preserves_primary_and_fixed_secondary(self):
+        ui=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        handler=next(n for n in ui.body if isinstance(n,ast.Try)).handlers[0]
+        cases=next(n for n in handler.body if isinstance(n,ast.If) and 'capture-control-completed' in ast.unparse(n.test))
+        report={'stages':{k:{'assertions_completed':True} for k in ['control-initial','control-full-control','control-paid','control-response','control-completed']},'secondary':[],'status':'failed'}
+        namespace=dict(stage='capture-control-completed',report=report)
+        exec(compile(ast.Module(body=[cases],type_ignores=[]),'<auto-final-capture-failure>','exec'),namespace)
+        self.assertEqual(report['primary'],dict(stage='operations-complete',code=0,reason='completed'))
+        self.assertEqual(report['status'],'incomplete')
+        self.assertEqual(report['secondary'],[dict(stage='capture-control-completed',code=1,reason='required-capture-failed')])
+        for name in ['p1-product-browser.py','p1-ci-ui-smoke.py']:
+            module=ast.parse(Path(__file__).with_name(name).read_text())
+            propagation=[n for n in ast.walk(module) if isinstance(n,ast.If) and 'item.get' in ast.unparse(n.test)
+                and 'capture-control-completed' in ast.unparse(n.test)]
+            self.assertTrue(propagation,name)
+
+    def auto_report(self,case):
+        empty=dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0,nextDepartures=0)
+        initial=dict(life=[20,20],ownManaCount=2,stackCount=0,manualPhase=None,resolvingEntryId=None,manualStackEntryId=None,sourceId=None,sourceName=None,
+            sourceCardId=7,sourceInHand=True,sourceInGraveyard=False,nextCardId=11,nextInGraveyard=False,waitingType='Priority',priorityPlayer=0,publicEvents=empty)
+        paid=dict(initial,ownManaCount=1,stackCount=1)
+        done=dict(initial,life=[18 if case=='auto-s' else 23,20],ownManaCount=1,sourceInHand=case=='auto-n',sourceInGraveyard=case=='auto-s',
+            nextCardId=11 if case=='auto-s' else None,nextInGraveyard=case=='auto-n',publicEvents=dict(lifeChanges=[dict(amount=-2 if case=='auto-s' else 3,total=18 if case=='auto-s' else 23)],sourceDepartures=1 if case=='auto-s' else 0,manualTerminals=0,nextDepartures=1 if case=='auto-n' else 0))
+        return dict(status='passed',consumer={},consumer_execution={},scope=capture.AUTO_CONTROLS_SCOPE,control_case=case,fixture='1a.B',secondary=[],
+            primary=dict(stage='operations-complete',code=0,reason='completed'),stages={k:dict(status='passed',assertions_completed=True) for k in ['control-initial','control-full-control','control-paid','control-response','control-completed']},
+            control_initial=initial,control_paid=paid,control_completed=done,selected_card_id=7 if case=='auto-s' else 11,control_on=True,
+            click_commands=[dict(operation=k,status='completed',native_double_click_verified=k=='control-normal-direct') for k in ['control-full-control','control-normal-direct','control-response']],
+            fixture_opponent_driver=dict(ok=True,mode='explicit-local-fixture-opponent-driver',action='PassPriority',actor=1,commands=1,opponent_ui=False,two_client=False,before=dict(paid,priorityPlayer=1)))
+
+    def test_auto_controls_reject_payment_carrier_effect_and_missing_native_response(self):
+        for case in ['auto-s','auto-n']:
+            report=self.auto_report(case)
+            capture.validate_operations(report,{}, {},control=case)
+            faults=[(['control_on'],False),(['selected_card_id'],99),(['control_paid','ownManaCount'],0),(['control_paid','life'],[18,20]),
+                (['control_completed','life'],[21,20]),(['control_completed','manualPhase'],'closed'),(['control_completed','resolvingEntryId'],9),
+                (['control_completed','sourceInHand'],case=='auto-s'),(['control_completed','nextInGraveyard'],case=='auto-s'),
+                (['control_completed','publicEvents','manualTerminals'],1),(['fixture_opponent_driver','actor'],0),(['fixture_opponent_driver','commands'],2),
+                (['fixture_opponent_driver','before','priorityPlayer'],0),(['fixture_opponent_driver','before','ownManaCount'],0),
+                (['control_completed','publicEvents','lifeChanges'],[dict(amount=3,total=21)])]
+            for path,value in faults:
+                changed=json.loads(json.dumps(report));node=changed
+                for key in path[:-1]:node=node[key]
+                node[path[-1]]=value
+                with self.subTest(case=case,path=path),self.assertRaises(capture.EvidenceFailure):capture.validate_operations(changed,{}, {},control=case)
+            for operation in ['control-full-control','control-normal-direct','control-response']:
+                changed=json.loads(json.dumps(report));changed['click_commands']=[c for c in changed['click_commands'] if c['operation']!=operation]
+                with self.subTest(case=case,operation=operation),self.assertRaises(capture.EvidenceFailure):capture.validate_operations(changed,{}, {},control=case)
+
+    def test_auto_controls_require_two_current_exact_images(self):
+        def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
+        png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',1,1,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(b'\x00\x00\x00\x00'))+chunk(b'IEND',b'')
+        manifest=dict(runtime={},consumer={},validation={},artifacts={'engine_wasm_bg.wasm':{'sha256':'unit-wasm'}})
+        for case in ['auto-s','auto-n']:
+            report=self.auto_report(case)
+            with tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);entries=[]
+                (root/'ui-smoke-report.json').write_text(json.dumps(report))
+                for step,key in [('control-initial','control_initial'),('control-completed','control_completed')]:
+                    item=dict(step=step,status='observation-only',exit_code=0,runtime={},consumer={},validation={},consumer_execution={},served={'engine_wasm_bg.wasm':'unit-wasm'})
+                    for kind,path,data in [('state','states/'+step+'.json',json.dumps(report[key]).encode()),('screenshot','screenshots/'+step+'.png',png)]:
+                        target=root/path;target.parent.mkdir(exist_ok=True);target.write_bytes(data)
+                        item[kind]=dict(path=path,sha256=hashlib.sha256(data).hexdigest())
+                    entries.append(item)
+                (root/'step-index.json').write_text(json.dumps(entries))
+                self.assertEqual(capture.validate_required_images(root,manifest,{},control=case)['verified_count'],2)
+                (root/'step-index.json').write_text(json.dumps(entries[:1]))
+                with self.assertRaises(capture.EvidenceFailure):capture.validate_required_images(root,manifest,{},control=case)
+                (root/'step-index.json').write_text(json.dumps(entries))
+                entries[1]['state']['sha256']='bad';(root/'step-index.json').write_text(json.dumps(entries))
+                with self.assertRaises(capture.EvidenceFailure):capture.validate_required_images(root,manifest,{},control=case)
+
     def s1_1c_report(self):
         report = self.s1_report()
         report.update(scope=capture.S1_1C_SCOPE,fixture='1c.B',receipt_observer_stopped=True)
@@ -479,14 +550,14 @@ class FinishEvidenceTests(unittest.TestCase):
                       and any(isinstance(target, ast.Name) and target.id == 'report' for target in node.targets))
         expression = next(value for key, value in zip(report.keys, report.values)
                           if isinstance(key, ast.Constant) and key.value == 'scope')
-        ui_scope = eval(compile(ast.Expression(expression), '<ui-scope>', 'eval'), {'CHECKS': capture, 'PREPAYMENT': False})
+        ui_scope = eval(compile(ast.Expression(expression), '<ui-scope>', 'eval'), {'CHECKS': capture, 'PREPAYMENT': False, 'AUTO_CONTROL': None})
         ci = ast.parse(Path(__file__).with_name('p1-ci-ui-smoke.py').read_text())
         assignment = next(node for node in ast.walk(ci) if isinstance(node, ast.Assign)
                           and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
                                   and target.value.id == 'proof' and isinstance(target.slice, ast.Constant)
                                   and target.slice.value == 'scope' for target in node.targets))
         ci_scope = eval(compile(ast.Expression(assignment.value), '<ci-scope>', 'eval'), {'checks': capture})
-        self.assertEqual(ci_scope, capture.S1_1C_SCOPE)
+        self.assertEqual(ci_scope, capture.AUTO_CONTROLS_SCOPE)
         self.assertEqual(ui_scope, capture.BOUNDED_K1_SCOPE)
         self.assertIn('K1-only acceptance when passed', ui_scope)
         self.assertIn('full S8', ui_scope)

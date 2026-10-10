@@ -76,7 +76,9 @@ def main():
     spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
     checks = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(checks)
-    proof['scope'] = checks.S1_1C_SCOPE
+    proof['scope'] = checks.AUTO_CONTROLS_SCOPE
+    proof['cases'] = {}
+    browser_evidence = evidence
     spec = importlib.util.spec_from_file_location('p1_browser_results', VALIDATION / 'scripts/ci/p1-product-browser.py')
     results = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(results)
@@ -94,7 +96,7 @@ def main():
         browser_report_failed = False
         if label == 'p1-ui-smoke':
             try:
-                browser, saved = results.load_result(evidence / 'browser-boot.json', evidence / 'p1-ui-smoke.log')
+                browser, saved = results.load_result(browser_evidence / 'browser-boot.json', evidence / 'p1-ui-smoke.log')
                 if not saved:
                     browser_report_failed = True
                     proof['secondary'].append({'stage': 'browser-boot-report', 'code': 1, 'reason': 'required-report-save-failed'})
@@ -115,13 +117,13 @@ def main():
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'process-cleanup', 'browser-boot-report', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True
                 proof['secondary'].append({'stage': 'browser-boot-report', 'code': 1, 'reason': 'required-report-unreadable'})
         try:
-            (evidence / (label + '.control.log')).write_bytes(result.stdout)
+            ((browser_evidence if label=='p1-ui-smoke' else evidence) / (label + '.control.log')).write_bytes(result.stdout)
         except Exception:
             proof['secondary'].append({'stage': label + '-control-log', 'code': 1, 'reason': 'required-control-log-save-failed'})
             raise StageStop()
@@ -162,25 +164,39 @@ def main():
             str(Path(environment['RUNNER_TEMP']) / 'p1-browser-tools'), str(evidence / 'browser-tools.json')])
         browser_proof = json.loads((evidence / 'browser-tools.json').read_text())
         tools = {key: browser_proof[key]['path'] for key in ['P1_CHROME_BINARY', 'BOOTSTRAP_CHROMEDRIVER']}
-        proof['stage'] = 'product-browser'
-        guarded('p1-ui-smoke', ['python3', str(VALIDATION / 'scripts/ci/p1-product-browser.py'),
-            '--source', str(source), '--evidence', str(evidence),
-            '--entry-route', '/game/p1-ci-smoke?mode=local&manual=1&p1Fixture=1c.B',
-            '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
-            dict({key: str(value) for key, value in tools.items()}, P1_UI_CASE='prepayment1c'))
-        proof['stages']['application'] = 'passed'
-        proof['stage'] = 'operation-assertions'
-        try:
-            report = json.loads((evidence / 'ui-smoke-report.json').read_text())
-        except (OSError, ValueError):
-            raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
-        checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=True)
-        proof['bounded_support'] = {'initial_fixture': '1c.B-before-designation-and-payment', 'prepayment_manual_ui': True, 'opponent': 'explicit-fixture-driver', 'opponent_ui': False, 'two_client': False}
+        for case in ['auto-s','auto-n']:
+            proof['case'] = case
+            browser_evidence = evidence / 'controls' / case
+            browser_evidence.mkdir(parents=True)
+            for name in ['manifest.json','consumer-install.json']:
+                shutil.copyfile(evidence/name,browser_evidence/name)
+            proof['stage'] = 'product-browser'
+            guarded('p1-ui-smoke', ['python3', str(VALIDATION / 'scripts/ci/p1-product-browser.py'),
+                '--source', str(source), '--evidence', str(browser_evidence),
+                '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture=1a.B',
+                '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
+                dict({key: str(value) for key, value in tools.items()}, P1_UI_CASE=case))
+            # Keep both guarded consumer attempts; the root guard filenames are
+            # reused by the existing guard and must not erase the first case.
+            for name in ['p1-ui-smoke.json','p1-ui-smoke.jsonl','p1-ui-smoke.log']:
+                if (evidence/name).is_file():
+                    shutil.copyfile(evidence/name,browser_evidence/name)
+            proof['stages']['application'] = 'passed'
+            proof['stage'] = 'operation-assertions'
+            try:
+                report = json.loads((browser_evidence / 'ui-smoke-report.json').read_text())
+            except (OSError, ValueError):
+                raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
+            checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], control=case)
+            proof['cases'][case] = {'status':'operations-complete','operations':'passed','images':'not_run'}
+            proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}
+            proof['stage'] = 'required-images'
+            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], control=case)
+            proof['cases'][case] = {'status':'passed','images':images,'normal_ui':True,
+                'initial_fixture':'1a.B-fresh-before-designation-payment','opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False}
         proof['stages']['operations'] = 'passed'
-        proof['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
-        proof['stage'] = 'required-images'
-        proof['images'] = checks.validate_required_images(evidence, manifest, proof['consumer_execution'], s1_1c=True)
         proof['stages']['images'] = 'passed'
+        proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}
         proof['status'] = 'passed'
     except checks.EvidenceFailure as error:
         failure = {'stage': error.stage, 'code': 1, 'reason': error.reason}

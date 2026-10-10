@@ -342,3 +342,24 @@ and two explicitly labelled B fixture passes. Seven exact PNG/state/index
 receipts are required: prepayment, same-source20, life19, life18,
 historical-lookup18, Finish18, paidplay21. Wrong actor/stale controls, Auto S,
 standalone N and remaining S1–S12 groups are still separate outstanding work.
+
+
+## Ordinary Auto S and standalone N controls on unchanged afe3
+
+Two new browser sessions each use initial1a.B before designation/payment.
+The existing trusted native double-click plays S or N normally. FullControl
+right toggle is confirmed before cast; cost1 gives mana1/life20/stack1,
+mandatory ownnativeResolve precedes one explicitfixtureBpass. Auto S gives
+life18/Sgraveyard/Nhand. Standalone N gives23/Ngraveyard/Shand. Both have
+stack0/mana1/no Manual view/carrier and exactly one ordinary life event.
+Each requires initial+completed exactPNG/state/index provenance and hashes.
+Case outputs live separately under controls/auto-s and controls/auto-n;
+no first-case report or screenshots are overwritten by the second case.
+Productafe3 and strict guarded producer379975 reuse stay unchanged.
+
+Correction of prior1c scope: 11 operations refers to browser input count.
+The evidence is limited to completed qL1 read plus clientterminalcache
+comparison; full1c is PARTIAL. Same qL1/qL2 redelivery, lookup before/after
+qL2 completion, qL2 pending/notApplied, oldbinding-newattempt atomicrefusal,
+and old19 result projection notoverwriting18 remain separate unproved gates.
+No read-only lookup is relabelled as redelivery or adapterhistoricalpublish.

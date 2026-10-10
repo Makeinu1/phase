@@ -24,12 +24,13 @@ BASE = 'http://127.0.0.1:9515/session/' + SESSION
 spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
+AUTO_CONTROL = os.environ.get('P1_UI_CASE') if os.environ.get('P1_UI_CASE') in {'auto-s','auto-n'} else None
 SPLIT_APPLY = os.environ.get('P1_UI_CASE') == 'prepayment1c'
 PREPAYMENT = SPLIT_APPLY or os.environ.get('P1_UI_CASE') == 'prepayment1a'
-report = {'scope': (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
-          'fixture': ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
+report = {'scope': CHECKS.AUTO_CONTROLS_SCOPE if AUTO_CONTROL else (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
+          'control_case': AUTO_CONTROL, 'fixture': '1a.B' if AUTO_CONTROL else ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
-                     for name in (['prepayment', 'manual-options', 'manual-cast', 'initial'] + (['life19', 'life18', 'historical-lookup'] if SPLIT_APPLY else ['life18']) + ['finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
+                     for name in (['control-initial','control-full-control','control-paid','control-response','control-completed'] if AUTO_CONTROL else ['prepayment', 'manual-options', 'manual-cast', 'initial'] + (['life19', 'life18', 'historical-lookup'] if SPLIT_APPLY else ['life18']) + ['finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
@@ -365,7 +366,7 @@ const done = arguments[arguments.length - 1];
 
 
 def drive_fixture_opponent_pass_once(expected_life=19, expected_mana=0, expected_phase="closed"):
-    assert (expected_life, expected_mana, expected_phase) in {(19, 0, 'closed'), (20, 1, 'armed'), (18, 0, 'closed')}
+    assert (expected_life, expected_mana, expected_phase) in {(20, 1, None), (19, 0, 'closed'), (20, 1, 'armed'), (18, 0, 'closed')}
     # Explicit fixture participant driver, not an opponent UI click or shared client.
     return call('/execute/async', {'script': """
 const done = arguments[arguments.length - 1];
@@ -412,6 +413,58 @@ def resolve_control(completed_life=22):
         time.sleep(0.25)
     raise AssertionError('Ordinary resolution neither completed nor offered an own priority control')
 
+
+
+def run_auto_control():
+    global stage
+    def passed(name):
+        report['stages'][name] = {'status':'passed','assertions_completed':True}
+    stage = 'control-initial'
+    initial = wait_for(lambda x: x['life']==[20,20] and x['ownManaCount']==2 and x['stackCount']==0
+        and x['manualPhase'] is None and x['waitingType']=='Priority' and x['priorityPlayer']==0)
+    assert initial['sourceInHand'] is True and type(initial['sourceCardId']) is int and type(initial['nextCardId']) is int
+    assert initial['publicEvents']==dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0,nextDepartures=0)
+    report['control_initial']=initial
+    passed(stage)
+    stage='control-full-control'
+    click('[data-mobile-action-right] button[aria-label="Full Control Off"][aria-pressed="false"]')
+    report['control_on']=call('/execute/sync',{'script': """return document.querySelector('[data-mobile-action-right] button[aria-label="Full Control On"][aria-pressed="true"]') !== null;""", 'args':[]})
+    assert report['control_on'] is True
+    passed(stage)
+    stage='capture-control-initial'
+    capture('control-initial')
+    selected=initial['sourceCardId' if AUTO_CONTROL=='auto-s' else 'nextCardId']
+    report['selected_card_id']=selected
+    stage='control-normal-direct'
+    click('[data-hand-card][data-object-id="'+str(selected)+'"]',double=True)
+    stage='control-paid'
+    paying=wait_for(lambda x: x['waitingType']=='ManaPayment' or
+        (x['waitingType']=='Priority' and x['stackCount']==1 and x['ownManaCount']==1))
+    if paying['waitingType']=='ManaPayment':
+        click('//button[normalize-space()="Pay"]','xpath')
+    paid=wait_for(lambda x: x['waitingType']=='Priority' and x['stackCount']==1 and x['ownManaCount']==1)
+    assert paid['life']==[20,20] and paid['manualPhase'] is None and paid['resolvingEntryId'] is None
+    report['control_paid']=paid
+    passed(stage)
+    stage='control-response'
+    wait_for(lambda x:x['waitingType']=='Priority' and x['priorityPlayer']==0 and x['stackCount']==1)
+    click('//button[normalize-space()="Resolve"]','xpath')
+    wait_for(lambda x:x['waitingType']=='Priority' and x['priorityPlayer']==1)
+    driver=drive_fixture_opponent_pass_once(20,1,None)
+    report['fixture_opponent_driver']=driver
+    assert driver.get('ok') is True and driver.get('commands')==1
+    passed(stage)
+    stage='control-completed'
+    total=18 if AUTO_CONTROL=='auto-s' else 23
+    completed=wait_for(lambda x:x['life']==[total,20] and x['stackCount']==0 and x['waitingType']=='Priority')
+    assert completed['ownManaCount']==1 and completed['manualPhase'] is None and completed['resolvingEntryId'] is None
+    report['control_completed']=completed
+    passed(stage)
+    CHECKS.validate_control_boundaries(report)
+    stage='capture-control-completed'
+    capture('control-completed')
+    report['primary']={'stage':'operations-complete','code':0,'reason':'completed'}
+    report['status']='passed'
 
 
 def run_s1_1a():
@@ -655,7 +708,9 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
 }, () => done(false));
 """, 'args': []})
     assert ready, 'Public observer module could not load'
-    if PREPAYMENT:
+    if AUTO_CONTROL:
+        run_auto_control()
+    elif PREPAYMENT:
         run_s1_1a()
     else:
         stage = 'initial'
@@ -776,7 +831,7 @@ except Exception as error:
               else 'operation-assertion-failed' if isinstance(error, AssertionError)
               else 'scenario-command-failed')
     report['primary'] = {'stage': stage, 'code': 1, 'reason': reason}
-    if stage in {'capture-finish', 'capture-paidplay21', 'capture-paidplay22'} and all(item['assertions_completed'] is True for item in report['stages'].values()):
+    if stage in {'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'capture-paidplay22'} and all(item['assertions_completed'] is True for item in report['stages'].values()):
         report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         report['secondary'].append({'stage': stage, 'code': 1, 'reason': 'required-capture-failed'})
         report['status'] = 'incomplete'

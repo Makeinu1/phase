@@ -136,5 +136,33 @@ jobs:
             ${{ runner.temp }}/p1-evidence/p1-client-dependencies.json
             ${{ runner.temp }}/p1-evidence/p1-browser-tools.json
             ${{ runner.temp }}/p1-evidence/p1-ui-smoke.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/manifest.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/consumer-install.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/browser-failure.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/product-scenario.log
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/step-index.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/p1-ui-smoke.control.log
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/p1-ui-smoke.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/p1-ui-smoke.jsonl
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/p1-ui-smoke.log
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/capture-failure-*.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/screenshots/*.png
+            ${{ runner.temp }}/p1-evidence/controls/auto-s/states/*.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/manifest.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/consumer-install.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/browser-failure.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/product-scenario.log
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/step-index.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/p1-ui-smoke.control.log
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/p1-ui-smoke.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/p1-ui-smoke.jsonl
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/p1-ui-smoke.log
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/capture-failure-*.json
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/screenshots/*.png
+            ${{ runner.temp }}/p1-evidence/controls/auto-n/states/*.json
           if-no-files-found: error
           retention-days: 7
