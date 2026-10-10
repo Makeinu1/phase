@@ -94,7 +94,7 @@ PRIMARY_STAGES = {'manual-visual','manual-source-narrow','manual-controls-narrow
     'capture-same-source', 'capture-life19', 'capture-control-completed', 'capture-finish', 'capture-prepayment', 'capture-life18', 'capture-paidplay21', 'operations-complete',
     'paidplay-select', 'paidplay-options', 'paidplay-normal', 'paidplay-payment',
     'paidplay-normal-direct', 'checked-restore-k1', 'fixture-opponent-pass', 'paidplay-own-pass-before-driver', 'paidplay-resolve', 'capture-paidplay22'}
-PRIMARY_STAGES.add('viewport-restore')
+PRIMARY_STAGES.update({'viewport-restore','lookup-privacy-life18','owner-revocation-closed21'})
 PRIMARY_STAGES.update({'additional-native-begin20','additional-native-life19','additional-native-life18','additional-native-closed18'})
 PRIMARY_REASONS = {'native-double-click-not-observed', 'required-control-not-visible-and-enabled', 'full-control-on-not-confirmed', 'completed', 'scenario-exit-nonzero', 'required-capture-failed',
     'webdriver-command-failed', 'operation-assertion-failed', 'scenario-command-failed',

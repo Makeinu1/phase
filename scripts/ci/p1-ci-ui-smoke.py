@@ -248,6 +248,7 @@ def main():
                 raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
             if recorded_1c:
                 checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=True, recorded_1c=True)
+                checks.validate_lookup_privacy_revocation(report,complete=True)
                 if os.environ.get('P1_MANUAL_VISUAL') == '1':
                     checks.validate_manual_visual(report,source_text=proof['manual_source_text'])
             elif recorded:

@@ -1060,6 +1060,61 @@ def main():
     index.write_text(json.dumps(steps, ensure_ascii=False, indent=2) + '\n')
 
 
+
+def validate_lookup_privacy_revocation(report, complete=True):
+    def require(ok, reason):
+        if not ok:
+            raise EvidenceFailure('operation-assertions','lookup-revocation-'+reason)
+    def hash64(value):
+        return isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) is not None
+    privacy=report.get('lookup_privacy_checks')
+    require(isinstance(privacy,dict) and privacy.get('status')=='passed'
+        and privacy.get('phase')=='K2-life18' and privacy.get('method')=='actual-Worker-original-lookup-privacy','privacy-status')
+    require(privacy.get('privateWireSaved') is False and privacy.get('refusalUi') is False
+        and privacy.get('ledgerUnchangedClaim') is False,'privacy-scope')
+    require(privacy.get('before',{}).get('life')==[18,20] and privacy['before'].get('manualPhase')=='open','privacy-boundary')
+    require(privacy.get('countsBefore',{}).get('appliedResults')==3 and privacy['countsBefore'].get('completed')==3,'privacy-counts')
+    h=privacy.get('hashesBefore',{})
+    require(hash64(h.get('stateSha256')) and hash64(h.get('replaySha256')) and type(h.get('replayActions')) is int,'privacy-hashes')
+    rows=privacy.get('rows');required=['owner-original-before','wrong-actor-lookup','conflicting-body-lookup','owner-original-after']
+    require(isinstance(rows,list) and [r.get('variant') for r in rows]==required,'privacy-variants')
+    for row in rows:
+        require(row.get('stateReplayPublicCountsUnchanged') is True and row.get('hashesAfter')==h and row.get('countsAfter')==privacy['countsBefore']
+            and hash64(privacy.get('publicStateSha256Before')) and row.get('publicStateSha256After')==privacy['publicStateSha256Before'],'privacy-invariant')
+        if row['variant'].startswith('owner-original'):
+            require(row.get('status')=='completed' and row.get('sameOriginalResult') is True
+                and row.get('currentMatchesAuthenticatedRead') is True and row.get('appliedResultNull') is True,'owner-positive')
+        elif row['variant']=='wrong-actor-lookup':
+            require(row.get('status')=='known-admission-error' and row.get('errorKind')=='authenticated-local-unavailable'
+                and row.get('noResponsePayload') is True,'actor-nondisclosure')
+        else:
+            require(row.get('status')=='indeterminate' and row.get('sameAttemptId') is True and row.get('oneFieldAmountChange') is True
+                and row.get('resultNull') is True and row.get('appliedResultNull') is True
+                and row.get('rejection')=='invalid_interaction_response' and row.get('currentMatchesAuthenticatedRead') is True,'conflict-nondisclosure')
+    if not complete:
+        return
+    revoked=report.get('owner_revocation_checks')
+    require(isinstance(revoked,dict) and revoked.get('status')=='passed' and revoked.get('phase')=='supplemental-post-N-closed21'
+        and revoked.get('method')=='existing-public-restore-actual-owner-revocation','revocation-status')
+    for key in ['issuedCapabilityHeld','lawfulOriginalBefore','pairedFreshMain1aRequired']:
+        require(revoked.get(key) is True,'revocation-'+key)
+    for key in ['successfulRestoreHashEqualityClaim','recordedReplayPreservedClaim','sameBranchReauthentication','postRestoreUiClaim','privateWireSaved','wholeS5S8Accepted']:
+        require(revoked.get(key) is False,'revocation-scope-'+key)
+    semantic=revoked.get('semanticBefore');require(isinstance(semantic,dict) and semantic=={
+        'life':[21,20],'mana':0,'stack':0,'carrierAbsent':True,'sourceInGraveyard':True,'nextInGraveyard':True},'closed-semantics')
+    baseline=revoked.get('postRestoreBaseline',{})
+    require(baseline.get('semantic')==semantic and hash64(revoked.get('preStateSha256')) and hash64(baseline.get('stateSha256'))
+        and baseline.get('replay')=='known-recording-unavailable','restore-baseline')
+    require(baseline.get('counts',{}).get('appliedResults')==4 and baseline['counts'].get('completed')==4,'revocation-counts')
+    rows=revoked.get('rows');required=['held-cap-read','held-cap-restore','old-original-register','old-original-apply','old-original-lookup']
+    require(isinstance(rows,list) and [r.get('variant') for r in rows]==required,'revocation-variants')
+    for row in rows:
+        require(row.get('status')=='known-revocation-error' and row.get('errorKind')=='authenticated-local-unavailable'
+            and row.get('noResponsePayload') is True and row.get('postRestoreStateCountsSemanticsUnchanged') is True
+            and row.get('replay')=='known-recording-unavailable' and row.get('newCapabilityNull') is True
+            and row.get('semanticAfter')==semantic and row.get('stateSha256After')==baseline['stateSha256']
+            and row.get('countsAfter')==baseline['counts'],'revocation-nondisclosure-invariant')
+
 if __name__ == '__main__':
     try:
         main()

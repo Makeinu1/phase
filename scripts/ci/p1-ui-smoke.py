@@ -836,7 +836,7 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
  window.__p1ReceiptSummary = () => ({completed: [...unique.values()], appliedResults: delivered, ...(recorded?{publications}:{})});
  window.__p1StopReceipts = () => { window.__p1ReleasePending(); stop(); originals.length = 0; unique.clear(); requests.clear(); held=null; observedHistorical=null; historicExpected=null; latest = null;
   delete window.__p1ArmPending;delete window.__p1ReleasePending;delete window.__p1PendingReady;delete window.__p1ProbePending;
-  delete window.__p1AdditionalChecks; delete window.__p1NativeChecks; delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
+  delete window.__p1LookupPrivacy; delete window.__p1OwnerRevocation; delete window.__p1AdditionalChecks; delete window.__p1NativeChecks; delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
  const nativeFailure = (phase,step,error,completedChecks) => {
   const messages = new Map([
    ['No replay recording available. Start a game first, or it was invalidated by an undo/restore.','replay-recording-unavailable'],
@@ -940,6 +940,53 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
   }
   return result;
   } catch(error) { return nativeFailure(phase,probeStep,error,completedChecks); }
+ };
+ window.__p1LookupPrivacy = async () => {
+  let step='admission';const rows=[];
+  try {
+   const [{unwrapClientGameState},{sameLocalContinuationValue:same}]=await Promise.all([import('/src/adapter/wasm-adapter.ts'),import('/src/adapter/types.ts')]);
+   const adapter=useGameStore.getState().adapter,engine=adapter.getEngineClient(),before=window.__p1Observe(),countsBefore=counts(),hashesBefore=await hashes(engine);
+   if(!recorded||before.manualPhase!=='open'||JSON.stringify(before.life)!=='[18,20]')throw Error('Boundary');
+   const publicStateSha256Before=await digest(JSON.stringify(before));const original=originals.find(r=>isLoss(r.attempt));if(!original?.result)throw Error('Actual original');
+   const frame=(await engine.readLocalCurrent()).current;if(!frame||unwrapClientGameState(frame.snapshot.state).players[0].life!==18)throw Error('Current');
+   const invariant=async()=>{const publicAfter=window.__p1Observe(),countsAfter=counts(),hashesAfter=await hashes(engine);if(!same(before,publicAfter)||!same(countsBefore,countsAfter)||!same(hashesBefore,hashesAfter))throw Error('Invariant');return {stateReplayPublicCountsUnchanged:true,hashesAfter,countsAfter,publicStateSha256After:await digest(JSON.stringify(publicAfter))};};
+   const owner=async label=>{step=label;const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'lookup',attempt:original.attempt});
+    if(reply.receipt?.status!=='completed'||!reply.receipt.result||!same(reply.receipt.result,original.result)||!same(reply.receipt.attempt,original.attempt)||reply.appliedResult!==null||!same(reply.current?.context,frame.context)||!same(reply.current?.snapshot.state,frame.snapshot.state))throw Error('Original mismatch');
+    rows.push({variant:label,status:'completed',sameOriginalResult:true,currentMatchesAuthenticatedRead:true,appliedResultNull:true,...await invariant()});};
+   await owner('owner-original-before');step='wrong-actor-lookup';let denied=false;
+   try{await engine.submitLocalContinuation(1,{type:'localContinuation',operation:'lookup',attempt:original.attempt});}catch(e){if(e?.message!=='Authenticated Local continuation unavailable')throw Error('Unexpected refusal');denied=true;}
+   if(!denied)throw Error('Actor accepted');rows.push({variant:step,status:'known-admission-error',errorKind:'authenticated-local-unavailable',noResponsePayload:true,...await invariant()});
+   step='conflicting-body-lookup';const changed=JSON.parse(JSON.stringify(original.attempt));changed.submission.response.data.decision.data.amount=2;const restored=JSON.parse(JSON.stringify(changed));restored.submission.response.data.decision.data.amount=1;if(!same(restored,original.attempt)||changed.attemptId!==original.attempt.attemptId)throw Error('One-field intent');
+   const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'lookup',attempt:changed});
+   if(reply.receipt?.status!=='indeterminate'||reply.receipt.result!==null||reply.appliedResult!==null||reply.receipt.rejection?.code!=='invalid_interaction_response'||!same(reply.receipt.attempt,changed)||!same(reply.current?.context,frame.context)||!same(reply.current?.snapshot.state,frame.snapshot.state))throw Error('Conflicting result disclosed');
+   rows.push({variant:step,status:'indeterminate',sameAttemptId:true,oneFieldAmountChange:true,resultNull:true,appliedResultNull:true,rejection:'invalid_interaction_response',currentMatchesAuthenticatedRead:true,...await invariant()});await owner('owner-original-after');
+   return {status:'passed',phase:'K2-life18',method:'actual-Worker-original-lookup-privacy',before,countsBefore,hashesBefore,publicStateSha256Before,rows,privateWireSaved:false,refusalUi:false,ledgerUnchangedClaim:false};
+  }catch{return {status:'failed',phase:'K2-life18',step,completedVariants:rows.map(r=>r.variant),reason:'finite-lookup-not-certified'};}
+ };
+ window.__p1OwnerRevocation = async nextSource => {
+  let step='admission';const rows=[];
+  try {
+   const {sameLocalContinuationValue:same}=await import('/src/adapter/types.ts');
+   const adapter=useGameStore.getState().adapter,engine=adapter.getEngineClient();
+   const original=originals.find(r=>r.attempt.submission.response.type==='manualResolution'&&r.attempt.submission.response.data.decision.type==='finish');
+   if(!recorded||adapter.localContinuation()!==cap||!original?.result||JSON.stringify(window.__p1Observe().life)!=='[21,20]')throw Error('Issued owner');
+   const source=original.attempt.source.sourceId;
+   const scalars=async()=>{const s=(await adapter.getViewerSnapshot(0)).state;return {life:s.players.map(p=>p.life),mana:s.players[0].mana_pool.mana.length,stack:s.stack.length,carrierAbsent:(s.resolving_stack_entry??null)===null,sourceInGraveyard:s.players[0].graveyard.includes(source),nextInGraveyard:s.players[0].graveyard.includes(nextSource)};};
+   const stateHash=async()=>digest(await adapter.exportPersistenceState());
+   const replayUnavailable=async()=>{let matched=false;try{await engine.exportReplayLog();}catch(e){if(e?.message!=='No replay recording available. Start a game first, or it was invalidated by an undo/restore.')throw Error('Unexpected replay failure');matched=true;}if(!matched)throw Error('Replay not invalidated');return 'known-recording-unavailable';};
+   step='lawful-original-before-revocation';const lawful=await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'lookup',attempt:original.attempt});if(lawful.receipt?.status!=='completed'||!lawful.receipt.result||!same(lawful.receipt.attempt,original.attempt)||!same(lawful.receipt.result,original.result)||lawful.appliedResult!==null)throw Error('Lawful original');
+   const semanticBefore=await scalars(),countsBefore=counts(),preStateSha256=await stateHash();
+   if(JSON.stringify(semanticBefore.life)!=='[21,20]'||semanticBefore.mana!==0||semanticBefore.stack!==0||!semanticBefore.carrierAbsent||!semanticBefore.sourceInGraveyard||!semanticBefore.nextInGraveyard)throw Error('Closed semantics');
+   let checkpoint=await adapter.exportPersistenceState();step='existing-public-restore';await adapter.restoreState(JSON.parse(checkpoint));
+   if(adapter.localContinuation()!==null)throw Error('Owner remains');
+   const baseline={semantic:await scalars(),stateSha256:await stateHash(),counts:counts(),replay:await replayUnavailable()};if(!same(semanticBefore,baseline.semantic)||!same(countsBefore,baseline.counts))throw Error('Restore semantics');
+   const invariant=async()=>{const semanticAfter=await scalars(),stateSha256After=await stateHash(),countsAfter=counts(),replay=await replayUnavailable();if(adapter.localContinuation()!==null||!same(baseline.semantic,semanticAfter)||baseline.stateSha256!==stateSha256After||!same(baseline.counts,countsAfter)||replay!==baseline.replay)throw Error('Post-restore invariant');return {postRestoreStateCountsSemanticsUnchanged:true,semanticAfter,stateSha256After,countsAfter,replay,newCapabilityNull:true};};
+   const denied=async(label,fn)=>{step=label;let matched=false;try{await fn();}catch(e){if(e?.message!=='Authenticated Local continuation unavailable')throw Error('Unexpected authority failure');matched=true;}if(!matched)throw Error('Revoked authority accepted');rows.push({variant:label,status:'known-revocation-error',errorKind:'authenticated-local-unavailable',noResponsePayload:true,...await invariant()});};
+   await denied('held-cap-read',()=>cap.readCurrent());await denied('held-cap-restore',()=>cap.restore(checkpoint));
+   for(const operation of ['register','apply','lookup'])await denied('old-original-'+operation,()=>engine.submitLocalContinuation(0,{type:'localContinuation',operation,attempt:original.attempt}));
+   checkpoint=null;
+   return {status:'passed',phase:'supplemental-post-N-closed21',method:'existing-public-restore-actual-owner-revocation',issuedCapabilityHeld:true,lawfulOriginalBefore:true,semanticBefore,preStateSha256,postRestoreBaseline:baseline,rows,successfulRestoreHashEqualityClaim:false,recordedReplayPreservedClaim:false,sameBranchReauthentication:false,postRestoreUiClaim:false,pairedFreshMain1aRequired:true,privateWireSaved:false,wholeS5S8Accepted:false};
+  }catch{return {status:'failed',phase:'supplemental-post-N-closed21',step,completedVariants:rows.map(r=>r.variant),reason:'finite-revocation-not-certified'};}
  };
  window.__p1AdditionalChecks = async (phase,nextCardId) => {
   let probeStep='boundary';const completedVariants=[];
@@ -1168,6 +1215,10 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
             extra = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1AdditionalChecks(arguments[0],arguments[1]).then(done,()=>done({status:'failed',phase:arguments[0],step:'unhandled',reason:'finite-probe-not-certified'}));", 'args': ['life' + str(total), pre['nextCardId']]})
             report.setdefault('additional_native_checks', []).append(extra)
             CHECKS.validate_additional_native_checks(report, complete=False)
+    if RECORDED_1C and NATIVE_CHECKS:
+        stage='lookup-privacy-life18'
+        report['lookup_privacy_checks']=call('/execute/async',{'script':"const done=arguments[arguments.length-1];window.__p1LookupPrivacy().then(done,()=>done({status:'failed',reason:'finite-lookup-not-certified'}));",'args':[]})
+        CHECKS.validate_lookup_privacy_revocation(report,complete=False)
     if SPLIT_APPLY:
         stage = 'historical-lookup'
         lookup = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1LookupFirst().then(done,()=>done(null));", 'args': []})
@@ -1245,6 +1296,9 @@ const done=arguments[arguments.length-1];
     if RECORDED_1C:
         CHECKS.validate_recorded_1c(report, final=False)
         CHECKS.validate_additional_native_checks(report, complete=True)
+        stage='owner-revocation-closed21'
+        report['owner_revocation_checks']=call('/execute/async',{'script':"const done=arguments[arguments.length-1];window.__p1OwnerRevocation(arguments[0]).then(done,()=>done({status:'failed',reason:'finite-revocation-not-certified'}));",'args':[pre['nextCardId']]})
+        CHECKS.validate_lookup_privacy_revocation(report,complete=True)
     report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
     report['status'] = 'passed'
 
