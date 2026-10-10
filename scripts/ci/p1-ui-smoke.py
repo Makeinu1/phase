@@ -26,6 +26,7 @@ spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
 RECORDED_1C = os.environ.get('P1_UI_CASE') == 'recorded-1c'
+MANUAL_VISUAL = RECORDED_1C and os.environ.get('P1_MANUAL_VISUAL') == '1'
 RECORDED_PREP = os.environ.get('P1_UI_CASE') == 'recorded-prep'
 RECORDED_INPUTS = RECORDED_PREP or RECORDED_1C
 AUTO_CONTROL = os.environ.get('P1_UI_CASE') if os.environ.get('P1_UI_CASE') in {'auto-s','auto-n','auto-v'} else None
@@ -393,10 +394,99 @@ const [life, mana, phase] = arguments;
 
 
 def capture(step):
+    if MANUAL_VISUAL and step in {'same-source', 'life19', 'life18', 'historical-lookup', 'registered-pending'}:
+        if step == 'same-source':
+            # Let the existing 3s warning debounce elapse without dismissal or
+            # session suppression before asserting the absence of a false toast.
+            time.sleep(3.25)
+        report.setdefault('manual_visual', {})[step] = manual_visual_observation()
     call('/execute/async', {'script': 'const done = arguments[arguments.length-1]; requestAnimationFrame(() => requestAnimationFrame(() => done(true)));', 'args': []})
     subprocess.run(['python3', str(VALIDATION / 'scripts/ci/p1-product-capture.py'),
         '--evidence', str(ROOT), '--step', step,
         '--state-script', str(VALIDATION / 'scripts/ci/p1-public-state.js')], check=True)
+
+
+def manual_visual_observation(require_visible=False):
+    value = call('/execute/sync', {'script': '''
+const panel = [...document.querySelectorAll('section[aria-labelledby]')]
+ .find(e => e.querySelector('h2')?.textContent === 'Manual resolution');
+const source = panel?.querySelector('aside');
+const preview = source?.querySelector('.shrink-0');
+const details = source?.querySelector('h4')?.parentElement;
+const form = panel?.querySelector('form');
+if (!source || !preview || !details || !form) return null;
+const rect = e => { const r=e.getBoundingClientRect();
+ return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}; };
+const lines = [...details.querySelectorAll('h4,p')].flatMap(e => {
+ const range=document.createRange();range.selectNodeContents(e);
+ return [...range.getClientRects()].filter(r=>r.width>0).map(r=>({left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}));
+});
+const visible={left:0,top:0,right:innerWidth,bottom:innerHeight};
+for(let ancestor=source.parentElement;ancestor;ancestor=ancestor.parentElement) {
+ const style=getComputedStyle(ancestor),r=ancestor.getBoundingClientRect();
+ if(/auto|scroll|hidden|clip/.test(style.overflowX)) {
+  visible.left=Math.max(visible.left,r.left+ancestor.clientLeft);
+  visible.right=Math.min(visible.right,r.left+ancestor.clientLeft+ancestor.clientWidth);
+ }
+ if(/auto|scroll|hidden|clip/.test(style.overflowY)) {
+  visible.top=Math.max(visible.top,r.top+ancestor.clientTop);
+  visible.bottom=Math.min(visible.bottom,r.top+ancestor.clientTop+ancestor.clientHeight);
+ }
+}
+const img=preview.querySelector('img'),fallback=preview.querySelector('[role="img"]');
+const cardContentKind=img?.complete && img.naturalWidth>0 ? 'loaded-image'
+ : fallback?.textContent.trim() ? 'artless-fallback' : 'unavailable';
+return {viewport:{width:innerWidth,height:innerHeight},source:rect(source),card:rect(preview),
+ details:rect(details),form:rect(form),lines,visible,
+ sourceClientWidth:source.clientWidth,sourceScrollWidth:source.scrollWidth,
+ panelClientWidth:panel.parentElement.clientWidth,panelScrollWidth:panel.parentElement.scrollWidth,
+ cardContentPresent:cardContentKind!=='unavailable',cardContentKind,
+ diagnostic:window.__p1Observe().stuckDiagnostic,
+ warningVisible:!!document.querySelector('[data-stuck-decision-kind]'),
+ warningSuppressed:sessionStorage.getItem('phase-rs:suppress-stuck-decision-toast') !== null};
+''', 'args': []})
+    CHECKS.validate_manual_visual_observation(value, require_visible=require_visible)
+    return value
+
+
+def capture_narrow_source():
+    global stage
+    before = observe()
+    primary_error = None
+    primary_wd = None
+    primary_wd_present = False
+    try:
+        stage = 'manual-source-narrow'
+        call('/window/rect', {'width': 390, 'height': 844})
+        call('/execute/sync', {'script': '''
+const source=[...document.querySelectorAll('section[aria-labelledby]')]
+ .find(e=>e.querySelector('h2')?.textContent==='Manual resolution')?.querySelector('aside');
+source.scrollIntoView({block:'start'});return true;
+''', 'args': []})
+        call('/execute/async', {'script': 'const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));', 'args': []})
+        report['manual_visual']['manual-source-narrow'] = manual_visual_observation(require_visible=True)
+        assert observe() == before, 'Viewport and source scrolling must not change game state'
+        stage = 'capture-manual-source-narrow'
+        capture('manual-source-narrow')
+    except Exception as error:
+        primary_error = error
+        primary_wd_present = 'webdriver_error' in report
+        primary_wd = report.get('webdriver_error')
+        raise
+    finally:
+        try:
+            call('/window/rect', {'width': 1440, 'height': 1000})
+            report['viewport_restored'] = True
+        except Exception:
+            report['viewport_restored'] = False
+            report['secondary'].append({'stage':'viewport-restore','code':1,'reason':'viewport-restore-failed'})
+            if primary_error is None:
+                stage = 'viewport-restore'
+                raise
+            if primary_wd_present:
+                report['webdriver_error'] = primary_wd
+            else:
+                report.pop('webdriver_error', None)
 
 
 def advance_recorded_priority():
@@ -829,6 +919,8 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     passed('initial')
     stage = 'capture-same-source'
     capture('same-source')
+    if MANUAL_VISUAL:
+        capture_narrow_source()
     panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
     stage = 'player-area-select'
     label = call('/execute/sync', {'script': "return document.querySelector('[data-testid=\"player-area-0\"] > button[aria-pressed]')?.textContent;", 'args': []})
@@ -1007,6 +1099,7 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
         sourceDepartures: (s.eventHistory ?? []).filter(e=>e.type==='ZoneChanged' && e.data.object_id===sourceId && e.data.from==='Stack' && e.data.to==='Graveyard').length,
         nextDepartures: (s.eventHistory ?? []).filter(e=>e.type==='ZoneChanged' && e.data.object_id===window.__p1NextSource && e.data.from==='Stack' && e.data.to==='Graveyard').length,
         manualTerminals: (s.eventHistory ?? []).filter(e=>e.type==='StackResolved' && e.data.object_id===v?.source?.stackEntryId).length},
+      stuckDiagnostic: s.stuckDiagnostic ?? null,
       manualPhase: v?.phase ?? null, sourceId: v?.source?.sourceId ?? null,
       sourceName: v?.source?.name ?? null, stackCount: g?.stack?.length ?? null,
       manualStackEntryId: v?.source?.stackEntryId ?? null,
@@ -1149,6 +1242,8 @@ except Exception as error:
     exit_code = 1
     report['status'] = 'failed'
     report['error_type'] = type(error).__name__
+    if isinstance(error, CHECKS.EvidenceFailure) and error.stage == 'manual-visual':
+        report['manual_visual_failure'] = {'stage': error.stage, 'reason': error.reason}
     reason = ('required-capture-failed' if stage.startswith('capture-')
               else 'required-control-not-visible-and-enabled' if report.get('control_acquisition_failure', {}).get('operation') == stage
               else 'full-control-on-not-confirmed' if stage == 'prepayment-full-control' and 'full_control_confirmation' in report and report['full_control_confirmation'].get('found') is not True

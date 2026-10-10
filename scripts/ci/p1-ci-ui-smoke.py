@@ -116,11 +116,11 @@ def main():
                     proof['primary'] = results.safe_primary(primary)
                 # Copy only safe, structured secondary fields from this local helper.
                 allowed = {'diagnostic-save-failed', 'failure-report-unreadable', 'session-cleanup-failed',
-                           'process-cleanup-failed', 'required-report-save-failed', 'required-capture-failed', 'receipt-observer-cleanup-failed','pending-hold-release-failed'}
+                           'process-cleanup-failed', 'required-report-save-failed', 'required-capture-failed', 'receipt-observer-cleanup-failed','pending-hold-release-failed','viewport-restore-failed'}
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'viewport-restore','process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True
@@ -143,6 +143,15 @@ def main():
                 'local_continuation_tests::admitted_paid_manual_replay_uses_truthful_ordinary_header_and_seeks',
                 '--', '--exact'], {'P1_RECORDED_FIXTURE_OUTPUT_DIR': str(fixtures),
                     'RUST_MIN_STACK': '8388608'})
+            if os.environ.get('P1_MANUAL_VISUAL') == '1':
+                # The fixture emitter just built this same native engine feature
+                # set; reuse it for the existing focused target, under the same guard.
+                guarded('p1-manual-visual-native', ['cargo', 'test', '--locked', '-p', 'phase-engine',
+                    '--features', 'manual_resolution_prototype,test-support',
+                    '--test', 'manual_resolution_prototype', '--', '--test-threads=1'],
+                    {'RUST_MIN_STACK': '8388608'})
+                guarded('p1-manual-visual-feature-off', ['cargo', 'check', '--locked', '-p', 'phase-engine',
+                    '--lib', '--no-default-features'], {'RUST_MIN_STACK': '8388608'})
             bundle = json.loads((fixtures / 'recorded-game-inputs.json').read_text())
             recipe = bundle.get('cases', {}).get('1c.recorded.B', {})
             if (bundle.get('version') != 1 or set(bundle.get('cases', {})) != {'1c.recorded.B'}
@@ -229,6 +238,8 @@ def main():
                 raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
             if recorded_1c:
                 checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=True, recorded_1c=True)
+                if os.environ.get('P1_MANUAL_VISUAL') == '1':
+                    checks.validate_manual_visual(report)
             elif recorded:
                 checks.validate_recorded_operations(report, manifest['consumer'], proof['consumer_execution'])
             else:
@@ -238,7 +249,7 @@ def main():
             proof['cases'][case] = {'status':'operations-complete','operations':'passed','images':'not_run'}
             proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}
             proof['stage'] = 'required-images'
-            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], s1_1c=manual, control=None if manual or recorded else case, recorded_prep=recorded and not recorded_1c, recorded_1c=recorded_1c)
+            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], s1_1c=manual, control=None if manual or recorded else case, recorded_prep=recorded and not recorded_1c, recorded_1c=recorded_1c, manual_visual=os.environ.get('P1_MANUAL_VISUAL') == '1')
             proof['cases'][case] = {'status':'passed','images':images,'normal_ui':True,
                 'initial_fixture':('1c.recorded.B' if recorded else '1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B')+'-fresh-before-designation-payment','opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False}
             if manual:

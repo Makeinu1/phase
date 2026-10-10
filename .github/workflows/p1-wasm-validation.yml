@@ -20,8 +20,8 @@ permissions:
 # A newly added fork workflow need not exist on default to run this push route.
 # Change these two literals only after receiving the reviewed product SHA.
 env:
-  P1_PUSH_CANDIDATE_SHA: 806c8e92a41f3b43caec2c9541cc90baca667649
-  P1_PUSH_MODE: reuse
+  P1_PUSH_CANDIDATE_SHA: 407989dad140e2fe08d4924529194273605737e7
+  P1_PUSH_MODE: build
 
 jobs:
   candidate-runtime:
@@ -81,6 +81,7 @@ jobs:
         env:
           P1_CANDIDATE_SHA: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
           P1_CI_CASE: recorded-1c
+          P1_MANUAL_VISUAL: '1'
         run: |
           python3 validation-source/scripts/ci/p1-ci-ui-smoke.py \
             --source "$GITHUB_WORKSPACE/product-source" --candidate-sha "$P1_CANDIDATE_SHA" \
@@ -92,6 +93,12 @@ jobs:
           name: p1-candidate-runtime-evidence
           path: |
             ${{ runner.temp }}/p1-evidence/runtime-reuse.json
+            ${{ runner.temp }}/p1-evidence/p1-manual-visual-native.json
+            ${{ runner.temp }}/p1-evidence/p1-manual-visual-native.jsonl
+            ${{ runner.temp }}/p1-evidence/p1-manual-visual-native.control.log
+            ${{ runner.temp }}/p1-evidence/p1-manual-visual-feature-off.json
+            ${{ runner.temp }}/p1-evidence/p1-manual-visual-feature-off.jsonl
+            ${{ runner.temp }}/p1-evidence/p1-manual-visual-feature-off.control.log
             ${{ runner.temp }}/p1-evidence/manifest.json
             ${{ runner.temp }}/p1-evidence/p1-source-preflight.json
             ${{ runner.temp }}/p1-evidence/p1-source-preflight.log

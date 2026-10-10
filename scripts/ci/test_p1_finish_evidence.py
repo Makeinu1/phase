@@ -21,6 +21,63 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_manual_visual_rejects_false_warning_overlap_and_missing_narrow_view(self):
+        import copy
+        def rect(left, top, width, height):
+            return dict(left=left, right=left+width, top=top, bottom=top+height, width=width, height=height)
+        value = dict(viewport={'width':1440,'height':1000}, source=rect(0,0,300,350),
+            card=rect(78,10,144,202), details=rect(10,230,280,90), form=rect(0,370,300,150),
+            lines=[rect(10,230,200,20),rect(10,260,280,20)],sourceClientWidth=298,sourceScrollWidth=298,
+            panelClientWidth=332,panelScrollWidth=332,cardContentPresent=True,cardContentKind='artless-fallback',diagnostic=None,
+            visible=dict(left=0,right=390,top=0,bottom=844),
+            warningVisible=False,warningSuppressed=False)
+        capture.validate_manual_visual_observation(value)
+        for key, changed in [('diagnostic',{}),('warningVisible',True),('warningSuppressed',True),
+                ('cardContentPresent',False),('cardContentKind','unavailable'),('card',rect(200,10,144,202)),
+                ('details',rect(10,100,280,90)),('form',rect(0,200,300,150)),
+                ('lines',[rect(250,230,200,20),rect(10,260,280,20)]),('sourceScrollWidth',350)]:
+            bad=copy.deepcopy(value);bad[key]=changed
+            with self.subTest(key=key),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_manual_visual_observation(bad)
+        observations={key:copy.deepcopy(value) for key in
+            ['same-source','life19','life18','registered-pending','historical-lookup','manual-source-narrow']}
+        observations['manual-source-narrow']['viewport']['width']=390
+        capture.validate_manual_visual({'manual_visual':observations,'viewport_restored':True})
+        for clipped in [dict(left=100,right=390,top=0,bottom=844),dict(left=0,right=390,top=0,bottom=250)]:
+            bad=copy.deepcopy(value);bad['visible']=clipped
+            with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual_observation(bad,require_visible=True)
+        observations['manual-source-narrow']['viewport']['width']=1440
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual({'manual_visual':observations,'viewport_restored':True})
+
+    def test_narrow_viewport_restore_preserves_primary_and_fails_closed(self):
+        tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='capture_narrow_source')
+        for body_fails in [False,True]:
+            for wd_present in [False,True]:
+                report={'manual_visual':{},'secondary':[]};primary_wd={'error':'original'}
+                original=ValueError('geometry failed');restorer=RuntimeError('restore failed')
+                def call(endpoint,args):
+                    if endpoint=='/window/rect' and args['width']==1440:
+                        report['webdriver_error']={'error':'restore'}
+                        raise restorer
+                    return True
+                def geometry(**kwargs):
+                    if body_fails:
+                        if wd_present:report['webdriver_error']=primary_wd
+                        raise original
+                    return {}
+                namespace={'observe':lambda:{'life':[20,20]},'call':call,'report':report,
+                           'manual_visual_observation':geometry,'capture':lambda step:None,'stage':'same-source'}
+                exec(compile(ast.Module(body=[function],type_ignores=[]),'<narrow-restore>', 'exec'),namespace)
+                with self.assertRaises(Exception) as caught:namespace['capture_narrow_source']()
+                self.assertIs(caught.exception,original if body_fails else restorer)
+                self.assertEqual(report['secondary'],[{'stage':'viewport-restore','code':1,'reason':'viewport-restore-failed'}])
+                self.assertIs(report['viewport_restored'],False)
+                if body_fails:
+                    self.assertEqual('webdriver_error' in report,wd_present)
+                    if wd_present:self.assertIs(report['webdriver_error'],primary_wd)
+                else:self.assertEqual(namespace['stage'],'viewport-restore')
+
     def test_recorded_prep_rejects_missing_recording_and_nonordinary_ready_state(self):
         import copy
         base={'life':[20,20],'manualPhase':None,'resolvingEntryId':None,'manualStackEntryId':None,
