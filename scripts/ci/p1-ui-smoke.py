@@ -468,6 +468,59 @@ return {viewport:{width:innerWidth,height:innerHeight},source:rect(source),card:
     return value
 
 
+def manual_scroll_geometry(kind):
+    return call('/execute/sync', {'script': '''
+const panel=[...document.querySelectorAll('section[aria-labelledby]')]
+ .find(e=>e.querySelector('h2')?.textContent==='Manual resolution');
+const owner=panel?.parentElement, target=panel?.querySelector(arguments[0]==='source'?'aside':'form');
+if(!owner || !target) return null;
+const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+const visible={left:0,top:0,right:innerWidth,bottom:innerHeight},ancestors=[];
+for(let e=owner;e;e=e.parentElement){
+ const style=getComputedStyle(e),r=rect(e);
+ ancestors.push({tag:e.tagName,rect:r,overflowX:style.overflowX,overflowY:style.overflowY,
+  scrollTop:e.scrollTop,scrollLeft:e.scrollLeft,clientHeight:e.clientHeight,scrollHeight:e.scrollHeight,
+  clientWidth:e.clientWidth,scrollWidth:e.scrollWidth});
+ if(/auto|scroll|hidden|clip/.test(style.overflowX)){visible.left=Math.max(visible.left,r.left+e.clientLeft);visible.right=Math.min(visible.right,r.left+e.clientLeft+e.clientWidth);}
+ if(/auto|scroll|hidden|clip/.test(style.overflowY)){visible.top=Math.max(visible.top,r.top+e.clientTop);visible.bottom=Math.min(visible.bottom,r.top+e.clientTop+e.clientHeight);}
+}
+const hit=e=>{const r=rect(e),top=document.elementFromPoint((r.left+r.right)/2,(r.top+r.bottom)/2);return !!top&&(top===e||e.contains(top));};
+const origin={x:Math.floor((visible.left+visible.right)/2),y:Math.floor((visible.top+visible.bottom)/2)};
+const atOrigin=document.elementFromPoint(origin.x,origin.y);
+const controls=['input[type="number"]','button[type="submit"]','button[type="button"]'].map(selector=>{
+ const e=panel.querySelector('form '+selector);return e?{selector,rect:rect(e),centerHitsTarget:hit(e),disabled:e.disabled,value:e.tagName==='INPUT'?e.value:null}:null;
+});
+return {viewport:{width:innerWidth,height:innerHeight},pageScroll:{x:scrollX,y:scrollY},visible,
+ target:rect(target),targetCenterHits:hit(target),ancestors,origin,originHitsOwner:!!atOrigin&&owner.contains(atOrigin),controls};
+''', 'args': [kind]})
+
+
+def scroll_manual_target(kind):
+    before_state=observe()
+    attempt={'target':kind,'input_kind':'native-wheel','before':manual_scroll_geometry(kind)}
+    report.setdefault('manual_narrow_scroll',[]).append(attempt)
+    attempt['plan']=CHECKS.manual_scroll_plan(attempt['before'])
+    delta=attempt['plan']['deltaY']
+    attempt['wheel_count']=0
+    if delta:
+        origin=attempt['before']['origin']
+        call('/actions',{'actions':[{'type':'wheel','id':'p1-manual-scroll','actions':[
+            {'type':'scroll','origin':'viewport','x':origin['x'],'y':origin['y'],
+             'deltaX':0,'deltaY':delta,'duration':250}]}]})
+        attempt['wheel_count']=1
+    frames={'script':'const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));','args':[]}
+    call('/execute/async',frames)
+    attempt['after']=manual_scroll_geometry(kind)
+    deadline=time.monotonic()+5
+    while True:
+        call('/execute/async',frames)
+        attempt['settled_after']=manual_scroll_geometry(kind)
+        if attempt['after']==attempt['settled_after'] or time.monotonic()>=deadline: break
+        attempt['after']=attempt['settled_after']
+    attempt['state_unchanged']=observe()==before_state
+    CHECKS.validate_manual_scroll(attempt)
+
+
 def capture_narrow_source():
     global stage
     before = observe()
@@ -477,20 +530,30 @@ def capture_narrow_source():
     try:
         stage = 'manual-source-narrow'
         call('/window/rect', {'width': 390, 'height': 844})
-        call('/execute/sync', {'script': '''
-const source=[...document.querySelectorAll('section[aria-labelledby]')]
- .find(e=>e.querySelector('h2')?.textContent==='Manual resolution')?.querySelector('aside');
-source.scrollIntoView({block:'start'});return true;
-''', 'args': []})
-        call('/execute/async', {'script': 'const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));', 'args': []})
+        scroll_manual_target('source')
         report['manual_visual']['manual-source-narrow'] = manual_visual_observation(require_visible=True)
         assert observe() == before, 'Viewport and source scrolling must not change game state'
         stage = 'capture-manual-source-narrow'
         capture('manual-source-narrow')
+        stage = 'manual-controls-narrow'
+        scroll_manual_target('controls')
+        assert observe() == before, 'Source and controls scrolling must not change game state'
+        stage = 'capture-manual-controls-narrow'
+        capture('manual-controls-narrow')
     except Exception as error:
         primary_error = error
         primary_wd_present = 'webdriver_error' in report
         primary_wd = report.get('webdriver_error')
+        try:
+            diagnostic=ROOT/'screenshots/manual-narrow-diagnostic.png'
+            diagnostic.write_bytes(base64.b64decode(call('/screenshot')))
+            report['manual_narrow_diagnostic']={'path':'screenshots/manual-narrow-diagnostic.png',
+                'sha256':hashlib.sha256(diagnostic.read_bytes()).hexdigest()}
+        except Exception as diagnostic_error:
+            report['manual_narrow_diagnostic']={'status':'unavailable','error_type':type(diagnostic_error).__name__}
+        finally:
+            if primary_wd_present: report['webdriver_error']=primary_wd
+            else: report.pop('webdriver_error',None)
         raise
     finally:
         try:
@@ -1276,7 +1339,7 @@ except Exception as error:
               else 'scenario-command-failed')
     report['primary'] = {'stage': stage, 'code': 1, 'reason': reason}
     if (stage in {'capture-recorded-ready', 'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'capture-paidplay22'}
-            or (SOURCE_TEXT_POSITIVE and stage=='capture-manual-source-narrow')) and all(item['assertions_completed'] is True for item in report['stages'].values()):
+            or (SOURCE_TEXT_POSITIVE and stage in {'capture-manual-source-narrow','capture-manual-controls-narrow'})) and all(item['assertions_completed'] is True for item in report['stages'].values()):
         report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         report['secondary'].append({'stage': stage, 'code': 1, 'reason': 'required-capture-failed'})
         report['status'] = 'incomplete'

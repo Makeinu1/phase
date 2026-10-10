@@ -9,6 +9,7 @@ import base64
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -100,11 +101,76 @@ def validate_manual_visual_observation(value, require_visible=False):
         def on_screen(r):
             return (r['left'] >= visible['left']-1 and r['right'] <= visible['right']+1
                     and r['top'] >= visible['top']-1 and r['bottom'] <= visible['bottom']+1)
-        require(all(on_screen(r) for r in [card,details,*lines]), 'source-content-clipped')
+        require(all(on_screen(r) for r in [source,card,details,*lines]), 'source-content-clipped')
     for prefix in ['source', 'panel']:
         width, scroll = value.get(prefix+'ClientWidth'), value.get(prefix+'ScrollWidth')
         require(type(width) is int and type(scroll) is int and width > 0 and scroll <= width+1,
                 'source-horizontal-overflow:' + prefix)
+
+
+def manual_scroll_plan(value):
+    def require(condition,reason):
+        if not condition: raise EvidenceFailure('manual-visual',reason)
+    require(isinstance(value,dict),'manual-scroll-geometry-unavailable')
+    ancestors=value.get('ancestors')
+    require(isinstance(ancestors,list) and ancestors,'manual-scroll-owner-unavailable')
+    owner=ancestors[0]
+    require(owner.get('overflowY') in {'auto','scroll'},'manual-scroll-owner-unavailable')
+    target,visible=value.get('target',{}),value.get('visible',{})
+    numbers=[owner.get(k) for k in ['scrollTop','scrollHeight','clientHeight']]+[r.get(k) for r in [target,visible] for k in ['left','right','top','bottom']]
+    require(all(type(n) in {int,float} and math.isfinite(n) for n in numbers),'manual-scroll-geometry-unavailable')
+    current=owner['scrollTop'];maximum=owner['scrollHeight']-owner['clientHeight']
+    require(0<=current<=maximum and owner['clientHeight']>0 and target['bottom']>target['top']
+            and visible['bottom']>visible['top'] and visible['right']>visible['left'], 'manual-scroll-geometry-unavailable')
+    require(target['left']>=visible['left']-1 and target['right']<=visible['right']+1,
+            'source-horizontal-clipped')
+    lower=max(0,current+target['bottom']-visible['bottom']-1)
+    upper=min(maximum,current+target['top']-visible['top']+1)
+    require(math.ceil(lower)<=math.floor(upper),'manual-scroll-target-unreachable')
+    desired=min(max(round(current),math.ceil(lower)),math.floor(upper))
+    require(value.get('originHitsOwner') is True,'manual-scroll-origin-blocked')
+    origin=value.get('origin',{})
+    require(all(type(origin.get(k)) is int for k in ['x','y']) and
+            visible['left']<=origin['x']<=visible['right'] and visible['top']<=origin['y']<=visible['bottom'],
+            'manual-scroll-origin-unavailable')
+    return {'minimum':lower,'maximum':upper,'desired':desired,'deltaY':round(desired-current)}
+
+
+def validate_manual_scroll(attempt):
+    def require(condition,reason):
+        if not condition: raise EvidenceFailure('manual-visual',reason)
+    require(isinstance(attempt,dict) and attempt.get('target') in {'source','controls'}
+            and attempt.get('input_kind')=='native-wheel','manual-scroll-proof-unavailable')
+    before=attempt.get('before');plan=manual_scroll_plan(before)
+    require(attempt.get('plan')==plan and attempt.get('wheel_count')==(1 if plan['deltaY'] else 0)
+            and attempt.get('state_unchanged') is True,'manual-scroll-proof-mismatch')
+    after,settled=attempt.get('after'),attempt.get('settled_after')
+    require(isinstance(after,dict) and isinstance(settled,dict) and after==settled,'manual-scroll-not-settled')
+    require(after.get('viewport')==before.get('viewport') and after.get('pageScroll')==before.get('pageScroll'),
+            'manual-scroll-outer-context-changed')
+    old,new=before['ancestors'],after.get('ancestors',[])
+    require(len(old)==len(new),'manual-scroll-outer-context-changed')
+    for index,(a,b) in enumerate(zip(old,new)):
+        require(all(a.get(k)==b.get(k) for k in ['tag','rect','overflowX','overflowY','clientHeight','scrollHeight','clientWidth','scrollWidth','scrollLeft']),
+                'manual-scroll-outer-context-changed')
+        require(abs(b.get('scrollTop',-10000)-(plan['desired'] if index==0 else a['scrollTop']))<=1,
+                'manual-scroll-target-not-reached' if index==0 else 'manual-scroll-outer-context-changed')
+    visible=after.get('visible',{});target=after.get('target',{})
+    def on_screen(r):
+        return all(type(r.get(k)) in {int,float} for k in ['left','right','top','bottom']) and (
+            r['left']>=visible['left']-1 and r['right']<=visible['right']+1
+            and r['top']>=visible['top']-1 and r['bottom']<=visible['bottom']+1)
+    require(visible==before['visible'] and on_screen(target) and after.get('targetCenterHits') is True,
+            'manual-scroll-target-clipped-or-covered')
+    controls=after.get('controls',[])
+    require(len(controls)==3 and all(isinstance(c,dict) for c in controls)
+            and [c.get('selector') for c in controls]==['input[type="number"]','button[type="submit"]','button[type="button"]'],
+            'manual-scroll-controls-unavailable')
+    require([(c['disabled'],c['value']) for c in controls]==[(c['disabled'],c['value']) for c in before['controls']],
+            'manual-scroll-input-changed')
+    if attempt['target']=='controls':
+        require(all(on_screen(c['rect']) and c.get('centerHitsTarget') is True for c in controls)
+                and controls[2].get('disabled') is False,'manual-scroll-controls-unreachable')
 
 
 def validate_manual_visual(report, source_text=None, source_only=False):
@@ -122,6 +188,12 @@ def validate_manual_visual(report, source_text=None, source_only=False):
     narrow = observations['manual-source-narrow'].get('viewport', {}).get('width')
     if type(wide) is not int or wide < 1400 or type(narrow) is not int or not 360 <= narrow <= 500:
         raise EvidenceFailure('manual-visual', 'wide-and-narrow-viewports-not-observed')
+    scroll=report.get('manual_narrow_scroll')
+    if not isinstance(scroll,list) or [item.get('target') for item in scroll] != ['source','controls']:
+        raise EvidenceFailure('manual-visual','manual-scroll-proof-unavailable')
+    for attempt in scroll: validate_manual_scroll(attempt)
+    if scroll[0]['settled_after']['target']!=observations['manual-source-narrow']['source']:
+        raise EvidenceFailure('manual-visual','manual-scroll-source-capture-mismatch')
 
 
 def validate_source_text_positive(report, consumer, execution, source_text):
@@ -721,8 +793,8 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
     observations = {}
     required = ['recorded-initial','recorded-main','recorded-ready'] if recorded_prep else ['control-initial','control-completed'] if control else ['prepayment','same-source','life18','finish','paidplay21'] + (['life19','historical-lookup'] if s1_1c else []) if s1_1a or s1_1c else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
     if recorded_1c: required=['recorded-initial','recorded-main','recorded-ready','registered-pending']+required
-    if manual_visual: required += ['manual-source-narrow']
-    if source_text_only: required=['prepayment','same-source','manual-source-narrow']
+    if manual_visual: required += ['manual-source-narrow','manual-controls-narrow']
+    if source_text_only: required=['prepayment','same-source','manual-source-narrow','manual-controls-narrow']
     for step in required:
         matches = [item for item in steps if item.get('step') == step]
         if len(matches) != 1:
@@ -781,7 +853,7 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
     if source_text_only:
         report=json.loads((root/'ui-smoke-report.json').read_text())
         validate_source_text_positive(report,manifest['consumer'],execution,report.get('canonical_source_text',{}))
-        for step,key in [('prepayment','prepayment'),('same-source','begin'),('manual-source-narrow','begin')]:
+        for step,key in [('prepayment','prepayment'),('same-source','begin'),('manual-source-narrow','begin'),('manual-controls-narrow','begin')]:
             if observations[step]!=report.get(key):reject('required-source-text-state-mismatch:'+step)
         return {'required_steps':required,'verified_count':len(required)}
     if control:
@@ -794,7 +866,7 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
         report=json.loads((root/'ui-smoke-report.json').read_text());validate_recorded_1c(report)
         if manual_visual:
             validate_manual_visual(report)
-            if observations['manual-source-narrow'] != report.get('begin'):
+            if any(observations[key] != report.get('begin') for key in ['manual-source-narrow','manual-controls-narrow']):
                 reject('required-narrow-state-content-mismatch')
         for step,key in [('recorded-initial','recorded_initial'),('recorded-main','recorded_main'),('recorded-ready','recorded_ready')]:
             if observations[step]!=report.get(key):reject('required-recorded-state-content-mismatch:'+step)
@@ -844,7 +916,7 @@ def main():
     parser.add_argument('--step', required=True)
     parser.add_argument('--state-script', required=True, type=Path)
     args = parser.parse_args()
-    if not re.fullmatch(r'(manual-source-narrow|registered-pending|recorded-initial|recorded-main|recorded-ready|control-initial|control-completed|prepayment|same-source|life19|life18|historical-lookup|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
+    if not re.fullmatch(r'(manual-source-narrow|manual-controls-narrow|registered-pending|recorded-initial|recorded-main|recorded-ready|control-initial|control-completed|prepayment|same-source|life19|life18|historical-lookup|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
         raise ValueError('unknown P1 observation step')
     session = os.environ['P1_WEBDRIVER_SESSION']
     if not re.fullmatch('[a-zA-Z0-9-]+', session):

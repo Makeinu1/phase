@@ -120,7 +120,7 @@ def main():
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'capture-manual-source-narrow','viewport-restore','process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'capture-manual-source-narrow','capture-manual-controls-narrow','viewport-restore','process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True

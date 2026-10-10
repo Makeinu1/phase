@@ -20,6 +20,23 @@ capture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capture)
 
 
+def manual_scroll_fixture(source, form):
+    import copy
+    visible=dict(left=0,right=390,top=0,bottom=844)
+    owner=dict(tag='DIV',rect=dict(left=0,right=390,top=0,bottom=844,width=390,height=844),
+        overflowX='auto',overflowY='auto',scrollTop=0,scrollLeft=0,
+        clientHeight=844,scrollHeight=1400,clientWidth=390,scrollWidth=390)
+    controls=[dict(selector=selector,rect=form,centerHitsTarget=True,disabled=disabled,value=value)
+        for selector,disabled,value in [('input[type="number"]',True,''),('button[type="submit"]',True,None),('button[type="button"]',False,None)]]
+    result=[]
+    for kind,target in [('source',source),('controls',form)]:
+        value=dict(viewport={'width':390,'height':844},pageScroll={'x':0,'y':0},visible=visible,
+            target=target,targetCenterHits=True,ancestors=[owner],origin={'x':195,'y':422},originHitsOwner=True,controls=controls)
+        result.append(dict(target=kind,input_kind='native-wheel',before=copy.deepcopy(value),
+            after=copy.deepcopy(value),settled_after=copy.deepcopy(value),plan=capture.manual_scroll_plan(value),wheel_count=0,state_unchanged=True))
+    return result
+
+
 class FinishEvidenceTests(unittest.TestCase):
     def test_actual_manual_observation_retains_geometry_before_rejection(self):
         tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
@@ -85,9 +102,11 @@ class FinishEvidenceTests(unittest.TestCase):
         observations={key:copy.deepcopy(value) for key in
             ['same-source','life19','life18','registered-pending','historical-lookup','manual-source-narrow']}
         observations['manual-source-narrow']['viewport']['width']=390
-        capture.validate_manual_visual({'manual_visual':observations,'viewport_restored':True})
+        scroll=manual_scroll_fixture(value['source'],value['form'])
+        visual=dict(manual_visual=observations,viewport_restored=True,manual_narrow_scroll=scroll)
+        capture.validate_manual_visual(visual)
         with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual(
-            {'manual_visual':observations,'viewport_restored':True},source_text=empty['canonicalSourceText'])
+            visual,source_text=empty['canonicalSourceText'])
         positive={'scope':capture.MANUAL_SOURCE_TEXT_SCOPE,'fixture':'1c.B','source_text_only':True,
             'status':'passed','consumer':{'sha':'same'},'consumer_execution':{'run':'same'},
             'primary':{'stage':'operations-complete','code':0,'reason':'completed'},'secondary':[],
@@ -101,6 +120,7 @@ class FinishEvidenceTests(unittest.TestCase):
                 resolvingEntryId=7,life=[20,20],ownManaCount=1,
                 publicEvents=dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0)),
             'prepayment_full_control':True,'prepayment_scope_visible':True,'viewport_restored':True,
+            'manual_narrow_scroll':scroll,
             'manual_visual':{key:copy.deepcopy(observations[key]) for key in ['same-source','manual-source-narrow']}}
         positive['click_commands']=[dict(operation=stage,kind='native-element-click',status='completed',locator=locator)
             for stage,locator in [
@@ -150,6 +170,7 @@ class FinishEvidenceTests(unittest.TestCase):
                         raise original
                     return {}
                 namespace={'observe':lambda:{'life':[20,20]},'call':call,'report':report,
+                           'scroll_manual_target':lambda kind:None,
                            'manual_visual_observation':geometry,'capture':lambda step:None,'stage':'same-source'}
                 exec(compile(ast.Module(body=[function],type_ignores=[]),'<narrow-restore>', 'exec'),namespace)
                 with self.assertRaises(Exception) as caught:namespace['capture_narrow_source']()
@@ -160,6 +181,37 @@ class FinishEvidenceTests(unittest.TestCase):
                     self.assertEqual('webdriver_error' in report,wd_present)
                     if wd_present:self.assertIs(report['webdriver_error'],primary_wd)
                 else:self.assertEqual(namespace['stage'],'viewport-restore')
+
+    def test_manual_scroll_is_bounded_visible_and_state_preserving(self):
+        import copy
+        source=dict(left=10,right=300,top=0,bottom=350,width=290,height=350)
+        form=dict(left=10,right=300,top=370,bottom=520,width=290,height=150)
+        proof=manual_scroll_fixture(source,form)[0]
+        capture.validate_manual_scroll(proof)
+        before=proof['before']
+        before['ancestors'][0].update(scrollTop=400,clientHeight=490)
+        before['visible']['bottom']=490
+        before['target'].update(top=-211.66,bottom=138.34)
+        before['origin']['y']=245
+        proof['plan']=capture.manual_scroll_plan(before);proof['wheel_count']=1
+        after=copy.deepcopy(before);after['ancestors'][0]['scrollTop']=400+proof['plan']['deltaY']
+        for key in ['top','bottom']:after['target'][key]-=proof['plan']['deltaY']
+        proof['after']=after;proof['settled_after']=copy.deepcopy(after)
+        capture.validate_manual_scroll(proof)
+        for key,changed in [('state_unchanged',False),('wheel_count',0)]:
+            bad=copy.deepcopy(proof);bad[key]=changed
+            with self.subTest(proof=key),self.assertRaises(capture.EvidenceFailure):capture.validate_manual_scroll(bad)
+        for key,changed in [('pageScroll',{'x':0,'y':211}),('targetCenterHits',False)]:
+            bad=copy.deepcopy(proof);bad['after'][key]=changed;bad['settled_after']=copy.deepcopy(bad['after'])
+            with self.subTest(after=key),self.assertRaises(capture.EvidenceFailure):capture.validate_manual_scroll(bad)
+        unreachable=copy.deepcopy(before);unreachable['target']['bottom']=unreachable['target']['top']+600
+        with self.assertRaises(capture.EvidenceFailure) as error:capture.manual_scroll_plan(unreachable)
+        self.assertEqual(error.exception.reason,'manual-scroll-target-unreachable')
+        blocked=copy.deepcopy(before);blocked['originHitsOwner']=False
+        with self.assertRaises(capture.EvidenceFailure):capture.manual_scroll_plan(blocked)
+        operation=manual_scroll_fixture(source,form)[1]
+        operation['after']['controls'][2]['disabled']=True;operation['settled_after']=copy.deepcopy(operation['after'])
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_scroll(operation)
 
     def test_recorded_prep_rejects_missing_recording_and_nonordinary_ready_state(self):
         import copy
