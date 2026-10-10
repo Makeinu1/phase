@@ -1716,33 +1716,7 @@ function GamePageContent({
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
-          {manualView && localContext && manualStackEntryId != null && (
-            <div className="absolute bottom-2 right-2 z-50 max-h-[70vh] w-[min(30rem,calc(100vw-1rem))] overflow-auto">
-              {manualInteractionId && manualAmountBounds ? <ManualResolutionSandbox
-                source={{ episodeId: manualIdentity!, stackEntryId: manualStackEntryId as ObjectId,
-                  sourceObjectId: manualView.source.sourceId as ObjectId, cardName: manualView.source.name,
-                  oracleText: manualCard?.oracle_text ?? "" }}
-                viewerPlayerId={manualOwnedView ? playerId : null}
-                selectedTarget={manualTarget}
-                onSelectedTargetChange={setManualTarget}
-                amountText={manualAmount}
-                onAmountTextChange={setManualAmount}
-                onPreviewSource={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}
-                operationAvailability={{ available: manualView.phase === "open" && manualView.minLifeLoss !== null,
-                  amountBounds: manualAmountBounds }}
-                canFinish={manualView.phase === "open"}
-                resolutionPhase={manualView.phase}
-                commandBinding={{ interactionId: manualInteractionId, adapterGeneration: localContext.adapterGeneration }}
-                confirmedRestoreEpoch={localContext.restoreEpoch}
-                commandPort={manualOwnedView ? manualPort : null}
-                returnFocusRef={manualReturnFocusRef}
-              /> : <section className="rounded-lg bg-slate-950 p-4 text-slate-100" aria-label={t("manualResolution.title")}>
-                <h2>{manualView.source.name}</h2><p className="whitespace-pre-wrap">{manualCard?.oracle_text ?? ""}</p>
-                <button type="button" onClick={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}>{t("manualResolution.readSource")}</button>
-                <p>{t(manualView.phase === "armed" ? "manualResolution.armed" : "manualResolution.displayOnly")}</p>
-              </section>}
-            </div>
-          )}
+
         </div>
 
         {/* Row 3: Player hand + zones. The hand is top-anchored in this row, so
@@ -1938,6 +1912,36 @@ function GamePageContent({
           the board's paint containment and the overlay subtree mounted. */}
       {createPortal(
         <div className="game-no-select text-white" style={gamePageStyle}>
+          {/* Manual owns a viewport scroll surface. A mobile game log can
+              shrink the paint-contained battlefield below the source card's
+              height; keep this same subtree mounted outside that boundary. */}
+          {manualView && localContext && manualStackEntryId != null && (
+            <div className="fixed bottom-2 right-2 z-50 max-h-[70dvh] w-[min(30rem,calc(100vw-1rem))] overflow-auto">
+              {manualInteractionId && manualAmountBounds ? <ManualResolutionSandbox
+                source={{ episodeId: manualIdentity!, stackEntryId: manualStackEntryId as ObjectId,
+                  sourceObjectId: manualView.source.sourceId as ObjectId, cardName: manualView.source.name,
+                  oracleText: manualCard?.oracle_text ?? "" }}
+                viewerPlayerId={manualOwnedView ? playerId : null}
+                selectedTarget={manualTarget}
+                onSelectedTargetChange={setManualTarget}
+                amountText={manualAmount}
+                onAmountTextChange={setManualAmount}
+                onPreviewSource={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}
+                operationAvailability={{ available: manualView.phase === "open" && manualView.minLifeLoss !== null,
+                  amountBounds: manualAmountBounds }}
+                canFinish={manualView.phase === "open"}
+                resolutionPhase={manualView.phase}
+                commandBinding={{ interactionId: manualInteractionId, adapterGeneration: localContext.adapterGeneration }}
+                confirmedRestoreEpoch={localContext.restoreEpoch}
+                commandPort={manualOwnedView ? manualPort : null}
+                returnFocusRef={manualReturnFocusRef}
+              /> : <section className="rounded-lg bg-slate-950 p-4 text-slate-100" aria-label={t("manualResolution.title")}>
+                <h2>{manualView.source.name}</h2><p className="whitespace-pre-wrap">{manualCard?.oracle_text ?? ""}</p>
+                <button type="button" onClick={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}>{t("manualResolution.readSource")}</button>
+                <p>{t(manualView.phase === "armed" ? "manualResolution.armed" : "manualResolution.displayOnly")}</p>
+              </section>}
+            </div>
+          )}
           <HelpSheet />
           <CardReportDialog returnFocusRef={gameMenuTriggerRef} />
 
