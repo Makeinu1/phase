@@ -421,3 +421,12 @@ Unknown messages are withheld so raw original/context data cannot be emitted.
 The strict predicates and failure remain unchanged. This diagnostic addition
 is not a same-entrance rerun or evidence that the old null had a specific runtime
 exception. The new CI case remains V only.
+
+
+### Local recorded-start preparation (finite, unpublished)
+
+The recorded-prep case is separate from legacy checkpoint and S1 controls. Its input comes only from the successful native8 host run on product74fd4e195ab3a60223e74932c79ec0ab9ba6c913, with three write-once files emitted after all assertions. The actual four-card database is separate from the145-checkpoint database. No replay header, resident, receipt or context is injected. The emitter's null playerCount means native default2; provider uses explicit2, not literally identical initializer fields. Check Limited format, actor0 and firstPlayer0 against the emitted full initializer input.
+
+Use a matching fresh guarded runtime/consumer and the recorded fixture1c.recorded.B. Run the existing product-browser with p1-ui-smoke.py and P1_UI_CASE=recorded-prep. Own Keep, ordinary own priority advance, native own Hand land double-click and Battlefield land single-click must produce life20/mana2, PreCombatMain/active0/priority0/stack0. Explicit B Keep/Pass is labelled a fixture participant driver, not opponent UI. Keep the three chosen own-hand IDs stable because each name has several copies. Stop unexpected waiting and at20 operations. Save3 exact images recorded-initial/main/ready with hash/state/provenance, actual hasReplayRecording true and replay SHA/action count only. Never publicly save replay/context/receipt/input blobs.
+
+validate_recorded_prep plus validate_required_images(recorded_prep=True) must pass after the real browser exit0. Offline unit fixtures test rejection behavior only. This case is recorded-start preparation, not full1c, engine in-flight, two-client or S1–S12 acceptance. Full qL2 custody and adapter historical19/current18 remain separate required work.

@@ -120,7 +120,7 @@ def main():
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True
@@ -134,16 +134,47 @@ def main():
             raise StageStop()
 
     try:
-        fixtures = evidence / 'private-fixtures'
-        guarded('p1-native-fixtures', ['cargo', 'test', '--locked', '-p', 'phase-engine',
-            '--features', 'manual_resolution_prototype', '--test', 'manual_resolution_prototype',
-            'p1_native_journey::paid_manual_begin_life_finish_next_and_checked_checkpoints',
-            '--', '--exact'], {'P1_FIXTURE_OUTPUT_DIR': str(fixtures)})
-        bundle = json.loads((fixtures / 'trusted-game-states.json').read_text())
-        if bundle['version'] != 1 or '1c.B' not in bundle['cases'] or len(bundle['cases']) != 145:
-            raise ValueError('finite fixture generation did not produce the reviewed bundle')
+        recorded = os.environ.get('P1_CI_CASE') == 'recorded-prep'
+        fixtures = evidence / ('private-recorded-inputs' if recorded else 'private-fixtures')
+        if recorded:
+            guarded('p1-recorded-fixtures', ['cargo', 'test', '--locked', '-p', 'engine-wasm',
+                '--features', 'manual_resolution_local_bootstrap', '--lib',
+                'local_continuation_tests::admitted_paid_manual_replay_uses_truthful_ordinary_header_and_seeks',
+                '--', '--exact'], {'P1_RECORDED_FIXTURE_OUTPUT_DIR': str(fixtures),
+                    'RUST_MIN_STACK': '8388608'})
+            bundle = json.loads((fixtures / 'recorded-game-inputs.json').read_text())
+            recipe = bundle.get('cases', {}).get('1c.recorded.B', {})
+            if (bundle.get('version') != 1 or set(bundle.get('cases', {})) != {'1c.recorded.B'}
+                    or recipe.get('kind') != 'recorded' or recipe.get('seed') != 117
+                    or recipe.get('familyVariant') != '1c' or recipe.get('position') != 'B'
+                    or set(recipe) != {'kind','seed','familyVariant','position','deckData'}):
+                raise ValueError('reviewed recorded recipe required')
+            cards = json.loads((fixtures / 'recorded-card-data.json').read_text())
+            if not isinstance(cards, dict) or set(cards) != {'replay mana land','replay next play','replay response','replay self loss'}:
+                raise ValueError('reviewed four-card database required')
+            initializer = json.loads((fixtures / 'recorded-initializer-inputs.json').read_text())
+            config = initializer.get('formatConfig', {})
+            if (initializer.get('deckData') != recipe['deckData'] or initializer.get('seed') != recipe['seed']
+                    or initializer.get('firstPlayer') != 0 or initializer.get('playerCount') is not None
+                    or initializer.get('matchConfig') is not None or config.get('format') != 'Limited'
+                    or config.get('starting_life') != 20 or config.get('min_players') != 2
+                    or config.get('max_players') != 2):
+                raise ValueError('recorded ordinary initializer correspondence required')
+            proof['recorded_initializer'] = {'deck_and_seed_match': True, 'first_player': 0,
+                'native_player_count': 'default-two', 'provider_player_count': 2,
+                'format': 'Limited', 'match_config': None, 'full_1c_accepted': False}
+            fixture_names = ['recorded-game-inputs.json','recorded-card-data.json','recorded-initializer-inputs.json']
+        else:
+            guarded('p1-native-fixtures', ['cargo', 'test', '--locked', '-p', 'phase-engine',
+                '--features', 'manual_resolution_prototype', '--test', 'manual_resolution_prototype',
+                'p1_native_journey::paid_manual_begin_life_finish_next_and_checked_checkpoints',
+                '--', '--exact'], {'P1_FIXTURE_OUTPUT_DIR': str(fixtures)})
+            bundle = json.loads((fixtures / 'trusted-game-states.json').read_text())
+            if bundle['version'] != 1 or '1c.B' not in bundle['cases'] or len(bundle['cases']) != 145:
+                raise ValueError('finite fixture generation did not produce the reviewed bundle')
+            fixture_names = ['card-data.json','trusted-game-states.json']
         proof['fixtures'] = {name: hashlib.sha256((fixtures / name).read_bytes()).hexdigest()
-            for name in ['card-data.json', 'trusted-game-states.json']}
+            for name in fixture_names}
         # Only ignored generated fixture bytes enter the immutable consumer.
         # A checkout-local exclude keeps the product's tracked tree unchanged.
         exclude = Path(subprocess.check_output(['git', 'rev-parse', '--git-path', 'info/exclude'],
@@ -155,9 +186,9 @@ def main():
             output.write('\n/client/public/p1-integration-fixtures/\n')
         public = source / 'client/public'
         (public / 'p1-integration-fixtures').mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(fixtures / 'trusted-game-states.json',
+        shutil.copyfile(fixtures / ('recorded-game-inputs.json' if recorded else 'trusted-game-states.json'),
             public / 'p1-integration-fixtures/trusted-game-states.json')
-        shutil.copyfile(fixtures / 'card-data.json', public / 'card-data.json')
+        shutil.copyfile(fixtures / ('recorded-card-data.json' if recorded else 'card-data.json'), public / 'card-data.json')
         proof['stage'] = 'install-runtime'
         subprocess.run(['python3', str(VALIDATION / 'scripts/ci/p1-wasm-validation.py'),
             'install-runtime', '--source', str(source), '--candidate-sha', args.candidate_sha,
@@ -167,9 +198,11 @@ def main():
             str(Path(environment['RUNNER_TEMP']) / 'p1-browser-tools'), str(evidence / 'browser-tools.json')])
         browser_proof = json.loads((evidence / 'browser-tools.json').read_text())
         tools = {key: browser_proof[key]['path'] for key in ['P1_CHROME_BINARY', 'BOOTSTRAP_CHROMEDRIVER']}
-        for case in ['auto-v']:
+        for case in (['recorded-prep'] if recorded else ['auto-v']):
             manual = case == 'manual-originals'
-            if manual:
+            if recorded:
+                proof['scope'] = 'recorded-start-preparation-only'
+            elif manual:
                 proof['scope'] = checks.NATIVE_ORIGINAL_SCOPE
             elif case=='auto-v':
                 proof['scope'] = checks.AUTO_V_SCOPE
@@ -181,7 +214,7 @@ def main():
             proof['stage'] = 'product-browser'
             guarded('p1-ui-smoke', ['python3', str(VALIDATION / 'scripts/ci/p1-product-browser.py'),
                 '--source', str(source), '--evidence', str(browser_evidence),
-                '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture='+('1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B'),
+                '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture='+('1c.recorded.B' if recorded else '1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B'),
                 '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
                 dict({key: str(value) for key, value in tools.items()},
                     P1_UI_CASE='prepayment1c' if manual else case, P1_NATIVE_CHECKS='1' if manual else '0'))
@@ -193,15 +226,18 @@ def main():
                 report = json.loads((browser_evidence / 'ui-smoke-report.json').read_text())
             except (OSError, ValueError):
                 raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
-            checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=manual, control=None if manual else case)
+            if recorded:
+                checks.validate_recorded_operations(report, manifest['consumer'], proof['consumer_execution'])
+            else:
+                checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=manual, control=None if manual else case)
             if manual:
                 checks.validate_native_original_checks(report, final=True)
             proof['cases'][case] = {'status':'operations-complete','operations':'passed','images':'not_run'}
             proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}
             proof['stage'] = 'required-images'
-            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], s1_1c=manual, control=None if manual else case)
+            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], s1_1c=manual, control=None if manual or recorded else case, recorded_prep=recorded)
             proof['cases'][case] = {'status':'passed','images':images,'normal_ui':True,
-                'initial_fixture':('1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B')+'-fresh-before-designation-payment','opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False}
+                'initial_fixture':('1c.recorded.B' if recorded else '1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B')+'-fresh-before-designation-payment','opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False}
             if manual:
                 proof['cases'][case].update(refusal_ui=False,refusal_boundary='real-Worker-register-only',
                     qL2_precommit_custody=False,adapter_historical_publication=False,full_1c_accepted=False)

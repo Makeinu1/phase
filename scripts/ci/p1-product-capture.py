@@ -423,7 +423,84 @@ def finish_matches(initial, ended, own_life=19):
             and type(ended.get('stackCount')) is int and ended['stackCount'] == count)
 
 
-def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False, s1_1c=False, control=None):
+def validate_recorded_operations(report, consumer, execution):
+    if (report.get('status') != 'passed' or report.get('consumer') != consumer
+            or report.get('consumer_execution') != execution
+            or report.get('primary') != {'stage':'operations-complete','code':0,'reason':'completed'}
+            or report.get('secondary') != []):
+        raise EvidenceFailure('operation-assertions', 'recorded-operation-provenance-or-completion')
+    for stage in ['recorded-initial','recorded-main','recorded-ready']:
+        value = report.get('stages', {}).get(stage, {})
+        if value.get('status') != 'passed' or value.get('assertions_completed') is not True:
+            raise EvidenceFailure('operation-assertions', 'recorded-stage-incomplete:'+stage)
+    validate_recorded_prep(report)
+
+
+def validate_recorded_prep(report):
+    def require(value, reason):
+        if not value: raise EvidenceFailure('recorded-start-preparation', reason)
+    require(report.get('scope') == 'recorded-start-preparation-only' and report.get('fixture') == '1c.recorded.B', 'scope')
+    ready=report.get('recorded_ready') or {}
+    require(ready.get('life') == [20,20] and ready.get('ownManaCount') == 2
+        and ready.get('phase') == 'PreCombatMain' and ready.get('activePlayer') == 0
+        and ready.get('waitingType') == 'Priority' and ready.get('priorityPlayer') == 0
+        and ready.get('stackCount') == 0 and ready.get('manualPhase') is None
+        and ready.get('resolvingEntryId') is None and ready.get('manualStackEntryId') is None, 'ordinary-ready-state')
+    ids=ready.get('selectedIds') or {};land=ready.get('land') or {}
+    require(set(ids)=={'source','next','land'} and all(type(x) is int for x in ids.values())
+        and len(set(ids.values()))==3 and ready.get('sourceCardId')==ids['source'] and ready.get('sourceInHand') is True and ready.get('nextCardId')==ids['next']
+        and land.get('id')==ids['land'] and land.get('zone')=='Battlefield' and land.get('controller')==0
+        and land.get('tapped') is True and land.get('inHand') is False and land.get('inBattlefield') is True, 'selected-cards')
+    require(ready.get('publicEvents')==dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0,nextDepartures=0),'premature-effect')
+    initial,main,landed=(report.get(key) for key in ['recorded_initial','recorded_main','land_mana_before'])
+    require(all(isinstance(x,dict) for x in [initial,main,landed]),'prep-boundaries')
+    for state in [initial,main,landed]:
+        require(state.get('life')==[20,20] and state.get('ownManaCount')==0 and state.get('stackCount')==0
+            and state.get('manualPhase') is None and state.get('resolvingEntryId') is None
+            and state.get('manualStackEntryId') is None and state.get('selectedIds')==ids
+            and state.get('sourceCardId')==ids['source'] and state.get('sourceInHand') is True
+            and state.get('nextCardId')==ids['next'] and state.get('publicEvents')==ready['publicEvents'],'prep-boundary')
+    require(initial.get('waitingType')=='MulliganDecision' and 0 in initial.get('mulliganPlayers',[]) and 1 in initial.get('mulliganPlayers',[]),'initial-mulligan')
+    for state in [initial,main]:
+        land=state.get('land') or {}
+        require(land.get('id')==ids['land'] and land.get('zone')=='Hand' and land.get('inHand') is True
+            and land.get('inBattlefield') is False and land.get('tapped') is False and land.get('controller')==0,'land-before-play')
+    require(main.get('phase')=='PreCombatMain' and main.get('activePlayer')==0
+        and main.get('waitingType')=='Priority' and main.get('priorityPlayer')==0
+        and 'PlayLand' in main['land'].get('legalActionTypes',[]),'main-before-play')
+    require(landed.get('phase')=='PreCombatMain' and landed.get('activePlayer')==0
+        and landed.get('waitingType')=='Priority' and landed.get('priorityPlayer')==0
+        and landed['land'].get('id')==ids['land'] and landed['land'].get('zone')=='Battlefield'
+        and landed['land'].get('controller')==0 and landed['land'].get('tapped') is False
+        and landed['land'].get('inBattlefield') is True and landed['land'].get('inHand') is False
+        and any(t in landed['land'].get('legalActionTypes',[]) for t in ['ActivateManaSource','TapLandForMana']),'land-before-mana')
+    recording=report.get('recording') or {}
+    require(recording.get('available') is True and type(recording.get('replayActions')) is int
+        and recording['replayActions']>0 and isinstance(recording.get('replaySha256'),str)
+        and re.fullmatch('[0-9a-f]{64}',recording['replaySha256']), 'recording')
+    require(type(report.get('prep_steps')) is int and 3<=report['prep_steps']<=20,'step-bound')
+    drivers=report.get('prep_opponent_drivers')
+    require(isinstance(drivers,list) and all(d.get('ok') is True and d.get('actor')==1 and type(d.get('commands')) is int
+        and d['commands']==1 and d.get('action') in ['MulliganDecision','PassPriority']
+        and d.get('opponent_ui') is False and d.get('two_client') is False for d in drivers),'opponent-driver')
+    require(sum(d.get('action')=='MulliganDecision' for d in drivers)==1,'missing-or-duplicate-B-keep')
+    for driver in drivers:
+        before=driver.get('before') or {};after=driver.get('after') or {}
+        for state in [before,after]:
+            require(state.get('life')==[20,20] and state.get('ownManaCount')==0 and state.get('stackCount')==0
+                and state.get('manualPhase') is None and state.get('resolvingEntryId') is None
+                and state.get('selectedIds')==ids,'driver-boundary')
+        require((driver['action']=='MulliganDecision' and before.get('waitingType')=='MulliganDecision'
+            and 1 in before.get('mulliganPlayers',[])) or (driver['action']=='PassPriority'
+            and before.get('waitingType')=='Priority' and before.get('priorityPlayer')==1),'driver-before')
+    commands=report.get('click_commands') or []
+    for operation,kind in [('recorded-own-keep','native-element-click'),('recorded-land-play','native-pointer-double-click'),('recorded-land-mana','native-element-click')]:
+        matches=[c for c in commands if c.get('operation')==operation]
+        require(len(matches)==1 and matches[0].get('status')=='completed' and matches[0].get('kind')==kind,'native-input:'+operation)
+        if operation=='recorded-land-play':require(matches[0].get('native_double_click_verified') is True,'unverified-land-double-click')
+
+
+def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False, s1_1c=False, control=None, recorded_prep=False):
     """Recheck the three existing capture receipts and saved public bytes."""
     def reject(reason):
         raise EvidenceFailure('required-images', reason)
@@ -431,10 +508,10 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
         steps = json.loads((root / 'step-index.json').read_text())
     except (OSError, ValueError):
         reject('required-image-index-unreadable')
-    if not isinstance(steps, list) or any(not isinstance(item, dict) for item in steps):
+    if not isinstance(steps, list) or any(not isinstance(item, dict) for item in steps) or (recorded_prep and len(steps)!=3):
         reject('required-image-index-invalid')
     observations = {}
-    required = ['control-initial','control-completed'] if control else ['prepayment','same-source','life18','finish','paidplay21'] + (['life19','historical-lookup'] if s1_1c else []) if s1_1a or s1_1c else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
+    required = ['recorded-initial','recorded-main','recorded-ready'] if recorded_prep else ['control-initial','control-completed'] if control else ['prepayment','same-source','life18','finish','paidplay21'] + (['life19','historical-lookup'] if s1_1c else []) if s1_1a or s1_1c else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
     for step in required:
         matches = [item for item in steps if item.get('step') == step]
         if len(matches) != 1:
@@ -484,6 +561,12 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
                         or (state['waitingType'] is not None and not isinstance(state['waitingType'], str))):
                     reject('required-state-invalid:' + step)
                 observations[step] = state
+    if recorded_prep:
+        report=json.loads((root/'ui-smoke-report.json').read_text())
+        validate_recorded_prep(report)
+        for step,key in [('recorded-initial','recorded_initial'),('recorded-main','recorded_main'),('recorded-ready','recorded_ready')]:
+            if observations[step]!=report.get(key): reject('required-recorded-state-content-mismatch:'+step)
+        return {'required_steps':required,'verified_count':len(required)}
     if control:
         report=json.loads((root/'ui-smoke-report.json').read_text())
         validate_control_boundaries(report)
@@ -535,7 +618,7 @@ def main():
     parser.add_argument('--step', required=True)
     parser.add_argument('--state-script', required=True, type=Path)
     args = parser.parse_args()
-    if not re.fullmatch(r'(control-initial|control-completed|prepayment|same-source|life19|life18|historical-lookup|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
+    if not re.fullmatch(r'(recorded-initial|recorded-main|recorded-ready|control-initial|control-completed|prepayment|same-source|life19|life18|historical-lookup|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
         raise ValueError('unknown P1 observation step')
     session = os.environ['P1_WEBDRIVER_SESSION']
     if not re.fullmatch('[a-zA-Z0-9-]+', session):

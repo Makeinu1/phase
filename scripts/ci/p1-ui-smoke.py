@@ -24,14 +24,15 @@ BASE = 'http://127.0.0.1:9515/session/' + SESSION
 spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
+RECORDED_PREP = os.environ.get('P1_UI_CASE') == 'recorded-prep'
 AUTO_CONTROL = os.environ.get('P1_UI_CASE') if os.environ.get('P1_UI_CASE') in {'auto-s','auto-n','auto-v'} else None
 SPLIT_APPLY = os.environ.get('P1_UI_CASE') == 'prepayment1c'
 PREPAYMENT = SPLIT_APPLY or os.environ.get('P1_UI_CASE') == 'prepayment1a'
 NATIVE_CHECKS = SPLIT_APPLY and os.environ.get('P1_NATIVE_CHECKS') == '1'
-report = {'scope': (CHECKS.AUTO_V_SCOPE if AUTO_CONTROL=='auto-v' else CHECKS.AUTO_CONTROLS_SCOPE) if AUTO_CONTROL else (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
-          'control_case': AUTO_CONTROL, 'fixture': ('11c.V.B' if AUTO_CONTROL=='auto-v' else '1a.B') if AUTO_CONTROL else ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
+report = {'scope': 'recorded-start-preparation-only' if RECORDED_PREP else (CHECKS.AUTO_V_SCOPE if AUTO_CONTROL=='auto-v' else CHECKS.AUTO_CONTROLS_SCOPE) if AUTO_CONTROL else (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
+          'control_case': AUTO_CONTROL, 'fixture': '1c.recorded.B' if RECORDED_PREP else ('11c.V.B' if AUTO_CONTROL=='auto-v' else '1a.B') if AUTO_CONTROL else ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
-                     for name in (['control-initial','control-full-control','control-paid','control-response','control-completed'] if AUTO_CONTROL else ['prepayment', 'manual-options', 'manual-cast', 'initial'] + (['life19', 'life18', 'historical-lookup'] if SPLIT_APPLY else ['life18']) + ['finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
+                     for name in (['recorded-initial','recorded-main','recorded-ready'] if RECORDED_PREP else ['control-initial','control-full-control','control-paid','control-response','control-completed'] if AUTO_CONTROL else ['prepayment', 'manual-options', 'manual-cast', 'initial'] + (['life19', 'life18', 'historical-lookup'] if SPLIT_APPLY else ['life18']) + ['finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
@@ -392,6 +393,65 @@ def capture(step):
     subprocess.run(['python3', str(VALIDATION / 'scripts/ci/p1-product-capture.py'),
         '--evidence', str(ROOT), '--step', step,
         '--state-script', str(VALIDATION / 'scripts/ci/p1-public-state.js')], check=True)
+
+
+def run_recorded_prep():
+    global stage
+    def passed(name):
+        report['stages'][name]={'status':'passed','assertions_completed':True}
+    def boundary(value):
+        return value['life']==[20,20] and value['stackCount']==0 and value['manualPhase'] is None and value['ownManaCount']==0
+    stage='recorded-initial'
+    initial=wait_for(lambda x:x['waitingType']=='MulliganDecision' and 0 in x.get('mulliganPlayers',[]) and x.get('selectedIds') is not None)
+    assert boundary(initial)
+    report['recorded_initial']=initial
+    passed('recorded-initial');stage='capture-recorded-initial';capture('recorded-initial')
+    report['prep_opponent_drivers']=[];steps=0
+    while steps<18:
+        current=observe();assert boundary(current)
+        if current['phase']=='PreCombatMain' and current['activePlayer']==0 and current['waitingType']=='Priority' and current['priorityPlayer']==0:break
+        pending=current.get('mulliganPlayers',[])
+        if current['waitingType']=='MulliganDecision' and 0 in pending:
+            stage='recorded-own-keep';click('//button[normalize-space()="Keep Hand"]','xpath')
+        elif (current['waitingType']=='MulliganDecision' and 1 in pending) or (current['waitingType']=='Priority' and current['priorityPlayer']==1):
+            stage='recorded-opponent-driver'
+            result=call('/execute/async',{'script':"""
+const done=arguments[arguments.length-1];
+(async()=>{const {useGameStore}=await import('/src/stores/gameStore.ts');const {dispatchAction}=await import('/src/game/dispatch.ts');
+ const before=window.__p1Observe();if(useGameStore.getState().gameMode!=='local'||JSON.stringify(before.life)!=='[20,20]'||before.stackCount!==0||before.ownManaCount!==0||before.manualPhase!==null||before.resolvingEntryId!==null)throw Error('Unexpected prep boundary');
+ const action=before.waitingType==='MulliganDecision'&&before.mulliganPlayers.includes(1)?{type:'MulliganDecision',data:{choice:{type:'Keep'}}}:before.waitingType==='Priority'&&before.priorityPlayer===1?{type:'PassPriority'}:null;
+ if(!action)throw Error('Unexpected opponent waiting');await dispatchAction(action,1);
+ done({ok:true,actor:1,commands:1,action:action.type,before,after:window.__p1Observe(),opponent_ui:false,two_client:false});
+})().catch(e=>done({ok:false,error_type:e?.name??'Error'}));
+""",'args':[]});assert result.get('ok') is True;report['prep_opponent_drivers'].append(result)
+        elif current['waitingType']=='Priority' and current['priorityPlayer']==0 and current['activePlayer']==0:
+            stage='recorded-own-advance';click('//div[@data-mobile-action-right]//button[starts-with(normalize-space(),"To ") or normalize-space()="Pass Priority"]','xpath')
+        else:raise AssertionError('Unexpected recorded prep waiting')
+        steps+=1
+        wait_for(lambda x:x!=current)
+    else:raise AssertionError('Recorded preparation step bound exceeded')
+    stage='recorded-main';main=observe();assert boundary(main)
+    ids=main['selectedIds'];assert 'PlayLand' in main['land']['legalActionTypes'] and main['land']['inHand'] is True
+    report['recorded_main']=main;passed('recorded-main');stage='capture-recorded-main';capture('recorded-main')
+    stage='recorded-land-play';click('[data-hand-card][data-object-id="'+str(ids['land'])+'"]',double=True);steps+=1
+    landed=wait_for(lambda x:x['land']['inBattlefield'] is True)
+    assert boundary(landed) and landed['land']['controller']==0 and landed['land']['tapped'] is False
+    report['land_mana_before']=landed
+    assert any(a in landed['land']['legalActionTypes'] for a in ['TapLandForMana','ActivateManaSource'])
+    stage='recorded-land-mana';click('[data-permanent-card="'+str(ids['land'])+'"]');steps+=1
+    ready=wait_for(lambda x:x['ownManaCount']==2 and x['land']['tapped'] is True)
+    recording=call('/execute/async',{'script':"""
+const done=arguments[arguments.length-1];
+(async()=>{const {useGameStore}=await import('/src/stores/gameStore.ts');const engine=useGameStore.getState().adapter.getEngineClient();
+ const available=await engine.hasReplayRecording();if(!available)throw Error('Recording unavailable');
+ const replay=await engine.exportReplayLog();const parsed=JSON.parse(replay);if(!Array.isArray(parsed.actions))throw Error('Replay schema');
+ const replaySha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(replay))),n=>n.toString(16).padStart(2,'0')).join('');
+ done({available,replayActions:parsed.actions.length,replaySha256});})().catch(e=>done({available:false,error_type:e?.name??'Error'}));
+""",'args':[]})
+    report.update(recorded_ready=ready,recording=recording,prep_steps=steps)
+    CHECKS.validate_recorded_prep(report)
+    stage='recorded-ready';passed('recorded-ready');stage='capture-recorded-ready';capture('recorded-ready')
+    report['primary']={'stage':'operations-complete','code':0,'reason':'completed'};report['status']='passed'
 
 
 def resolve_control(completed_life=22):
@@ -800,19 +860,30 @@ try:
     # engine/store state and never exposes actor/context/receipt wire data.
     ready = call('/execute/async', {'script': """
 const done = arguments[arguments.length - 1];
+const recorded=arguments[0];let selectedIds=null;
 Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'),
   import('/src/hooks/usePlayerId.ts'), import('/src/viewmodel/cardActionChoice.ts')]).then(
   ([{useGameStore}, {useUiStore}, {getPlayerId, getCanActForWaitingState}, {resolveSingleActionDispatch}]) => {
   window.__p1Observe = () => {
     const s = useGameStore.getState(), g = s.gameState;
     const v = g?.derived?.manual_resolution;
-    const sourceId = Object.values(g?.objects ?? {}).find(o => o.name === 'P1 Self Loss')?.id ?? null;
+    if(recorded && !selectedIds && g?.players?.[0]?.hand) {
+      const hand=g.players[0].hand;const find=name=>hand.find(id=>g.objects?.[id]?.name===name);
+      const source=find('Replay Self Loss'),next=find('Replay Next Play'),land=find('Replay Mana Land');
+      if([source,next,land].every(id=>Number.isInteger(id)))selectedIds={source,next,land};
+    }
+    const sourceId = recorded ? selectedIds?.source ?? null : Object.values(g?.objects ?? {}).find(o => o.name === 'P1 Self Loss')?.id ?? null;
     const vanilla = Object.values(g?.objects ?? {}).find(o => o.name === 'P1 Vanilla V') ?? null;
-    const nextId = g?.players?.[0]?.hand?.find(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? null;
+    const nextId = recorded ? (g?.players?.[0]?.hand?.includes(selectedIds?.next)?selectedIds.next:null) : g?.players?.[0]?.hand?.find(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? null;
     if (nextId !== null) window.__p1NextSource = nextId;
     const nextObject = nextId === null ? null : g?.objects?.[nextId];
     const nextActions = nextId === null ? [] : s.legalActionsByObject?.[String(nextId)] ?? [];
-    return {life: g?.players?.map(p => p.life) ?? [],
+    const land=selectedIds ? g?.objects?.[selectedIds.land] : null;
+    return {...(recorded ? {selectedIds,phase:g?.phase,activePlayer:g?.active_player,
+      mulliganPlayers:s.waitingFor?.type==='MulliganDecision'?s.waitingFor.data.pending.map(p=>p.player):[],
+      land:land?{id:land.id,zone:land.zone,controller:land.controller,tapped:land.tapped,
+        inHand:g.players[0].hand.includes(land.id),inBattlefield:g.battlefield.includes(land.id),
+        legalActionTypes:(s.legalActionsByObject?.[String(land.id)]??[]).map(a=>a.type)}:null}:{}),life: g?.players?.map(p => p.life) ?? [],
       vanilla: vanilla ? {id:vanilla.id,name:vanilla.name,zone:vanilla.zone,controller:vanilla.controller,
         inHand:(g?.players?.[0]?.hand ?? []).includes(vanilla.id),inBattlefield:(g?.battlefield ?? []).includes(vanilla.id),
         power:vanilla.power,toughness:vanilla.toughness,cost:vanilla.mana_cost,
@@ -833,7 +904,7 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
       waitingType: s.waitingFor?.type ?? null,
       priorityPlayer: s.waitingFor?.type === 'Priority' ? s.waitingFor.data.player : null,
       ownManaCount: g?.players?.[0]?.mana_pool?.mana?.length ?? null,
-      nextCardId: g?.players?.[0]?.hand?.find(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? null,
+      nextCardId: nextId,
       nextPlayObservation: {localPlayerId: getPlayerId(), canActForWaitingState: getCanActForWaitingState(),
         debugInteractionMode: useUiStore.getState().debugInteractionMode, nextObjectExists: !!nextObject,
         legalActionCount: nextActions.length, legalActionTypes: nextActions.slice(0,20).map(a => a.type),
@@ -844,9 +915,11 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
   };
   done(true);
 }, () => done(false));
-""", 'args': []})
+""", 'args': [RECORDED_PREP]})
     assert ready, 'Public observer module could not load'
-    if AUTO_CONTROL:
+    if RECORDED_PREP:
+        run_recorded_prep()
+    elif AUTO_CONTROL:
         run_auto_control()
     elif PREPAYMENT:
         run_s1_1a()
@@ -969,7 +1042,7 @@ except Exception as error:
               else 'operation-assertion-failed' if isinstance(error, AssertionError)
               else 'scenario-command-failed')
     report['primary'] = {'stage': stage, 'code': 1, 'reason': reason}
-    if stage in {'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'capture-paidplay22'} and all(item['assertions_completed'] is True for item in report['stages'].values()):
+    if stage in {'capture-recorded-ready', 'capture-control-completed', 'capture-finish', 'capture-paidplay21', 'capture-paidplay22'} and all(item['assertions_completed'] is True for item in report['stages'].values()):
         report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
         report['secondary'].append({'stage': stage, 'code': 1, 'reason': 'required-capture-failed'})
         report['status'] = 'incomplete'

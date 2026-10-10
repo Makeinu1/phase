@@ -21,6 +21,85 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_recorded_prep_rejects_missing_recording_and_nonordinary_ready_state(self):
+        import copy
+        base={'life':[20,20],'manualPhase':None,'resolvingEntryId':None,'manualStackEntryId':None,
+          'stackCount':0,'phase':'PreCombatMain','activePlayer':0,'waitingType':'Priority','priorityPlayer':0,
+          'ownManaCount':2,'sourceCardId':1,'sourceInHand':True,'nextCardId':2,
+          'selectedIds':{'source':1,'next':2,'land':3},
+          'land':{'id':3,'zone':'Battlefield','controller':0,'tapped':True,'inHand':False,'inBattlefield':True},
+          'publicEvents':{'lifeChanges':[],'sourceDepartures':0,'manualTerminals':0,'nextDepartures':0}}
+        report={'scope':'recorded-start-preparation-only','fixture':'1c.recorded.B','status':'passed',
+          'recorded_ready':base,'recording':{'available':True,'replayActions':5,'replaySha256':'a'*64},
+          'prep_steps':4,'prep_opponent_drivers':[{'ok':True,'actor':1,'commands':1,'action':'MulliganDecision','opponent_ui':False,'two_client':False}],
+          'click_commands':[{'status':'completed','kind':'native-element-click','operation':'recorded-own-keep'},
+            {'status':'completed','kind':'native-pointer-double-click','operation':'recorded-land-play'},
+            {'status':'completed','kind':'native-element-click','operation':'recorded-land-mana'}]}
+        initial=copy.deepcopy(base);initial.update(ownManaCount=0,waitingType='MulliganDecision',mulliganPlayers=[0,1]);initial['land'].update(zone='Hand',tapped=False,inHand=True,inBattlefield=False,legalActionTypes=['PlayLand'])
+        main=copy.deepcopy(initial);main.update(waitingType='Priority',mulliganPlayers=[])
+        landed=copy.deepcopy(main);landed['land'].update(zone='Battlefield',inHand=False,inBattlefield=True,legalActionTypes=['ActivateManaSource'])
+        report.update(recorded_initial=initial,recorded_main=main,land_mana_before=landed)
+        report['prep_opponent_drivers'][0].update(before=initial,after=main)
+        report['click_commands'][1]['native_double_click_verified']=True
+        capture.validate_recorded_prep(report)
+        report.update(consumer={},consumer_execution={},secondary=[],
+            primary={'stage':'operations-complete','code':0,'reason':'completed'},
+            stages={stage:{'status':'passed','assertions_completed':True}
+                for stage in ['recorded-initial','recorded-main','recorded-ready']})
+        capture.validate_recorded_operations(report, {}, {})
+        for key,value in [('consumer',{'sha':'wrong'}),('consumer_execution',{'run_id':'wrong'}),
+                ('secondary',[{'code':1}]),('primary',{'stage':'operations-complete','code':1,'reason':'completed'}),
+                ('status','incomplete')]:
+            bad=copy.deepcopy(report);bad[key]=value
+            with self.subTest(completion=key),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_recorded_operations(bad, {}, {})
+        for stage in report['stages']:
+            bad=copy.deepcopy(report);bad['stages'][stage]['assertions_completed']=False
+            with self.subTest(stage=stage),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_recorded_operations(bad, {}, {})
+        cases=[('recording',{'available':False}),('recording',{'available':True,'replayActions':0,'replaySha256':'a'*64}),
+          ('prep_steps',21),('prep_opponent_drivers',[]),('prep_opponent_drivers',[{'ok':True,'actor':0,'commands':1,'action':'PassPriority','opponent_ui':False,'two_client':False}])]
+        for key,value in cases:
+          bad=copy.deepcopy(report);bad[key]=value
+          with self.subTest(key=key,value=value),self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+        for key,value in [('life',[18,20]),('ownManaCount',0),('activePlayer',1),('sourceInHand',False),('nextCardId',None),('stackCount',1),('manualPhase','open')]:
+          bad=copy.deepcopy(report);bad['recorded_ready'][key]=value
+          with self.subTest(key=key),self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+        bad=copy.deepcopy(report);bad['recorded_ready']['land']['tapped']=False
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+
+        for key in ['recorded_initial','recorded_main','land_mana_before']:
+          for field,value in [('ownManaCount',2),('selectedIds',{'source':9,'next':2,'land':3}),('manualPhase','open')]:
+            bad=copy.deepcopy(report);bad[key][field]=value
+            with self.subTest(boundary=key,field=field),self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+        bad=copy.deepcopy(report);bad['recorded_initial']['waitingType']='Priority'
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+        bad=copy.deepcopy(report);bad['recorded_main']['land']['zone']='Battlefield'
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+        bad=copy.deepcopy(report);bad['prep_opponent_drivers'][0]['before']={}
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+        bad=copy.deepcopy(report);bad['click_commands'][1]['native_double_click_verified']=False
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+
+        bad=copy.deepcopy(report);bad['recorded_initial']['mulliganPlayers']=[0]
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+        bad=copy.deepcopy(report);bad['prep_opponent_drivers']*=2
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+
+    def test_recorded_prep_actual_function_marks_initial_before_capture(self):
+        tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        node=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='run_recorded_prep')
+        class CaptureBoundary(Exception):pass
+        report={'stages':{'recorded-initial':{}}}
+        def capture_initial(step):
+            self.assertEqual(step,'recorded-initial')
+            self.assertEqual(report['stages'][step],{'status':'passed','assertions_completed':True})
+            raise CaptureBoundary()
+        state={'life':[20,20],'stackCount':0,'manualPhase':None,'ownManaCount':0}
+        namespace={'report':report,'wait_for':lambda predicate:state,'capture':capture_initial}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<actual-recorded-prep>','exec'),namespace)
+        with self.assertRaises(CaptureBoundary):namespace['run_recorded_prep']()
+
     def test_native_failure_preserves_safe_step_and_exception_without_raw_wire(self):
         source=Path(__file__).with_name('p1-ui-smoke.py').read_text()
         function=re.search(r'const nativeFailure = .*?\n };',source,re.S).group(0)
@@ -396,6 +475,12 @@ class FinishEvidenceTests(unittest.TestCase):
         self.assertEqual(report['primary'],dict(stage='operations-complete',code=0,reason='completed'))
         self.assertEqual(report['status'],'incomplete')
         self.assertEqual(report['secondary'],[dict(stage='capture-control-completed',code=1,reason='required-capture-failed')])
+        report={'stages':{k:{'assertions_completed':True} for k in ['recorded-initial','recorded-main','recorded-ready']},'secondary':[],'status':'failed'}
+        namespace=dict(stage='capture-recorded-ready',report=report)
+        exec(compile(ast.Module(body=[cases],type_ignores=[]),'<recorded-final-capture-failure>','exec'),namespace)
+        self.assertEqual(report['primary'],dict(stage='operations-complete',code=0,reason='completed'))
+        self.assertEqual(report['status'],'incomplete')
+        self.assertEqual(report['secondary'],[dict(stage='capture-recorded-ready',code=1,reason='required-capture-failed')])
         for name in ['p1-product-browser.py','p1-ci-ui-smoke.py']:
             module=ast.parse(Path(__file__).with_name(name).read_text())
             propagation=[n for n in ast.walk(module) if isinstance(n,ast.If) and 'item.get' in ast.unparse(n.test)
@@ -697,7 +782,7 @@ class FinishEvidenceTests(unittest.TestCase):
                       and any(isinstance(target, ast.Name) and target.id == 'report' for target in node.targets))
         expression = next(value for key, value in zip(report.keys, report.values)
                           if isinstance(key, ast.Constant) and key.value == 'scope')
-        ui_scope = eval(compile(ast.Expression(expression), '<ui-scope>', 'eval'), {'CHECKS': capture, 'PREPAYMENT': False, 'AUTO_CONTROL': None})
+        ui_scope = eval(compile(ast.Expression(expression), '<ui-scope>', 'eval'), {'CHECKS': capture, 'PREPAYMENT': False, 'AUTO_CONTROL': None, 'RECORDED_PREP': False})
         ci = ast.parse(Path(__file__).with_name('p1-ci-ui-smoke.py').read_text())
         assignment = next(node for node in ast.walk(ci) if isinstance(node, ast.Assign)
                           and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
