@@ -965,8 +965,8 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     probeStep='qF-'+operation;
     const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation,attempt:original.attempt});
     const current=reply.current&&unwrapClientGameState(reply.current.snapshot.state);
-    if(reply.receipt?.status!=='completed'||reply.receipt.rejection!==null||reply.appliedResult!==null||!eq(original.attempt,reply.receipt.attempt)||!eq(original.result,reply.receipt.result)||current?.players?.[0]?.life!==18)throw Error('Finish original mismatch');
-    rows.push({variant:'qF-'+operation,operation,status:'completed',sameOriginal:true,sameOriginalResult:true,appliedResultNull:true,resultPresent:true,...await invariant()});completedVariants.push(probeStep);
+    if(!original.result||!reply.receipt?.result||reply.receipt?.status!=='completed'||reply.receipt.rejection!==null||reply.appliedResult!==null||!eq(original.attempt,reply.receipt.attempt)||!eq(original.result,reply.receipt.result)||current?.players?.[0]?.life!==18||current?.derived?.manual_resolution?.phase!=='closed'||(current?.resolving_stack_entry ?? null)!==null||current?.stack?.length!==0||!current?.players?.[0]?.graveyard?.includes(original.attempt.source.sourceId)||!eq(frame.context,reply.current?.context))throw Error('Finish original mismatch');
+    rows.push({variant:'qF-'+operation,operation,status:'completed',sameOriginal:true,sameOriginalResult:true,appliedResultNull:true,resultPresent:true,currentClosed:true,currentSourceInGraveyard:true,currentContextMatched:true,...await invariant()});completedVariants.push(probeStep);
    }
    probeStep='old-Finish-new-attempt';
    const old={...structuredClone(original.attempt),attemptId:crypto.randomUUID()};
@@ -980,23 +980,36 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
    const previous=originals.at(-1)?.attempt;
    if(!opportunity||!finish||!previous||previous.submission.interactionId===opportunity.interactionId)throw Error('Fresh opportunity unavailable');
    const base={context:frame.context,source:resident.derived.manual_resolution.source,submission:{interactionId:opportunity.interactionId,response:{type:'manualResolution',data:{decision:{type:'loseOwnLife',data:{amount:1}}}}}};
-   const variants=[['amount-zero',a=>{a.submission.response.data.decision.data.amount=0;}],['amount-overflow',a=>{a.submission.response.data.decision.data.amount=2147483648;}],['source-N',a=>{a.source.sourceId=nextCardId;}],['mismatched-generation',a=>{a.context.adapterGeneration+=1;}],['wrong-Finish-choice',a=>{a.submission.response.data.decision={type:'finish',data:{choiceId:finish.id+'-wrong'}};}],['old-interaction',a=>{a.submission.interactionId=previous.submission.interactionId;}]];
+   if(frame.context.adapterGeneration!==10)throw Error('Expected initial generation10');
+   const variants=[['amount-zero',a=>{a.submission.response.data.decision.data.amount=0;}],['amount-overflow',a=>{a.submission.response.data.decision.data.amount=2147483648;}],['source-N',a=>{a.source.sourceId=nextCardId;}],['mismatched-generation',a=>{a.context.adapterGeneration+=1;}],['old-generation',a=>{a.context.adapterGeneration-=1;}],['wrong-Finish-choice',a=>{a.submission.response.data.decision={type:'finish',data:{choiceId:finish.id+'-wrong'}};}],['old-interaction',a=>{a.submission.interactionId=previous.submission.interactionId;}]];
    const attempts=new Set();
    for(const [variant,change] of variants){
     probeStep=variant;
     const attempt=structuredClone(base);if(variant==='wrong-Finish-choice')attempt.submission.response.data.decision={type:'finish',data:{choiceId:finish.id}};attempt.attemptId=crypto.randomUUID();
     const legitimate=structuredClone(attempt);change(attempt);
     const differences=(a,b,path='')=>{if(eq(a,b))return [];if(a&&b&&typeof a==='object'&&typeof b==='object')return [...new Set([...Object.keys(a),...Object.keys(b)])].flatMap(k=>differences(a[k],b[k],path?path+'.'+k:k));return [path];};
-    const expectedPath={'amount-zero':'submission.response.data.decision.data.amount','amount-overflow':'submission.response.data.decision.data.amount','source-N':'source.sourceId','mismatched-generation':'context.adapterGeneration','wrong-Finish-choice':'submission.response.data.decision.data.choiceId','old-interaction':'submission.interactionId'}[variant];
+    const expectedPath={'amount-zero':'submission.response.data.decision.data.amount','amount-overflow':'submission.response.data.decision.data.amount','source-N':'source.sourceId','mismatched-generation':'context.adapterGeneration','old-generation':'context.adapterGeneration','wrong-Finish-choice':'submission.response.data.decision.data.choiceId','old-interaction':'submission.interactionId'}[variant];
     if(!eq(differences(legitimate,attempt),[expectedPath]))throw Error('Exactly one field must differ');
     if(attempts.has(attempt.attemptId)||originals.some(r=>r.attempt.attemptId===attempt.attemptId))throw Error('Distinct attempt required');attempts.add(attempt.attemptId);
     const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'register',attempt});
-    const expected=variant==='mismatched-generation'?'stale_interaction':'invalid_interaction_response';
+    const expected=['mismatched-generation','old-generation'].includes(variant)?'stale_interaction':'invalid_interaction_response';
     if(reply.receipt?.status!=='notApplied'||reply.receipt.rejection?.code!==expected||reply.receipt.result!==null||reply.appliedResult!==null||!eq(attempt,reply.receipt.attempt)||!eq(frame.context,reply.current?.context))throw Error('Additional refusal not certified');
-    rows.push({variant,operation:'register',layer:variant==='mismatched-generation'?'native-current-context':'native-typed-source-interaction',status:'notApplied',rejection:expected,resultNull:true,appliedResultNull:true,sameOriginal:true,separateAttempt:true,oneFieldChange:true,...await invariant()});completedVariants.push(probeStep);
+    rows.push({variant,operation:'register',layer:['mismatched-generation','old-generation'].includes(variant)?'native-current-context':'native-typed-source-interaction',status:'notApplied',rejection:expected,resultNull:true,appliedResultNull:true,sameOriginal:true,separateAttempt:true,oneFieldChange:true,...(variant==='old-generation'?{currentGeneration:frame.context.adapterGeneration,submittedGeneration:attempt.context.adapterGeneration,strictlyOlder:attempt.context.adapterGeneration<frame.context.adapterGeneration}:{}),...await invariant()});completedVariants.push(probeStep);
    }
+   probeStep='amount-negative-decode';
+   const negative=structuredClone(base);negative.attemptId=crypto.randomUUID();negative.submission.response.data.decision.data.amount=-1;
+   if(attempts.has(negative.attemptId)||originals.some(r=>r.attempt.attemptId===negative.attemptId))throw Error('Distinct decode attempt required');
+   const unsignedBaseline=structuredClone(negative);unsignedBaseline.submission.response.data.decision.data.amount=1;
+   if(!eq(unsignedBaseline.context,base.context)||!eq(unsignedBaseline.source,base.source)||!eq(unsignedBaseline.submission,base.submission))throw Error('Decode changes only amount');
+   let decodedError=null;
+   try{await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'register',attempt:negative});}catch(error){
+    if(error?.name!=='AdapterError'||error?.code!=='ACTION_REJECTED'||error?.rejection?.code!=='invalid_interaction_response'||error?.rejection?.disposition!=='invalid')throw Error('Unexpected decode error');
+    decodedError={name:error.name,code:error.code,rejectionCode:error.rejection.code,disposition:error.rejection.disposition};
+   }
+   if(!decodedError)throw Error('Negative amount decoded');
+   rows.push({variant:'amount-negative-decode',operation:'register',layer:'LocalEnvelope-u32-decode',status:'typed-error',typedError:decodedError,receiptReturned:false,reducerExecutedClaim:false,oneFieldChange:true,separateAttempt:true,...await invariant()});completedVariants.push(probeStep);
   }
-  return {status:'passed',currentReadMethod:'authenticated-Worker-readLocalCurrent',readOnlyFrameInvariant:true,method:'actual-Worker-finite-S5-and-qF-originals',phase,before,countsBefore,hashesBefore,rows,ledgerUnchangedClaim:false,refusalUi:false,oldGenerationProven:false,engineInFlightProven:false};
+  return {status:'passed',currentReadMethod:'authenticated-Worker-readLocalCurrent',readOnlyFrameInvariant:true,method:'actual-Worker-finite-S5-and-qF-originals',phase,before,countsBefore,hashesBefore,rows,ledgerUnchangedClaim:false,refusalUi:false,oldGenerationProven:phase!=='closed18',engineInFlightProven:false};
   }catch{return {status:'failed',phase,step:probeStep,completedVariants,reason:'finite-probe-not-certified'};}
  };
  window.__p1LookupFirst = async () => {

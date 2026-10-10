@@ -947,18 +947,20 @@ class FinishEvidenceTests(unittest.TestCase):
         report=self.recorded_1c_report();groups=[]
         hashes={'stateSha256':'a'*64,'replaySha256':'b'*64,'replayActions':18}
         phases=[('begin20','begin',1,2),('life19','life_first',2,4),('life18','life_applied',3,6),('closed18','finished',4,9)]
-        names=['amount-zero','amount-overflow','source-N','mismatched-generation','wrong-Finish-choice','old-interaction']
+        names=['amount-zero','amount-overflow','source-N','mismatched-generation','old-generation','wrong-Finish-choice','old-interaction','amount-negative-decode']
         for phase,key,count,pubs in phases:
             counts={'publications':pubs,'appliedResults':count,'completed':count};rows=[]
             for name in (['qF-register','qF-apply','qF-lookup','old-Finish-new-attempt'] if phase=='closed18' else names):
                 row={'variant':name,'after':report[key],'countsAfter':counts,'hashesAfter':hashes,'appliedResultNull':True}
-                if name.startswith('qF-'):row.update(operation=name[3:],status='completed',sameOriginal=True,sameOriginalResult=True,resultPresent=True)
+                if name=='amount-negative-decode':row.update(operation='register',layer='LocalEnvelope-u32-decode',status='typed-error',typedError=dict(name='AdapterError',code='ACTION_REJECTED',rejectionCode='invalid_interaction_response',disposition='invalid'),receiptReturned=False,reducerExecutedClaim=False,oneFieldChange=True,separateAttempt=True)
+                elif name.startswith('qF-'):row.update(operation=name[3:],status='completed',sameOriginal=True,sameOriginalResult=True,resultPresent=True,currentClosed=True,currentSourceInGraveyard=True,currentContextMatched=True)
                 else:
-                    row.update(operation='register',status='notApplied',rejection='stale_interaction' if name=='mismatched-generation' else 'invalid_interaction_response',resultNull=True,separateAttempt=True)
+                    row.update(operation='register',status='notApplied',rejection='stale_interaction' if name in ['mismatched-generation','old-generation'] else 'invalid_interaction_response',resultNull=True,separateAttempt=True)
                     if phase=='closed18':row['sameCapturedIntent']=True
-                    else:row.update(sameOriginal=True,oneFieldChange=True,layer='native-current-context' if name=='mismatched-generation' else 'native-typed-source-interaction')
+                    else:row.update(sameOriginal=True,oneFieldChange=True,layer='native-current-context' if name in ['mismatched-generation','old-generation'] else 'native-typed-source-interaction')
+                if name=='old-generation':row.update(currentGeneration=10,submittedGeneration=9,strictlyOlder=True)
                 rows.append(row)
-            groups.append({'status':'passed','currentReadMethod':'authenticated-Worker-readLocalCurrent','readOnlyFrameInvariant':True,'method':'actual-Worker-finite-S5-and-qF-originals','phase':phase,'before':report[key],'countsBefore':counts,'hashesBefore':hashes,'rows':rows,'ledgerUnchangedClaim':False,'refusalUi':False,'oldGenerationProven':False,'engineInFlightProven':False})
+            groups.append({'status':'passed','currentReadMethod':'authenticated-Worker-readLocalCurrent','readOnlyFrameInvariant':True,'method':'actual-Worker-finite-S5-and-qF-originals','phase':phase,'before':report[key],'countsBefore':counts,'hashesBefore':hashes,'rows':rows,'ledgerUnchangedClaim':False,'refusalUi':False,'oldGenerationProven':phase!='closed18','engineInFlightProven':False})
         report['additional_native_checks']=groups
         return report
 
@@ -967,7 +969,7 @@ class FinishEvidenceTests(unittest.TestCase):
         partial=json.loads(json.dumps(report));partial['additional_native_checks']=partial['additional_native_checks'][:1]
         capture.validate_additional_native_checks(partial,complete=False)
         with self.assertRaises(capture.EvidenceFailure):capture.validate_additional_native_checks(partial)
-        faults=[([0,'rows',0,'status'],'pending'),([0,'rows',1,'rejection'],'stale_interaction'),([1,'rows',2,'hashesAfter','stateSha256'],'c'*64),([2,'rows',3,'countsAfter','publications'],7),([2,'oldGenerationProven'],True),([3,'rows',0,'sameOriginalResult'],False),([3,'rows',1,'appliedResultNull'],False),([3,'rows',3,'separateAttempt'],False),([3,'rows',2,'operation'],'apply'),([0,'rows',5,'oneFieldChange'],False)]
+        faults=[([0,'rows',0,'status'],'pending'),([0,'rows',1,'rejection'],'stale_interaction'),([1,'rows',2,'hashesAfter','stateSha256'],'c'*64),([2,'rows',3,'countsAfter','publications'],7),([2,'oldGenerationProven'],False),([3,'rows',0,'sameOriginalResult'],False),([3,'rows',1,'appliedResultNull'],False),([3,'rows',3,'separateAttempt'],False),([3,'rows',2,'operation'],'apply'),([0,'rows',5,'oneFieldChange'],False),([0,'rows',4,'submittedGeneration'],11),([1,'rows',7,'receiptReturned'],True),([2,'rows',7,'reducerExecutedClaim'],True),([0,'rows',7,'typedError','rejectionCode'],'stale_interaction'),([0,'rows',7,'status'],'notApplied'),([3,'rows',0,'currentClosed'],False),([3,'rows',1,'currentContextMatched'],False),([3,'rows',2,'currentSourceInGraveyard'],False)]
         for path,value in faults:
             changed=json.loads(json.dumps(report));target=changed['additional_native_checks']
             for key in path[:-1]:target=target[key]
