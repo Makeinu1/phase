@@ -521,6 +521,21 @@ def scroll_manual_target(kind):
     CHECKS.validate_manual_scroll(attempt)
 
 
+def narrow_own_area_observation():
+    return call('/execute/sync', {'script': '\nconst button=document.querySelector(\'[data-testid="player-area-0"] > button[aria-pressed]\');\nconst input=document.querySelector(\'section[aria-labelledby] input[type="number"]\');\nif(!button||!input) throw new Error(\'manual-own-area-unavailable\');\nconst r=button.getBoundingClientRect();\nreturn {viewport:{width:innerWidth,height:innerHeight},rect:{left:r.left,top:r.top,right:r.right,bottom:r.bottom},\n centerHitsTarget:button.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)),\n selected:button.getAttribute(\'aria-pressed\')===\'true\',ownLabel:button.textContent.includes(\'You\')&&!button.textContent.includes(\'Opp 1\'),\n inputValue:input.value};\n', 'args': []})
+
+
+def select_narrow_own_area():
+    before_state=observe()
+    before=narrow_own_area_observation()
+    proof={'input_kind':'native-click','before':before,'click_count':0}
+    report['manual_narrow_own_area']=proof
+    CHECKS.validate_narrow_own_area_geometry(before)
+    click('[data-testid="player-area-0"] > button[aria-pressed]')
+    proof.update(click_count=1,after=narrow_own_area_observation(),state_unchanged=observe()==before_state)
+    CHECKS.validate_narrow_own_area(proof)
+
+
 def capture_narrow_source():
     global stage
     before = observe()
@@ -530,6 +545,7 @@ def capture_narrow_source():
     try:
         stage = 'manual-source-narrow'
         call('/window/rect', {'width': 390, 'height': 844})
+        select_narrow_own_area()
         scroll_manual_target('source')
         report['manual_visual']['manual-source-narrow'] = manual_visual_observation(require_visible=True)
         assert observe() == before, 'Viewport and source scrolling must not change game state'
@@ -540,6 +556,7 @@ def capture_narrow_source():
         assert observe() == before, 'Source and controls scrolling must not change game state'
         stage = 'capture-manual-controls-narrow'
         capture('manual-controls-narrow')
+        narrow_ui=narrow_own_area_observation()
     except Exception as error:
         primary_error = error
         primary_wd_present = 'webdriver_error' in report
@@ -569,6 +586,12 @@ def capture_narrow_source():
                 report['webdriver_error'] = primary_wd
             else:
                 report.pop('webdriver_error', None)
+
+    stage='viewport-restore'
+    restored_ui=narrow_own_area_observation()
+    report['manual_narrow_own_area']['resize_ui_preserved'] = (
+        restored_ui['selected']==narrow_ui['selected'] and restored_ui['inputValue']==narrow_ui['inputValue'])
+    CHECKS.validate_narrow_own_area(report['manual_narrow_own_area'], require_resize=True)
 
 
 def advance_recorded_priority():

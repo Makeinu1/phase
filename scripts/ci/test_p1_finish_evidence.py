@@ -37,7 +37,27 @@ def manual_scroll_fixture(source, form):
     return result
 
 
+def narrow_own_area_fixture():
+    value={'viewport':{'width':390,'height':701},'rect':{'left':10,'right':180,'top':160,'bottom':200},
+        'centerHitsTarget':True,'ownLabel':True,'selected':False,'inputValue':''}
+    return {'input_kind':'native-click','click_count':1,'before':value,'after':dict(value,selected=True),
+        'state_unchanged':True,'resize_ui_preserved':True}
+
+
 class FinishEvidenceTests(unittest.TestCase):
+    def test_narrow_own_area_rejects_occlusion_wrong_actor_and_unproven_native_selection(self):
+        import copy
+        proof=narrow_own_area_fixture()
+        capture.validate_narrow_own_area(proof,require_resize=True)
+        for key,value in [('centerHitsTarget',False),('ownLabel',False),('rect',dict(left=10,right=180,top=-20,bottom=20))]:
+            bad=copy.deepcopy(proof);bad['before'][key]=value
+            with self.assertRaises(capture.EvidenceFailure):capture.validate_narrow_own_area(bad,require_resize=True)
+        for key,value in [('click_count',0),('state_unchanged',False),('resize_ui_preserved',False)]:
+            bad=copy.deepcopy(proof);bad[key]=value
+            with self.assertRaises(capture.EvidenceFailure):capture.validate_narrow_own_area(bad,require_resize=True)
+        bad=copy.deepcopy(proof);bad['after']['selected']=False
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_narrow_own_area(bad,require_resize=True)
+
     def test_actual_manual_observation_retains_geometry_before_rejection(self):
         tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
         node=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='manual_visual_observation')
@@ -103,7 +123,7 @@ class FinishEvidenceTests(unittest.TestCase):
             ['same-source','life19','life18','registered-pending','historical-lookup','manual-source-narrow']}
         observations['manual-source-narrow']['viewport']['width']=390
         scroll=manual_scroll_fixture(value['source'],value['form'])
-        visual=dict(manual_visual=observations,viewport_restored=True,manual_narrow_scroll=scroll)
+        visual=dict(manual_visual=observations,viewport_restored=True,manual_narrow_scroll=scroll,manual_narrow_own_area=narrow_own_area_fixture())
         capture.validate_manual_visual(visual)
         with self.assertRaises(capture.EvidenceFailure):capture.validate_manual_visual(
             visual,source_text=empty['canonicalSourceText'])
@@ -120,7 +140,7 @@ class FinishEvidenceTests(unittest.TestCase):
                 resolvingEntryId=7,life=[20,20],ownManaCount=1,
                 publicEvents=dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0)),
             'prepayment_full_control':True,'prepayment_scope_visible':True,'viewport_restored':True,
-            'manual_narrow_scroll':scroll,
+            'manual_narrow_scroll':scroll,'manual_narrow_own_area':narrow_own_area_fixture(),
             'manual_visual':{key:copy.deepcopy(observations[key]) for key in ['same-source','manual-source-narrow']}}
         positive['click_commands']=[dict(operation=stage,kind='native-element-click',status='completed',locator=locator)
             for stage,locator in [
@@ -128,13 +148,18 @@ class FinishEvidenceTests(unittest.TestCase):
                 ('manual-card-select','[data-hand-card][data-object-id="3"]'),
                 ('manual-options','//button[normalize-space()="Resolution options for P1 Self Loss"]'),
                 ('manual-cast','//button[normalize-space()="Cast with manual resolution"]'),
-                ('manual-response','//button[normalize-space()="Resolve"]')]]
+                ('manual-response','//button[normalize-space()="Resolve"]'),
+                ('manual-source-narrow','[data-testid="player-area-0"] > button[aria-pressed]')]]
         positive['fixture_opponent_drivers']=[dict(ok=True,actor=1,action='PassPriority',
             mode='explicit-local-fixture-opponent-driver',commands=1,
             before=dict(positive['manual_paid_before_begin'],waitingType='Priority',priorityPlayer=1),
             after=positive['begin'])]
         positive['receipt_observer_stopped']=True
         capture.validate_source_text_positive(positive,positive['consumer'],positive['consumer_execution'],value['canonicalSourceText'])
+        for commands in [positive['click_commands'][:-1], positive['click_commands']+positive['click_commands'][-1:]]:
+            bad=copy.deepcopy(positive);bad['click_commands']=commands
+            with self.assertRaises(capture.EvidenceFailure):capture.validate_source_text_positive(
+                bad,bad['consumer'],bad['consumer_execution'],value['canonicalSourceText'])
         for key,field,changed in [('begin','life',[19,20]),('begin','sourceId',4),
                 ('begin','resolvingEntryId',8),('manual_paid_before_begin','ownManaCount',2)]:
             bad=copy.deepcopy(positive);bad[key][field]=changed
@@ -170,7 +195,7 @@ class FinishEvidenceTests(unittest.TestCase):
                         raise original
                     return {}
                 namespace={'observe':lambda:{'life':[20,20]},'call':call,'report':report,
-                           'scroll_manual_target':lambda kind:None,
+                           'scroll_manual_target':lambda kind:None,'select_narrow_own_area':lambda:None,'narrow_own_area_observation':lambda:{'selected':True,'inputValue':''},
                            'manual_visual_observation':geometry,'capture':lambda step:None,'stage':'same-source'}
                 exec(compile(ast.Module(body=[function],type_ignores=[]),'<narrow-restore>', 'exec'),namespace)
                 with self.assertRaises(Exception) as caught:namespace['capture_narrow_source']()

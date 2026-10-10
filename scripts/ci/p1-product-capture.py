@@ -173,7 +173,30 @@ def validate_manual_scroll(attempt):
                 and controls[2].get('disabled') is False,'manual-scroll-controls-unreachable')
 
 
+def validate_narrow_own_area_geometry(value):
+    if not isinstance(value,dict): raise EvidenceFailure('manual-visual','manual-own-area-unavailable')
+    viewport=value.get('viewport',{});r=value.get('rect',{})
+    if (value.get('ownLabel') is not True or value.get('centerHitsTarget') is not True
+        or not all(type(r.get(k)) in (int,float) and math.isfinite(r[k]) for k in ('left','top','right','bottom'))
+        or not (0<=r['left']<r['right']<=viewport.get('width',0) and 0<=r['top']<r['bottom']<=viewport.get('height',0))):
+        raise EvidenceFailure('manual-visual','manual-own-area-clipped-or-covered')
+
+
+def validate_narrow_own_area(proof, require_resize=False):
+    if not isinstance(proof,dict): raise EvidenceFailure('manual-visual','manual-own-area-proof-unavailable')
+    validate_narrow_own_area_geometry(proof.get('before'))
+    before=proof['before'];after=proof.get('after',{})
+    if (proof.get('input_kind')!='native-click' or proof.get('click_count')!=1
+        or proof.get('state_unchanged') is not True or before.get('selected') is not False or after.get('selected') is not True
+        or after.get('inputValue')!=before.get('inputValue') or after.get('ownLabel') is not True
+        or after.get('viewport')!=before.get('viewport')
+        or not 360<=before.get('viewport',{}).get('width',0)<=500
+        or (require_resize and proof.get('resize_ui_preserved') is not True)):
+        raise EvidenceFailure('manual-visual','manual-own-area-native-selection-unproven')
+
+
 def validate_manual_visual(report, source_text=None, source_only=False):
+    validate_narrow_own_area(report.get('manual_narrow_own_area'), require_resize=True)
     observations = report.get('manual_visual')
     required = {'same-source', 'life19', 'life18', 'historical-lookup', 'registered-pending', 'manual-source-narrow'}
     if source_only: required={'same-source','manual-source-narrow'}
@@ -231,7 +254,8 @@ def validate_source_text_positive(report, consumer, execution, source_text):
         'prepayment-full-control':'[data-mobile-action-right] button[aria-label="Full Control Off"][aria-pressed="false"]',
         'manual-card-select':'[data-hand-card][data-object-id="'+str(source)+'"]',
         'manual-options':'//button[normalize-space()="Resolution options for P1 Self Loss"]',
-        'manual-response':'//button[normalize-space()="Resolve"]'}
+        'manual-response':'//button[normalize-space()="Resolve"]',
+        'manual-source-narrow':'[data-testid="player-area-0"] > button[aria-pressed]'}
     for stage,locator in expected.items():
         matches=[command for command in commands if command.get('operation')==stage]
         require(len(matches)==1 and matches[0].get('locator')==locator
