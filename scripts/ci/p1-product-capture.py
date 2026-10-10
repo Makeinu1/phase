@@ -24,6 +24,7 @@ BOUNDED_K1_SCOPE = ('Local K1 checked-restore and real UI continuation to paid p
 
 S1_1A_SCOPE = 'S1-1a and S12c prepayment Manual UI with explicit fixture opponent passes; not full P1, opponent UI, two-client, Undo or Recovery acceptance'
 
+AUTO_V_SCOPE = 'Fixed afe3 ordinary cost1 vanilla V2/2 Battlefield real own UI with explicit fixture B pass; not Manual/negative/full P1 acceptance'
 AUTO_CONTROLS_SCOPE = 'Fixed afe3 ordinary Auto S20-to18 and standalone N20-to23 real own UI with explicit fixture B pass; not Manual/negative/full P1 acceptance'
 S1_1C_SCOPE = 'S1-1c native original receipt lookup and client terminal cache reconciliation with latest UI18, prepayment Manual UI and paid play21; not adapter historical reply publication or full P1 acceptance'
 NATIVE_ORIGINAL_SCOPE = 'Fixed afe3 actual UI qL1/qL2 terminal native resends and register-only refusals with fresh UI continuation; not qL2 precommit custody, adapter historical publication, wrong-actor UI, or full P1 acceptance'
@@ -198,6 +199,8 @@ def validate_control_boundaries(report):
         if not condition:
             raise EvidenceFailure('operation-assertions','auto-control-'+reason)
     case=report.get('control_case')
+    if case=='auto-v':
+        return validate_vanilla_control_boundaries(report)
     require(case in {'auto-s','auto-n'} and report.get('scope')==AUTO_CONTROLS_SCOPE and report.get('fixture')=='1a.B','scope-case-mismatch')
     initial, paid, done = (report.get(k) for k in ['control_initial','control_paid','control_completed'])
     require(all(isinstance(x,dict) for x in [initial,paid,done]),'boundaries-missing')
@@ -232,6 +235,41 @@ def validate_control_boundaries(report):
     require(isinstance(before,dict) and before.get('priorityPlayer')==1 and before.get('life')==[20,20]
         and before.get('stackCount')==1 and before.get('ownManaCount')==1 and before.get('manualPhase','missing') is None
         and before.get('resolvingEntryId','missing') is None and before.get('publicEvents')==empty,'driver-boundary-mismatch')
+
+
+def validate_vanilla_control_boundaries(report):
+    def require(condition,reason):
+        if not condition:
+            raise EvidenceFailure('operation-assertions','auto-v-'+reason)
+    require(report.get('control_case')=='auto-v' and report.get('scope')==AUTO_V_SCOPE and report.get('fixture')=='11c.V.B','scope-fixture')
+    initial,paid,done=(report.get(k) for k in ['control_initial','control_paid','control_completed'])
+    require(all(isinstance(x,dict) and isinstance(x.get('vanilla'),dict) for x in [initial,paid,done]),'boundaries-missing')
+    selected=initial['vanilla'].get('id')
+    require(type(selected) is int and report.get('selected_card_id')==selected and selected not in [initial.get('sourceCardId'),initial.get('nextCardId')],'wrong-card')
+    for state,mana,stack,zone,casts,entries in [(initial,2,0,'Hand',0,0),(paid,1,1,'Stack',1,0),(done,1,0,'Battlefield',1,1)]:
+        v=state['vanilla']
+        require(state.get('life')==[20,20] and state.get('ownManaCount')==mana and state.get('stackCount')==stack and state.get('waitingType')=='Priority','life-payment-stack')
+        require(all(state.get(k,'missing') is None for k in ['manualPhase','resolvingEntryId','manualStackEntryId','sourceId']),'manual-carrier')
+        require(state.get('publicEvents')==dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0,nextDepartures=0),'unrelated-effect')
+        require(v.get('id')==selected and v.get('name')=='P1 Vanilla V' and v.get('zone')==zone and v.get('controller')==0 and type(v.get('controller')) is int,'card-zone-controller')
+        require(v.get('inHand') is (zone=='Hand') and v.get('inBattlefield') is (zone=='Battlefield'),'zone-membership')
+        require(type(v.get('power')) is int and v['power']==2 and type(v.get('toughness')) is int and v['toughness']==2
+            and v.get('cost')==dict(type='Cost',shards=[],generic=1) and v.get('abilityCounts')==[0,0,0,0,0],'vanilla-definition')
+        require(type(v.get('spellCasts')) is int and v['spellCasts']==casts and type(v.get('battlefieldEntries')) is int and v['battlefieldEntries']==entries
+            and type(v.get('effects')) is int and v['effects']==0,'ordinary-events')
+    require(initial.get('priorityPlayer')==0 and report.get('control_on') is True,'full-control')
+    commands=report.get('click_commands',[])
+    direct=[x for x in commands if x.get('operation')=='control-normal-direct']
+    require(len(direct)==1 and direct[0].get('status')=='completed' and direct[0].get('native_double_click_verified') is True,'native-double-click')
+    require(all(any(c.get('operation')==stage and c.get('status')=='completed' for c in commands) for stage in ['control-full-control','control-normal-direct','control-response']),'native-response')
+    d=report.get('fixture_opponent_driver')
+    require(isinstance(d,dict) and d.get('ok') is True and d.get('mode')=='explicit-local-fixture-opponent-driver' and d.get('action')=='PassPriority'
+        and type(d.get('actor')) is int and d['actor']==1 and type(d.get('commands')) is int and d['commands']==1 and d.get('opponent_ui') is False and d.get('two_client') is False,'fixture-driver')
+    before=d.get('before')
+    require(isinstance(before,dict) and before.get('waitingType')=='Priority' and before.get('priorityPlayer')==1
+        and before.get('life')==[20,20] and before.get('stackCount')==1 and before.get('ownManaCount')==1
+        and all(before.get(k,'missing') is None for k in ['manualPhase','resolvingEntryId','manualStackEntryId','sourceId'])
+        and before.get('publicEvents')==paid.get('publicEvents') and before.get('vanilla')==paid.get('vanilla'),'fixture-response-boundary')
 
 
 def validate_historical_lookup(report):

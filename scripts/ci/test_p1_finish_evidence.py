@@ -21,6 +21,14 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_native_failure_preserves_safe_step_and_exception_without_raw_wire(self):
+        source=Path(__file__).with_name('p1-ui-smoke.py').read_text()
+        function=re.search(r'const nativeFailure = .*?\n };',source,re.S).group(0)
+        program=function+"\nconst assert=require('node:assert/strict');\n"
+        program+="const known=nativeFailure('before-second','checkpoint-replay-export',new Error('No replay recording available. Start a game first, or it was invalidated by an undo/restore.'),[]); assert.equal(known.reason,'replay-recording-unavailable'); assert.equal(known.step,'checkpoint-replay-export'); assert.equal(known.exception.name,'Error'); assert.deepEqual(known.completedChecks,[]);\n"
+        program+="const unknown=nativeFailure('after-second','original-lookup',new Error('PRIVATE_WIRE_ATTEMPT'),['qL1-register']); assert.equal(unknown.exception.message,null); assert.equal(JSON.stringify(unknown).includes('PRIVATE_WIRE_ATTEMPT'),false); assert.deepEqual(unknown.completedChecks,['qL1-register']);\n"
+        subprocess.run(['node','-e',program],check=True,capture_output=True)
+
     def test_native_probe_uses_actual_nested_manual_schema(self):
         source=Path(__file__).with_name('p1-ui-smoke.py').read_text()
         expression=re.search(r'const opportunity = (.*?);',source,re.S).group(1)
@@ -395,6 +403,14 @@ class FinishEvidenceTests(unittest.TestCase):
             self.assertTrue(propagation,name)
 
     def auto_report(self,case):
+        if case=='auto-v':
+            r=self.auto_report('auto-s')
+            r.update(scope='Fixed afe3 ordinary cost1 vanilla V2/2 Battlefield real own UI with explicit fixture B pass; not Manual/negative/full P1 acceptance',control_case=case,fixture='11c.V.B',selected_card_id=17)
+            for key,mana,stack,zone,casts,entries in [('control_initial',2,0,'Hand',0,0),('control_paid',1,1,'Stack',1,0),('control_completed',1,0,'Battlefield',1,1)]:
+                r[key]=dict(r['control_initial'],life=[20,20],ownManaCount=mana,stackCount=stack,
+                    vanilla=dict(id=17,name='P1 Vanilla V',zone=zone,controller=0,inHand=zone=='Hand',inBattlefield=zone=='Battlefield',power=2,toughness=2,cost=dict(type='Cost',shards=[],generic=1),abilityCounts=[0,0,0,0,0],spellCasts=casts,battlefieldEntries=entries,effects=0))
+            r['fixture_opponent_driver']['before']=dict(r['control_paid'],priorityPlayer=1)
+            return r
         empty=dict(lifeChanges=[],sourceDepartures=0,manualTerminals=0,nextDepartures=0)
         initial=dict(life=[20,20],ownManaCount=2,stackCount=0,manualPhase=None,resolvingEntryId=None,manualStackEntryId=None,sourceId=None,sourceName=None,
             sourceCardId=7,sourceInHand=True,sourceInGraveyard=False,nextCardId=11,nextInGraveyard=False,waitingType='Priority',priorityPlayer=0,publicEvents=empty)
@@ -406,6 +422,28 @@ class FinishEvidenceTests(unittest.TestCase):
             control_initial=initial,control_paid=paid,control_completed=done,selected_card_id=7 if case=='auto-s' else 11,control_on=True,
             click_commands=[dict(operation=k,status='completed',native_double_click_verified=k=='control-normal-direct') for k in ['control-full-control','control-normal-direct','control-response']],
             fixture_opponent_driver=dict(ok=True,mode='explicit-local-fixture-opponent-driver',action='PassPriority',actor=1,commands=1,opponent_ui=False,two_client=False,before=dict(paid,priorityPlayer=1)))
+
+    def test_vanilla_control_requires_paid_real_ui_and_one_battlefield_entry(self):
+        report=self.auto_report('auto-v')
+        capture.validate_operations(report,{}, {},control='auto-v')
+        faults=[(['fixture'],'1a.B'),(['selected_card_id'],7),(['control_on'],False),
+            (['control_paid','ownManaCount'],2),(['control_completed','life'],[19,20]),
+            (['control_completed','stackCount'],1),(['control_completed','manualPhase'],'open'),
+            (['control_completed','vanilla','zone'],'Graveyard'),(['control_completed','vanilla','inBattlefield'],False),
+            (['control_completed','vanilla','power'],3),(['control_completed','vanilla','cost'],dict(type='Cost',shards=[],generic=2)),
+            (['control_completed','vanilla','abilityCounts'],[0,1,0,0,0]),(['control_completed','vanilla','battlefieldEntries'],0),
+            (['control_initial','vanilla','battlefieldEntries'],1),(['control_completed','vanilla','effects'],1),
+            (['click_commands'],report['click_commands'][:2]),(['fixture_opponent_driver','two_client'],True),
+            (['fixture_opponent_driver','before'],None),(['fixture_opponent_driver','before','priorityPlayer'],0),
+            (['fixture_opponent_driver','before','ownManaCount'],2),(['fixture_opponent_driver','before','stackCount'],0),
+            (['fixture_opponent_driver','before','manualPhase'],'open'),(['fixture_opponent_driver','before','vanilla','spellCasts'],0),
+            (['fixture_opponent_driver','before','vanilla','battlefieldEntries'],1)]
+        for path,value in faults:
+            bad=json.loads(json.dumps(report)); target=bad
+            for key in path[:-1]: target=target[key]
+            target[path[-1]]=value
+            with self.subTest(path=path),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_operations(bad,{}, {},control='auto-v')
 
     def test_auto_controls_reject_payment_carrier_effect_and_missing_native_response(self):
         for case in ['auto-s','auto-n']:
@@ -430,7 +468,7 @@ class FinishEvidenceTests(unittest.TestCase):
         def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
         png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',1,1,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(b'\x00\x00\x00\x00'))+chunk(b'IEND',b'')
         manifest=dict(runtime={},consumer={},validation={},artifacts={'engine_wasm_bg.wasm':{'sha256':'unit-wasm'}})
-        for case in ['auto-s','auto-n']:
+        for case in ['auto-s','auto-n','auto-v']:
             report=self.auto_report(case)
             with tempfile.TemporaryDirectory() as directory:
                 root=Path(directory);entries=[]

@@ -391,3 +391,33 @@ adapter's register-pending reply going directly to apply without publication,
 and terminal client reconciliation returning its cached result before an
 adapter lookup. Those require independent product review and matching runtime
 before their acceptance gates can be closed.
+
+## Checkpoint replay gate and finite ordinary V control
+
+run38011597200 stopped after the first actual Apply1/life19 at
+native-original-checks. The checkpoint entry intentionally installs no replay
+recording (native checkpoint initializer removes the ordinary shuffled header).
+The new probe's initial exportReplayLog therefore cannot work on 1c.B, and its
+callback erased the exception to null. Two independent source reviews confirmed
+this API/entrance mismatch. Original queries/refusals/Finish were not reached;
+no original or refusal acceptance is inferred. Replay hash and L2/F1 predicates
+remain unchanged and unaccepted. Do not retry that case on the same entrance,
+invent a recording/header, or use a different board as its replay.
+
+The next independent case is auto-v, existing native fixture11c.V.B before
+payment, on unchanged afe3 and reviewed runtime379975. It uses existing trusted
+hand double-click, real own Resolve, and one labelled fixture B PassPriority.
+Strict boundaries require life20, mana2-to1, one stack entry before response,
+V cost1/2-2/empty abilities, exact V identity and own Battlefield membership,
+one SpellCast and one Stack-to-Battlefield event, zero V EffectResolved,
+no Manual source/entry/carrier. Two exact current PNG/state/index receipts and
+case-specific guard output are required. Ordinary ETB zone1 is a real zone
+change, not a triggered ability. Accepted S/N evidence need not be rerun.
+V-only success does not close full11c/wholeP1 or the replay-gated1c remainder.
+
+Native original diagnostic preparation now keeps the failing substep, qL1/qL2
+query kind, completed-check sequence, exception name, and a known safe message.
+Unknown messages are withheld so raw original/context data cannot be emitted.
+The strict predicates and failure remain unchanged. This diagnostic addition
+is not a same-entrance rerun or evidence that the old null had a specific runtime
+exception. The new CI case remains V only.
