@@ -20,6 +20,44 @@ spec.loader.exec_module(capture)
 
 
 class FinishEvidenceTests(unittest.TestCase):
+    def test_case_guards_preserve_no_retry_rule_without_colliding_between_cases(self):
+        module = ast.parse(Path(__file__).with_name('p1-ci-ui-smoke.py').read_text())
+        main = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        guarded = next(n for n in main.body if isinstance(n, ast.FunctionDef) and n.name == 'guarded')
+        class StageStop(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destinations = []
+            def guarded_run(argv, cwd, env, stdout, stderr):
+                destination = Path(env['MANUAL_EVIDENCE'])
+                destinations.append(destination)
+                record = destination / 'p1-ui-smoke.json'
+                if record.exists():
+                    return SimpleNamespace(returncode=1, stdout=b'do not retry a recorded command')
+                record.write_text('{}')
+                return SimpleNamespace(returncode=0, stdout=b'completed')
+            browser = {'consumer': {}, 'consumer_execution': {}, 'status': 'scenario-exited',
+                       'effective_exit': 0, 'stages': {'application': 'passed'},
+                       'primary': {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}, 'secondary': []}
+            namespace = {'Path': Path, 'VALIDATION': root, 'source': root, 'evidence': root,
+                         'environment': {'MANUAL_EVIDENCE': str(root)}, 'manifest': {'consumer': {}},
+                         'proof': {'consumer_execution': {}, 'secondary': [], 'stages': {}},
+                         'subprocess': SimpleNamespace(run=guarded_run, PIPE=1, STDOUT=2),
+                         'results': SimpleNamespace(load_result=lambda *args: (browser, True), safe_primary=lambda x: x),
+                         'StageStop': StageStop}
+            exec(compile(ast.Module(body=[guarded], type_ignores=[]), '<case-guard-isolation>', 'exec'), namespace)
+            for case in ['auto-s', 'auto-n']:
+                child = root / case
+                child.mkdir()
+                namespace['browser_evidence'] = child
+                namespace['guarded']('p1-ui-smoke', ['existing-browser-command'])
+            self.assertEqual(destinations, [root / 'auto-s', root / 'auto-n'])
+            self.assertTrue(all((child / 'p1-ui-smoke.json').exists() for child in destinations))
+            self.assertFalse((root / 'p1-ui-smoke.json').exists())
+            with self.assertRaises(StageStop):
+                namespace['guarded']('p1-ui-smoke', ['existing-browser-command'])
+
     def test_ordinary_double_click_uses_native_pointer_pair_and_structured_origin(self):
         module = ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
         function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'click')

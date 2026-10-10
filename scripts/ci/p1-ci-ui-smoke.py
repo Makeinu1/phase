@@ -88,15 +88,18 @@ def main():
 
     def guarded(label, command, extra=None):
         proof['stage'] = label
+        command_environment = dict(environment, **(extra or {}))
+        if label == 'p1-ui-smoke':
+            command_environment['MANUAL_EVIDENCE'] = str(browser_evidence)
         result = subprocess.run(['python3', str(VALIDATION / 'scripts/ci/manual-integration-guard.py'),
-            label, *command], cwd=source, env=dict(environment, **(extra or {})),
+            label, *command], cwd=source, env=command_environment,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         proof['primary'] = {'stage': label, 'code': result.returncode,
             'reason': 'completed' if result.returncode == 0 else 'guarded-command-failed'}
         browser_report_failed = False
         if label == 'p1-ui-smoke':
             try:
-                browser, saved = results.load_result(browser_evidence / 'browser-boot.json', evidence / 'p1-ui-smoke.log')
+                browser, saved = results.load_result(browser_evidence / 'browser-boot.json', browser_evidence / 'p1-ui-smoke.log')
                 if not saved:
                     browser_report_failed = True
                     proof['secondary'].append({'stage': 'browser-boot-report', 'code': 1, 'reason': 'required-report-save-failed'})
@@ -176,11 +179,8 @@ def main():
                 '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture=1a.B',
                 '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
                 dict({key: str(value) for key, value in tools.items()}, P1_UI_CASE=case))
-            # Keep both guarded consumer attempts; the root guard filenames are
-            # reused by the existing guard and must not erase the first case.
-            for name in ['p1-ui-smoke.json','p1-ui-smoke.jsonl','p1-ui-smoke.log']:
-                if (evidence/name).is_file():
-                    shutil.copyfile(evidence/name,browser_evidence/name)
+            # Each fresh case retains its own guarded attempt in its directory;
+            # the unchanged guard still refuses a retry within that same case.
             proof['stages']['application'] = 'passed'
             proof['stage'] = 'operation-assertions'
             try:
