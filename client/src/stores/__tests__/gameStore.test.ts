@@ -125,6 +125,52 @@ describe("gameStore", () => {
     expect(adapter.initialize).toHaveBeenCalled();
   });
 
+  it.each(["experimentalLocalRecorded", "experimentalLocal"] as const)(
+    "initializes %s with exact request and ordinary logs only for recorded startup", async (kind) => {
+      const state = buildGameState();
+      const log = { category: "Debug", segments: [{ type: "Text", value: "ordinary initialization" }] };
+      const event = { type: "StartingPlayerContest", data: {} };
+      const adapter = buildEngineAdapterMock(state, {
+        initializeExperimentalLocalGame: vi.fn().mockResolvedValue({ events: [event], log_entries: [log] }),
+        experimentalLocalActor: vi.fn().mockResolvedValue(0),
+      });
+      const snapshot = await adapter.getSnapshot();
+      Object.assign(adapter, { localContinuation: vi.fn().mockReturnValue({ readCurrent: vi.fn().mockResolvedValue({
+        engineSnapshot: snapshot, current: { context: { restoreEpoch: 0, adapterGeneration: 0 } },
+      }) }) });
+      const deckData = { player: { main_deck: ["actual deck"] } };
+      const startup = kind === "experimentalLocalRecorded" ? { kind, seed: 117 } : { kind, checkpoint: "checkpoint" };
+      await act(() => useGameStore.getState().initGame("recipe", adapter, deckData, undefined, 2,
+        undefined, 0, "strict", startup as never));
+      expect(adapter.initializeExperimentalLocalGame).toHaveBeenCalledExactlyOnceWith({ deckData,
+        formatConfig: undefined, playerCount: 2, matchConfig: undefined, firstPlayer: 0,
+        ...(kind === "experimentalLocalRecorded" ? { seed: 117 } : { trustedCheckpoint: "checkpoint" }),
+      });
+      expect(adapter.initializeGame).not.toHaveBeenCalled();
+      expect(useGameStore.getState().logHistory).toEqual(kind === "experimentalLocalRecorded" ? [{ ...log, seq: 0 }] : []);
+      expect(useGameStore.getState().startingContest).toEqual(kind === "experimentalLocalRecorded"
+        ? { events: [event], startingPlayer: state.current_starting_player ?? state.active_player } : null);
+      expect(useGameStore.getState().eventHistory).toEqual([]);
+    },
+  );
+
+  it.each([{ kind: "unknown" }, { kind: "experimentalLocalRecorded", seed: -1 },
+    { kind: "experimentalLocalRecorded", seed: 0.5 }, { kind: "experimentalLocalRecorded" },
+    { kind: "experimentalLocalRecorded", seed: 117, checkpoint: "mixed" },
+    { kind: "experimentalLocal", checkpoint: "checkpoint", seed: 117 }])(
+    "refuses invalid direct startup %j and detaches adapter", async (startup) => {
+      const adapter = buildEngineAdapterMock(undefined, {
+        initializeExperimentalLocalGame: vi.fn().mockResolvedValue({ events: [] }),
+        experimentalLocalActor: vi.fn().mockResolvedValue(0),
+      });
+      await expect(useGameStore.getState().initGame("invalid", adapter, undefined, undefined, 2,
+        undefined, 0, "strict", startup as never)).rejects.toThrow();
+      expect(adapter.initializeGame).not.toHaveBeenCalled();
+      expect(adapter.initializeExperimentalLocalGame).not.toHaveBeenCalled();
+      expect(useGameStore.getState().adapter).toBeNull();
+    },
+  );
+
   it("commits a strict initial game only after persistence settles and detaches on failure", async () => {
     const state = buildGameState();
     const adapter = buildEngineAdapterMock(state);

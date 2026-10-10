@@ -9203,7 +9203,7 @@ mod local_continuation_tests {
         );
         CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::clone(&database)));
         let mut input = limited_inputs();
-        input.seed = Some(117);
+        input.seed = Some(117.0);
         let deck = input.deck_data.as_mut().unwrap().as_mut().unwrap();
         deck.player.main_deck = [
             vec!["Replay Self Loss".into(); 13],
@@ -9212,6 +9212,33 @@ mod local_continuation_tests {
         ]
         .concat();
         deck.opponent.main_deck = vec!["Replay Response".into(); 40];
+        // Capture the actual tested ordinary inputs before ownership moves into
+        // initialization. Emit only after all positive and negative assertions.
+        let recorded_fixture_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "cases": { "1c.recorded.B": {
+                "kind": "recorded", "familyVariant": "1c", "position": "B",
+                "seed": input.seed.unwrap(),
+                "deckData": input.deck_data.as_ref().unwrap().as_ref().unwrap(),
+            } },
+        }))
+        .unwrap();
+        let recorded_card_bytes = serde_json::to_vec_pretty(
+            &faces
+                .iter()
+                .map(|face| (face.name.to_lowercase(), face))
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        let recorded_input_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "deckData": input.deck_data.as_ref().unwrap().as_ref().unwrap(),
+            "seed": input.seed,
+            "formatConfig": input.format_config.as_ref().unwrap().as_ref().unwrap(),
+            "matchConfig": input.match_config,
+            "playerCount": input.player_count,
+            "firstPlayer": input.first_player,
+        }))
+        .unwrap();
         initialize_experimental_local_game_inner(input, None).unwrap();
 
         let ordinary = |actor, action: GameAction| {
@@ -9617,6 +9644,29 @@ mod local_continuation_tests {
         ));
         assert!(automatic.resolving_stack_entry.is_none());
         assert!(wrong.seek(end).is_err(), "removing only the marker runs automatic S and desynchronizes the later Manual operation");
+        if let Some(directory) = std::env::var_os("P1_RECORDED_FIXTURE_OUTPUT_DIR") {
+            let directory = std::path::PathBuf::from(directory);
+            assert!(
+                directory.is_absolute(),
+                "recorded fixture output must be explicit"
+            );
+            std::fs::create_dir_all(&directory).unwrap();
+            for (name, bytes) in [
+                ("recorded-game-inputs.json", recorded_fixture_bytes),
+                ("recorded-card-data.json", recorded_card_bytes),
+                ("recorded-initializer-inputs.json", recorded_input_bytes),
+            ] {
+                // Evidence is write-once; never silently reuse or overwrite a
+                // different test invocation's fixture bytes.
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(directory.join(name))
+                    .unwrap();
+                file.write_all(&bytes).unwrap();
+            }
+        }
         reset();
     }
 

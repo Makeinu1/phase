@@ -335,7 +335,8 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
     initialSave?: "best-effort" | "strict",
-    startup?: { kind: "experimentalLocal"; checkpoint: string },
+    startup?: { kind: "experimentalLocal"; checkpoint: string }
+      | { kind: "experimentalLocalRecorded"; seed: number },
   ) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
@@ -567,13 +568,21 @@ export const useGameStore = create<GameStore>()(
       let initResult;
       let initialLocalPublication;
       try {
-        if (startup?.kind === "experimentalLocal") {
+        if (startup && (startup.kind === "experimentalLocal"
+          ? typeof startup.checkpoint !== "string" || !startup.checkpoint
+            || Object.keys(startup).some((key) => !["kind", "checkpoint"].includes(key))
+          : startup.kind === "experimentalLocalRecorded"
+            ? !Number.isSafeInteger(startup.seed) || startup.seed < 0
+              || Object.keys(startup).some((key) => !["kind", "seed"].includes(key))
+            : true)) throw new Error(i18n.t("game:manualResolution.startupInvalidFixture"));
+        if (startup) {
           if (!adapter.initializeExperimentalLocalGame || !adapter.experimentalLocalActor) {
             throw new Error(i18n.t("game:manualResolution.startupAdmissionUnavailable"));
           }
           initResult = await adapter.initializeExperimentalLocalGame({
             deckData, formatConfig, playerCount, matchConfig, firstPlayer,
-            trustedCheckpoint: startup.checkpoint,
+            ...(startup.kind === "experimentalLocal"
+              ? { trustedCheckpoint: startup.checkpoint } : { seed: startup.seed }),
           });
           if (await adapter.experimentalLocalActor() !== 0) {
             throw new Error(i18n.t("game:manualResolution.startupAdmissionUnavailable"));
@@ -610,7 +619,7 @@ export const useGameStore = create<GameStore>()(
           throw error;
         }
       }
-      const initLogEntries = (startup ? [] : initResult.log_entries ?? []).map((entry, i) => ({
+      const initLogEntries = (startup?.kind === "experimentalLocal" ? [] : initResult.log_entries ?? []).map((entry, i) => ({
         ...entry,
         seq: i,
       }));
@@ -619,7 +628,7 @@ export const useGameStore = create<GameStore>()(
       // when the engine rolled (random starter); empty for an explicit
       // play/draw choice. `current_starting_player` is the engine's pick — never
       // recomputed from the rolls on the frontend.
-      const initEvents = startup ? [] : initResult.events ?? [];
+      const initEvents = startup?.kind === "experimentalLocal" ? [] : initResult.events ?? [];
       // The engine emits a single StartingPlayerContest event (round structure +
       // winner) at the head of the game-start batch when it ran a roll-off
       // (random starter); absent for an explicit play/draw choice.

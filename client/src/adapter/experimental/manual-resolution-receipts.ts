@@ -215,7 +215,9 @@ export function createManualResolutionReceiptSession({
             requestAttempts.set(request, attempt);
           }
           requestAttempts.set(input, attempt);
-          if (attempt.result && attempt.result.status !== "indeterminate") {
+          // A completed original can carry historical native evidence through
+          // the adapter again. Preserve rejected certification in the cache.
+          if (attempt.result?.status === "rejected") {
             return Promise.resolve(asReconciliation(attempt.result));
           }
           if (attempt.lookup?.boundary === boundary) return attempt.lookup.promise;

@@ -1753,6 +1753,100 @@ describe("WasmAdapter Local continuation original receipts (mock Worker client)"
     });
   });
 
+  it("awaits the exact registered pending original before applying once", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let original: LocalOriginalAttempt | undefined;
+    let pendingSeen = false;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      expect(envelope.attempt).toBe(original);
+      return response(original, envelope.operation === "register" ? "pending" : "completed",
+        envelope.operation === "register" ? 20 : 19, envelope.operation === "register" ? 1 : 2,
+        envelope.operation === "apply", context, lossResult(19));
+    });
+    const { adapter, capability } = await admitted();
+    const unsubscribe = capability.subscribe(async (publication) => {
+      if (publication.receipt?.status !== "pending" || pendingSeen) return;
+      pendingSeen = true;
+      expect(publication.receipt.attempt).toBe(original);
+      expect(publication.appliedResult).toBeNull();
+      expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register"]);
+      await held;
+    });
+    const delivery = capability.submitInteraction(submission("frame.1"), source);
+    try {
+      await vi.waitFor(() => expect(pendingSeen).toBe(true));
+      expect(mockWorkerClient.submitLocalContinuation).toHaveBeenCalledTimes(1);
+    } finally { release(); }
+    expect((await delivery).receipt?.status).toBe("completed");
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "apply"]);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("keeps registered custody lookupable when a pending subscriber fails before apply", async () => {
+    let original!: LocalOriginalAttempt;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      expect(envelope.attempt).toBe(original);
+      return response(original, "pending", 20, 1);
+    });
+    const { adapter, capability } = await admitted();
+    const input = submission("frame.1");
+    const unsubscribe = capability.subscribe(async (publication) => {
+      if (publication.receipt?.status === "pending") throw new Error("subscriber stopped");
+    });
+    expect((await capability.submitInteraction(input, source)).receipt?.status).toBe("indeterminate");
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register"]);
+    unsubscribe();
+    expect((await capability.lookupInteraction(input)).receipt?.status).toBe("pending");
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "lookup"]);
+    adapter.dispose();
+  });
+
+  it("allows a one-shot pending subscriber to read the same original without reentrant apply", async () => {
+    let original!: LocalOriginalAttempt;
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      original ??= envelope.attempt;
+      expect(envelope.attempt).toBe(original);
+      return response(original, envelope.operation === "apply" ? "completed" : "pending",
+        envelope.operation === "apply" ? 19 : 20, envelope.operation === "apply" ? 2 : 1,
+        envelope.operation === "apply", context, lossResult(19));
+    });
+    const { adapter, capability } = await admitted();
+    const input = submission("frame.1");
+    let read = false;
+    const unsubscribe = capability.subscribe(async (publication) => {
+      if (publication.receipt?.status !== "pending" || read) return;
+      read = true;
+      expect((await capability.lookupInteraction(input)).receipt?.status).toBe("pending");
+      expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "lookup"]);
+    });
+    expect((await capability.submitInteraction(input, source)).receipt?.status).toBe("completed");
+    expect(read).toBe(true);
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register", "lookup", "apply"]);
+    unsubscribe(); adapter.dispose();
+  });
+
+  it("normalizes the real native notApplied spelling without applying a refusal", async () => {
+    mockWorkerClient.submitLocalContinuation.mockImplementation(async (_actor, envelope: LocalContinuationEnvelope) => {
+      if (envelope.operation === "restore") throw new Error("unexpected restore");
+      return { ...response(envelope.attempt, "pending", 20, 1), receipt: {
+        attempt: envelope.attempt, status: "notApplied", result: null,
+        rejection: { code: "invalid_interaction_response", message: "Original binding rejected" },
+      } } as unknown as LocalContinuationResult;
+    });
+    const { adapter, capability } = await admitted();
+    const outcome = await capability.submitInteraction(submission("old.frame"), source);
+    expect(outcome.receipt?.status).toBe("not-applied");
+    expect(outcome.appliedResult).toBeNull();
+    expect(mockWorkerClient.submitLocalContinuation.mock.calls.map(([, envelope]) => envelope.operation)).toEqual(["register"]);
+    adapter.dispose();
+  });
+
   it.each(["delivered", "ACK-lost"] as const)("accepts native receipt key order after an %s life commit and looks up without reapplying", async (delivery) => {
     // Bootstrap and public snapshots use serde_json::Value (sorted keys),
     // while native receipts/current context serialize their typed structs.

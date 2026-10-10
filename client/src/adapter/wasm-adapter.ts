@@ -294,6 +294,11 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const deliveredResults = new WeakSet<LocalOriginalAttempt>();
     const currentOwner = () => this.experimentalLocalOwner === owner && owner.engine === this.engine && owner.lifecycle === this.lifecycleGeneration;
     const publish = async (reply: LocalContinuationResult, notify: boolean, restoring = false, attempt?: LocalOriginalAttempt): Promise<LocalContinuationPublication> => {
+      // Native serde uses camelCase. Keep the UI receipt vocabulary at this
+      // boundary without treating an unknown status as terminal evidence.
+      if ((reply.receipt?.status as string | undefined) === "notApplied") {
+        reply = { ...reply, receipt: { ...reply.receipt!, status: "not-applied" } };
+      }
       let engineSnapshot: EngineSnapshot | null = null;
       let current = reply.current;
       if (!currentOwner()) current = null;
@@ -365,6 +370,9 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
           // custody decides whether it was registered or certifies absence.
         }
         if (registered && registered.receipt?.status !== "pending") return publish(registered, true, false, attempt);
+        // Native registration has already retained this exact original, but
+        // apply has not been sent. Await existing listeners before proceeding.
+        if (registered) await publish(registered, true, false, attempt);
         if (!currentOwner()) return unknown(attempt);
         const reply = await owner.engine.submitLocalContinuation(0, { type: "localContinuation", operation: "apply", attempt });
         return publish(reply, true, false, attempt);

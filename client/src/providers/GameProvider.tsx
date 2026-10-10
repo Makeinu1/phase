@@ -1565,7 +1565,6 @@ export function GameProvider({
             ? (bundle.cases as Record<string, unknown>)[manualFixture] : null;
           const fixtureKeyParts = manualFixture.split(".");
           if (!fixture || typeof fixture !== "object"
-            || !("checkpoint" in fixture) || typeof fixture.checkpoint !== "string" || !fixture.checkpoint
             || !("familyVariant" in fixture) || typeof fixture.familyVariant !== "string" || !fixture.familyVariant
             || !("position" in fixture) || typeof fixture.position !== "string"
             || !["B", "K0", "K1", "K2", "K3", "K4"].includes(fixture.position)
@@ -1574,12 +1573,40 @@ export function GameProvider({
             || fixtureKeyParts[fixtureKeyParts.length - 1] !== fixture.position) {
             throw new Error(tRef.current("manualResolution.startupInvalidFixture"));
           }
+          const record = fixture as Record<string, unknown>;
+          const recorded = record.kind === "recorded";
+          const emptyList = (value: unknown) => Array.isArray(value) && value.length === 0;
+          const deckValid = (value: unknown) => {
+            if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+            const deck = value as Record<string, unknown>;
+            const optional = ["sideboard", "commander", "companion", "attraction_deck", "planar_deck",
+              "scheme_deck", "contraption_deck", "sticker_sheets", "signature_spell"];
+            return Array.isArray(deck.main_deck) && deck.main_deck.length === 40
+              && deck.main_deck.every((name) => typeof name === "string" && name.trim().length > 0)
+              && deck.bracket_tier === "core"
+              && Object.keys(deck).every((key) => ["main_deck", "bracket_tier", ...optional].includes(key))
+              && optional.every((key) => !(key in deck) || emptyList(deck[key]));
+          };
+          const decks = record.deckData as Record<string, unknown> | undefined;
+          if (recorded ? (
+            record.position !== "B" || !Number.isSafeInteger(record.seed) || (record.seed as number) < 0
+            || Object.keys(record).some((key) => !["kind", "familyVariant", "position", "seed", "deckData"].includes(key))
+            || !decks || typeof decks !== "object" || Array.isArray(decks)
+            || !deckValid(decks.player) || !deckValid(decks.opponent)
+            || !emptyList(decks.ai_decks) || !emptyList(decks.ai_difficulties)
+            || ("draft_set_codes" in decks && !emptyList(decks.draft_set_codes))
+            || Object.keys(decks).some((key) => !["player", "opponent", "ai_decks", "ai_difficulties", "draft_set_codes"].includes(key))
+          ) : (
+            "kind" in record || "seed" in record || "deckData" in record
+            || typeof record.checkpoint !== "string" || !record.checkpoint
+          )) throw new Error(tRef.current("manualResolution.startupInvalidFixture"));
           if (cancelled) return;
           const bootstrapDeck = { main_deck: Array<string>(40).fill("Plains"), bracket_tier: "core" };
           await initGame(gameId, adapter,
-            { player: bootstrapDeck, opponent: bootstrapDeck, ai_decks: [], ai_difficulties: [] },
+            recorded ? decks : { player: bootstrapDeck, opponent: bootstrapDeck, ai_decks: [], ai_difficulties: [] },
             formatMetadata("Limited")?.default_config, 2, matchConfig, 0, "strict",
-            { kind: "experimentalLocal", checkpoint: fixture.checkpoint });
+            recorded ? { kind: "experimentalLocalRecorded", seed: record.seed as number }
+              : { kind: "experimentalLocal", checkpoint: record.checkpoint as string });
           if (cancelled) return;
           const continuation = adapter.localContinuation?.();
           if (!continuation) throw new Error(tRef.current("manualResolution.startupAdmissionUnavailable"));

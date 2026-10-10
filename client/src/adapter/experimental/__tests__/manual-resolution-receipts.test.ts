@@ -56,6 +56,24 @@ function deferred<T>() {
 }
 
 describe("client manual-resolution receipt coordinator (mock atomic boundary)", () => {
+  it("looks up a completed original through the boundary while retaining terminal evidence and sharing parallel lookups", async () => {
+    const endpoint = boundary();
+    const port = session().bindBoundary(endpoint)(scope);
+    const input = loss();
+    await port.submitManualResolutionCommand(input);
+    const original = endpoint.submitCaptured.mock.calls[0]![0];
+    const answer = deferred<ManualResolutionReconciliation>();
+    endpoint.lookupReceipt.mockReturnValue(answer.promise);
+    const first = port.reconcileManualResolution(input);
+    const second = port.reconcileManualResolution(input);
+    await Promise.resolve();
+    expect(endpoint.lookupReceipt).toHaveBeenCalledExactlyOnceWith(original, 0);
+    answer.resolve({ binding: original.binding, status: "pending" });
+    expect(await first).toEqual(completed(input));
+    expect(await second).toEqual(completed(input));
+    expect(endpoint.submitCaptured).toHaveBeenCalledOnce();
+  });
+
   it("owns one opaque identity across its ports and isolates genuinely different receipt sessions", () => {
     const receiptSession = session();
     const original = receiptSession.bindBoundary(boundary())(scope);
@@ -194,8 +212,9 @@ describe("client manual-resolution receipt coordinator (mock atomic boundary)", 
     expect(await port.reconcileManualResolution(loss())).toMatchObject({ status: "indeterminate", reason: "attempt-identity-unknown" });
     expect(await port.submitManualResolutionCommand(loss())).toMatchObject({ status: "indeterminate", reason: "attempt-identity-unknown" });
     expect(await port.reconcileManualResolution(original)).toMatchObject({ status: "not-applied", reason: "First delivery was not applied." });
-    expect(await port.reconcileManualResolution(retry)).toEqual(completed(retry));
     expect(endpoint.lookupReceipt).not.toHaveBeenCalled();
+    expect(await port.reconcileManualResolution(retry)).toEqual(completed(retry));
+    expect(endpoint.lookupReceipt).toHaveBeenCalledExactlyOnceWith(endpoint.submitCaptured.mock.calls[1]![0], 0);
     expect(endpoint.submitCaptured).toHaveBeenCalledTimes(2);
   });
 
@@ -453,7 +472,8 @@ describe("client manual-resolution receipt coordinator (mock atomic boundary)", 
     lookup.resolve({ binding: loss().binding, status: "indeterminate" });
     expect(await recovering).toEqual(completed(loss()));
     expect(await newPort.reconcileManualResolution(loss())).toEqual(completed(loss()));
-    expect(replacement.lookupReceipt).toHaveBeenCalledOnce();
+    expect(replacement.lookupReceipt).toHaveBeenCalledTimes(2);
+    expect(replacement.lookupReceipt.mock.calls[1]![0]).toBe(oldBoundary.submitCaptured.mock.calls[0]![0]);
     expect(replacement.submitCaptured).not.toHaveBeenCalled();
   });
 

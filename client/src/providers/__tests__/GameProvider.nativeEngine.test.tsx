@@ -535,6 +535,47 @@ describe("GameProvider native AI routing", () => {
       expect(vi.mocked(createGameLoopController).mock.results[0].value.dispose).toHaveBeenCalledOnce();
     });
 
+    const recordedDeck = { main_deck: Array<string>(40).fill("Replay Self Loss"), bracket_tier: "core" };
+    const recordedFixture = { kind: "recorded", familyVariant: "1c", position: "B", seed: 117,
+      deckData: { player: recordedDeck, opponent: recordedDeck, ai_decks: [], ai_difficulties: [] } };
+
+    it("hands a recorded recipe to ordinary admitted startup without a checkpoint", async () => {
+      vi.mocked(fetch).mockResolvedValue({ ok: true,
+        json: async () => ({ version: 1, cases: { "1c.recorded.B": recordedFixture } }) } as Response);
+      const onNoDeck = vi.fn();
+      render(<GameProvider gameId="recorded" mode="local" manualFixture="1c.recorded.B" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+      expect(gameStoreState.initGame.mock.calls[0][2]).toEqual(recordedFixture.deckData);
+      expect(gameStoreState.initGame.mock.calls[0].slice(4)).toEqual([
+        2, undefined, 0, "strict", { kind: "experimentalLocalRecorded", seed: 117 },
+      ]);
+      await waitFor(() => expect(localContinuationSubscribe).toHaveBeenCalledOnce());
+      expect(onNoDeck).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { ...recordedFixture, checkpoint: "mixed" },
+      { ...recordedFixture, unknown: true },
+      { ...recordedFixture, seed: -1 },
+      { ...recordedFixture, seed: 1.5 },
+      { ...recordedFixture, seed: Number.MAX_SAFE_INTEGER + 1 },
+      { ...recordedFixture, seed: undefined },
+      { ...recordedFixture, position: "K1" },
+      { ...recordedFixture, kind: "unknown" },
+      { ...recordedFixture, deckData: { ...recordedFixture.deckData, ai_decks: [recordedDeck] } },
+      { ...recordedFixture, deckData: { ...recordedFixture.deckData, player: { ...recordedDeck, main_deck: [] } } },
+      { ...recordedFixture, deckData: { ...recordedFixture.deckData, player: { ...recordedDeck, main_deck: Array(40).fill("") } } },
+      { ...recordedFixture, deckData: { ...recordedFixture.deckData, extra: true } },
+    ])("refuses malformed recorded recipe %j before initialization", async (fixture) => {
+      vi.mocked(fetch).mockResolvedValue({ ok: true,
+        json: async () => ({ version: 1, cases: { "1c.recorded.B": fixture } }) } as Response);
+      const onNoDeck = vi.fn();
+      render(<GameProvider gameId="bad-recorded" mode="local" manualFixture="1c.recorded.B" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(onNoDeck).toHaveBeenCalledOnce());
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(localContinuationSubscribe).not.toHaveBeenCalled();
+    });
+
     it.each([
       ["wrong family", "2a.B", { familyVariant: "1a", position: "B", checkpoint: "checkpoint" }],
       ["wrong qualified family", "5b.owner.B", { familyVariant: "5c", position: "B", checkpoint: "checkpoint" }],
