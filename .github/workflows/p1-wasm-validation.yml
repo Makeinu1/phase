@@ -102,6 +102,20 @@ jobs:
             ${{ runner.temp }}/p1-evidence/p1-manual-source-text-fixtures.json
             ${{ runner.temp }}/p1-evidence/p1-manual-source-text-fixtures.jsonl
             ${{ runner.temp }}/p1-evidence/p1-manual-source-text-fixtures.control.log
+            ${{ runner.temp }}/p1-evidence/controls/main1a/manifest.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/consumer-install.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/browser-failure.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/product-scenario.log
+            ${{ runner.temp }}/p1-evidence/controls/main1a/step-index.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/p1-ui-smoke.control.log
+            ${{ runner.temp }}/p1-evidence/controls/main1a/p1-ui-smoke.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/p1-ui-smoke.jsonl
+            ${{ runner.temp }}/p1-evidence/controls/main1a/p1-ui-smoke.log
+            ${{ runner.temp }}/p1-evidence/controls/main1a/capture-failure-*.json
+            ${{ runner.temp }}/p1-evidence/controls/main1a/screenshots/*.png
+            ${{ runner.temp }}/p1-evidence/controls/main1a/states/*.json
             ${{ runner.temp }}/p1-evidence/controls/manual-source-text/manifest.json
             ${{ runner.temp }}/p1-evidence/controls/manual-source-text/consumer-install.json
             ${{ runner.temp }}/p1-evidence/controls/manual-source-text/browser-boot.json

@@ -306,6 +306,29 @@ def main():
             proof['cases']['manual-source-text']={'status':'passed','images':images,'normal_ui':True,
                 'source_text_only':True,'nonempty_oracle_display_accepted':True,'oracle_multiline_wrap_accepted':False,
                 'Apply_Finish_receipts_accepted':False,'recorded_ordinary_start':False,'full_1c_accepted':False}
+            # Independent fresh checkpoint-origin main1a; no recorded replay claim.
+            if '1a.B' not in bundle['cases']:
+                raise ValueError('existing checked-native main1a fixture required')
+            browser_evidence=evidence/'controls/main1a'
+            browser_evidence.mkdir(parents=True)
+            for name in ['manifest.json','consumer-install.json']:
+                shutil.copyfile(evidence/name,browser_evidence/name)
+            proof['stage']='product-browser'
+            guarded('p1-ui-smoke',['python3',str(VALIDATION/'scripts/ci/p1-product-browser.py'),
+                '--source',str(source),'--evidence',str(browser_evidence),
+                '--entry-route','/game/p1-main1a?mode=local&manual=1&p1Fixture=1a.B',
+                '--scenario',str(VALIDATION/'scripts/ci/p1-ui-smoke.py')],
+                dict({key:str(value) for key,value in tools.items()},P1_UI_CASE='prepayment1a',P1_NATIVE_CHECKS='0'))
+            proof['stage']='operation-assertions'
+            report=json.loads((browser_evidence/'ui-smoke-report.json').read_text())
+            checks.validate_operations(report,manifest['consumer'],proof['consumer_execution'],s1_1a=True)
+            proof['stage']='required-images'
+            images=checks.validate_required_images(browser_evidence,manifest,proof['consumer_execution'],s1_1a=True)
+            proof['cases']['main1a']={'status':'passed','images':images,'normal_ui':True,
+                'initial_fixture':'1a.B-fresh-before-designation-payment','fixture_sha256':proof['source_text_positive_fixtures'],
+                'opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False,
+                'finite_scope':'checkpoint-origin main1a UI/payment/receipts/ordinary continuation',
+                'recorded_ordinary_start':False,'actual_W_recorded_replay_accepted':False,'full_1a_accepted':False}
         proof['stages']['operations'] = 'passed'
         proof['stages']['images'] = 'passed'
         proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}
