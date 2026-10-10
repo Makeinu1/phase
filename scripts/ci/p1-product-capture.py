@@ -27,6 +27,7 @@ S1_1A_SCOPE = 'S1-1a and S12c prepayment Manual UI with explicit fixture opponen
 AUTO_V_SCOPE = 'Fixed afe3 ordinary cost1 vanilla V2/2 Battlefield real own UI with explicit fixture B pass; not Manual/negative/full P1 acceptance'
 AUTO_CONTROLS_SCOPE = 'Fixed afe3 ordinary Auto S20-to18 and standalone N20-to23 real own UI with explicit fixture B pass; not Manual/negative/full P1 acceptance'
 S1_1C_SCOPE = 'S1-1c native original receipt lookup and client terminal cache reconciliation with latest UI18, prepayment Manual UI and paid play21; not adapter historical reply publication or full P1 acceptance'
+RECORDED_1C_SCOPE = 'Fixed806c ordinary recorded start Manual20-to19-to18 Finish paid21 with actual original native resends registered-pending custody old-binding refusal and adapter historical publication; not full P1 or engine-in-flight acceptance'
 NATIVE_ORIGINAL_SCOPE = 'Fixed afe3 actual UI qL1/qL2 terminal native resends and register-only refusals with fresh UI continuation; not qL2 precommit custody, adapter historical publication, wrong-actor UI, or full P1 acceptance'
 
 
@@ -36,7 +37,7 @@ class EvidenceFailure(ValueError):
         super().__init__(reason)
 
 
-def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False, s1_1a=False, s1_1c=False, control=None):
+def validate_operations(report, consumer, execution, paidplay=False, restore_driver=False, s1_1a=False, s1_1c=False, control=None, recorded_1c=False):
     """Require explicit operation completion; image receipts are observations."""
     def reject(reason):
         raise EvidenceFailure('operation-assertions', reason)
@@ -63,6 +64,11 @@ def validate_operations(report, consumer, execution, paidplay=False, restore_dri
         validate_control_boundaries(report)
         if report.get('control_case') != control:
             reject('control-case-mismatch')
+        return
+    if recorded_1c:
+        for stage in ['recorded-initial','recorded-main','recorded-ready','registered-pending']:
+            if stages.get(stage)!={'status':'passed','assertions_completed':True}:reject('required-recorded-stage:'+stage)
+        validate_recorded_1c(report)
         return
     if s1_1a or s1_1c:
         validate_s1_1a(report, split_apply=s1_1c)
@@ -120,11 +126,11 @@ def validate_operations(report, consumer, execution, paidplay=False, restore_dri
             reject('fixture-opponent-driver-boundary-mismatch')
 
 
-def validate_s1_1a(report, split_apply=False):
+def validate_s1_1a(report, split_apply=False, recorded=False):
     def require(condition, reason):
         if not condition:
             raise EvidenceFailure('operation-assertions', ('s1-1c-' if split_apply else 's1-1a-') + reason)
-    require(report.get('scope') == (S1_1C_SCOPE if split_apply else S1_1A_SCOPE) and report.get('fixture') == ('1c.B' if split_apply else '1a.B'), 'scope-fixture-mismatch')
+    require(report.get('scope') == (RECORDED_1C_SCOPE if recorded else S1_1C_SCOPE if split_apply else S1_1A_SCOPE) and report.get('fixture') == ('1c.recorded.B' if recorded else '1c.B' if split_apply else '1a.B'), 'scope-fixture-mismatch')
     pre, paid, begin, life, end, next_paid, next_done = (report.get(k) for k in
         ['prepayment', 'manual_paid_before_begin', 'begin', 'life_applied', 'finished', 'paid_before_resolution', 'ordinary_completed'])
     require(all(isinstance(x, dict) for x in [pre, paid, begin, life, end, next_paid, next_done]), 'public-boundaries-missing')
@@ -272,7 +278,7 @@ def validate_vanilla_control_boundaries(report):
         and before.get('publicEvents')==paid.get('publicEvents') and before.get('vanilla')==paid.get('vanilla'),'fixture-response-boundary')
 
 
-def validate_historical_lookup(report):
+def validate_historical_lookup(report, recorded=False):
     def require(condition, reason):
         if not condition:
             raise EvidenceFailure('operation-assertions', 's1-1c-' + reason)
@@ -284,9 +290,9 @@ def validate_historical_lookup(report):
         and first.get('manualStackEntryId') == entry and first.get('resolvingEntryId') == entry
         and first.get('manualPhase') == 'open' and first.get('stackCount') == 0 and first.get('ownManaCount') == 1
         and first.get('publicEvents') == dict(lifeChanges=[{'amount':-1,'total':19}],sourceDepartures=0,manualTerminals=0,nextDepartures=0), 'first-apply-mismatch')
-    require(lookup.get('method') == 'native-read-only-original-lookup-and-client-terminal-cache-reconcile'
+    require(lookup.get('method') == ('actual-original-request-native-lookup-and-adapter-historical-publication' if recorded else 'native-read-only-original-lookup-and-client-terminal-cache-reconcile')
         and type(lookup.get('nativeLookupCount')) is int and lookup['nativeLookupCount'] == 1
-        and lookup.get('adapterPublishedHistoricalReply') is False, 'lookup-method-mismatch')
+        and lookup.get('adapterPublishedHistoricalReply') is recorded, 'lookup-method-mismatch')
     for flag in ['differentInteractions','differentAttempts','sameOriginal','sameOriginalResult','sameSource','sameContext',
                  'nativeAppliedResultNull','nativeRejectionNull','cacheOriginalBinding']:
         require(lookup.get(flag) is True, 'lookup-' + flag)
@@ -300,12 +306,15 @@ def validate_historical_lookup(report):
     require(isinstance(counts,dict) and set(counts) == {'publications','appliedResults','completed'}
         and all(type(v) is int for v in counts.values()) and counts['publications'] >= 3
         and counts['appliedResults'] == 3 and counts['completed'] == 3
-        and lookup.get('countsAfter') == counts, 'lookup-replayed-or-published')
+        and (lookup.get('countsAfter') == dict(publications=7,appliedResults=3,completed=3) and counts==dict(publications=6,appliedResults=3,completed=3) if recorded else lookup.get('countsAfter') == counts), 'lookup-replayed-or-published')
+    if recorded:
+        require(all(lookup.get(k) is True for k in ['originalRequestRetained','originalRequestFrozen','publicationSameOriginal','publicationSameOriginalResult','publicationAppliedResultNull']) and lookup.get('publicationStatus')=='completed'
+            and lookup.get('publicationHistoricalLife')==[{'amount':-1,'total':19}] and lookup.get('publicationCurrentLife')==[18,20], 'actual-historical-publication')
     # During the live journey cleanup happens in finally; final aggregate requires it.
     if report.get('status') == 'passed':
         require(report.get('receipt_observer_stopped') is True, 'receipt-observer-not-stopped')
 
-def validate_native_original_checks(report, complete=True, final=False):
+def validate_native_original_checks(report, complete=True, final=False, recorded=False):
     def require(value, reason):
         if not value:
             raise EvidenceFailure('operation-assertions', 'native-original-' + reason)
@@ -319,7 +328,7 @@ def validate_native_original_checks(report, complete=True, final=False):
             and group.get('before') == boundary and group.get('after') == boundary, 'current-state-changed')
         require(group.get('phase') == phase and group.get('method') == 'same-actual-UI-original-native-register-apply-lookup'
             and group.get('adapterPublishedHistoricalReply') is False and group.get('qL2PrecommitCustodyProven') is False, 'scope')
-        expected_counts = dict(publications=count,appliedResults=count,completed=count)
+        expected_counts = dict(publications=count*2 if recorded else count,appliedResults=count,completed=count)
         require(group.get('countsBefore') == expected_counts and group.get('countsAfter') == expected_counts
             and all(type(v) is int for v in group['countsBefore'].values()), 'delivery-counts')
         hashes = group.get('hashesBefore')
@@ -358,6 +367,44 @@ def validate_native_original_checks(report, complete=True, final=False):
             and type(replay.get('actions')) is int and replay['actions']>0
             and type(replay.get('manualLife')) is int and replay['manualLife']==2
             and type(replay.get('manualFinish')) is int and replay['manualFinish']==1, 'final-manual-replay-counts')
+
+
+def validate_recorded_pending(report):
+    def require(ok, reason):
+        if not ok: raise EvidenceFailure('operation-assertions','recorded-pending-'+reason)
+    pending=report.get('registered_pending');first=report.get('life_first')
+    require(isinstance(pending,dict) and isinstance(first,dict),'missing')
+    require(pending.get('method')=='actual-registered-pending-before-apply-native-register-lookup'
+        and pending.get('engineInFlight') is False,'scope')
+    require(pending.get('before')==first and pending.get('after')==first,'resident-changed')
+    require(pending.get('countsBefore')==dict(publications=5,appliedResults=2,completed=2)
+        and pending.get('countsAfter')==pending['countsBefore'],'publication-changed')
+    hashes=pending.get('hashesBefore')
+    require(isinstance(hashes,dict) and set(hashes)=={'stateSha256','replaySha256','replayActions'}
+        and all(isinstance(hashes[k],str) and re.fullmatch('[0-9a-f]{64}',hashes[k]) for k in ['stateSha256','replaySha256'])
+        and type(hashes['replayActions']) is int and hashes['replayActions']>0
+        and pending.get('hashesAfter')==hashes,'state-replay-changed')
+    require(all(pending.get(k) is True for k in ['originalRequestRetained','originalRequestFrozen','oneShotClaimed','pendingResultNull','pendingAppliedResultNull']),'custody')
+    queries=pending.get('queries')
+    require(isinstance(queries,list) and len(queries)==2,'queries')
+    for query,operation in zip(queries,['register','lookup']):
+        require(isinstance(query,dict) and query.get('operation')==operation and query.get('status')=='pending'
+            and query.get('currentLife')==[19,20]
+            and all(query.get(k) is True for k in ['sameOriginal','resultNull','rejectionNull','appliedResultNull']),'native-query')
+
+
+def validate_recorded_1c(report, final=True):
+    if report.get('scope')!=RECORDED_1C_SCOPE or report.get('fixture')!='1c.recorded.B':
+        raise EvidenceFailure('operation-assertions','recorded-1c-scope')
+    if final:validate_recorded_prep(report,journey=True)
+    validate_s1_1a(report,split_apply=True,recorded=True)
+    validate_native_original_checks(report,final=True,recorded=True)
+    validate_historical_lookup(report,recorded=True)
+    validate_recorded_pending(report)
+    if report.get('receipt_summary',{}).get('publications')!=9:
+        raise EvidenceFailure('operation-assertions','recorded-1c-final-publication-count')
+    if report.get('pending_hold_released') is not True or (final and report.get('receipt_observer_stopped') is not True):
+        raise EvidenceFailure('operation-assertions','recorded-1c-cleanup')
 
 
 def valid_png(data):
@@ -436,10 +483,10 @@ def validate_recorded_operations(report, consumer, execution):
     validate_recorded_prep(report)
 
 
-def validate_recorded_prep(report):
+def validate_recorded_prep(report, journey=False):
     def require(value, reason):
         if not value: raise EvidenceFailure('recorded-start-preparation', reason)
-    require(report.get('scope') == 'recorded-start-preparation-only' and report.get('fixture') == '1c.recorded.B', 'scope')
+    require(report.get('scope') == (RECORDED_1C_SCOPE if journey else 'recorded-start-preparation-only') and report.get('fixture') == '1c.recorded.B', 'scope')
     ready=report.get('recorded_ready') or {}
     require(ready.get('life') == [20,20] and ready.get('ownManaCount') == 2
         and ready.get('phase') == 'PreCombatMain' and ready.get('activePlayer') == 0
@@ -512,7 +559,7 @@ def validate_recorded_prep(report):
         if operation=='recorded-land-play':require(matches[0].get('native_double_click_verified') is True,'unverified-land-double-click')
 
 
-def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False, s1_1c=False, control=None, recorded_prep=False):
+def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=False, s1_1c=False, control=None, recorded_prep=False, recorded_1c=False):
     """Recheck the three existing capture receipts and saved public bytes."""
     def reject(reason):
         raise EvidenceFailure('required-images', reason)
@@ -524,6 +571,7 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
         reject('required-image-index-invalid')
     observations = {}
     required = ['recorded-initial','recorded-main','recorded-ready'] if recorded_prep else ['control-initial','control-completed'] if control else ['prepayment','same-source','life18','finish','paidplay21'] + (['life19','historical-lookup'] if s1_1c else []) if s1_1a or s1_1c else ['same-source', 'life19', 'finish'] + (['paidplay22'] if paidplay else [])
+    if recorded_1c: required=['recorded-initial','recorded-main','recorded-ready','registered-pending']+required
     for step in required:
         matches = [item for item in steps if item.get('step') == step]
         if len(matches) != 1:
@@ -585,6 +633,11 @@ def validate_required_images(root, manifest, execution, paidplay=False, s1_1a=Fa
         if report.get('control_case')!=control or observations['control-initial']!=report['control_initial'] or observations['control-completed']!=report['control_completed']:
             reject('required-control-state-content-mismatch')
         return {'required_steps':required,'verified_count':len(required)}
+    if recorded_1c:
+        report=json.loads((root/'ui-smoke-report.json').read_text());validate_recorded_1c(report)
+        for step,key in [('recorded-initial','recorded_initial'),('recorded-main','recorded_main'),('recorded-ready','recorded_ready')]:
+            if observations[step]!=report.get(key):reject('required-recorded-state-content-mismatch:'+step)
+        if observations['registered-pending']!=report.get('life_first'):reject('required-pending-state-content-mismatch')
     if s1_1c:
         first, current = observations['life19'], observations['life18']
         if (first.get('life') != [19,20] or first.get('manualPhase') != 'open'
@@ -630,7 +683,7 @@ def main():
     parser.add_argument('--step', required=True)
     parser.add_argument('--state-script', required=True, type=Path)
     args = parser.parse_args()
-    if not re.fullmatch(r'(recorded-initial|recorded-main|recorded-ready|control-initial|control-completed|prepayment|same-source|life19|life18|historical-lookup|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
+    if not re.fullmatch(r'(registered-pending|recorded-initial|recorded-main|recorded-ready|control-initial|control-completed|prepayment|same-source|life19|life18|historical-lookup|finish|child|paidplay21|paidplay22|restore-k[0-4]|ack-(life|finish)-(applied|rejected|unknown|inflight))', args.step):
         raise ValueError('unknown P1 observation step')
     session = os.environ['P1_WEBDRIVER_SESSION']
     if not re.fullmatch('[a-zA-Z0-9-]+', session):

@@ -80,7 +80,7 @@ jobs:
         if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.preflight_only) || (github.event_name == 'push' && (env.P1_PUSH_MODE == 'build' || env.P1_PUSH_MODE == 'reuse')) }}
         env:
           P1_CANDIDATE_SHA: ${{ inputs.candidate_sha || env.P1_PUSH_CANDIDATE_SHA }}
-          P1_CI_CASE: recorded-prep
+          P1_CI_CASE: recorded-1c
         run: |
           python3 validation-source/scripts/ci/p1-ci-ui-smoke.py \
             --source "$GITHUB_WORKSPACE/product-source" --candidate-sha "$P1_CANDIDATE_SHA" \
@@ -211,5 +211,19 @@ jobs:
             ${{ runner.temp }}/p1-evidence/controls/recorded-prep/capture-failure-*.json
             ${{ runner.temp }}/p1-evidence/controls/recorded-prep/screenshots/*.png
             ${{ runner.temp }}/p1-evidence/controls/recorded-prep/states/*.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/manifest.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/consumer-install.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/browser-boot.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/browser-failure.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/product-scenario.log
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/step-index.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/ui-smoke-report.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/p1-ui-smoke.control.log
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/p1-ui-smoke.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/p1-ui-smoke.jsonl
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/p1-ui-smoke.log
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/capture-failure-*.json
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/screenshots/*.png
+            ${{ runner.temp }}/p1-evidence/controls/recorded-1c/states/*.json
           if-no-files-found: error
           retention-days: 7

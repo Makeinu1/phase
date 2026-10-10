@@ -116,11 +116,11 @@ def main():
                     proof['primary'] = results.safe_primary(primary)
                 # Copy only safe, structured secondary fields from this local helper.
                 allowed = {'diagnostic-save-failed', 'failure-report-unreadable', 'session-cleanup-failed',
-                           'process-cleanup-failed', 'required-report-save-failed', 'required-capture-failed', 'receipt-observer-cleanup-failed'}
+                           'process-cleanup-failed', 'required-report-save-failed', 'required-capture-failed', 'receipt-observer-cleanup-failed','pending-hold-release-failed'}
                 for item in browser.get('secondary', []):
                     if (isinstance(item, dict) and item.get('reason') in allowed
                             and item.get('stage') in {'diagnostic-collector', 'scenario-report', 'browser-cleanup',
-                                'process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'ui-smoke-report'} and type(item.get('code')) is int):
+                                'process-cleanup', 'browser-boot-report', 'capture-control-completed', 'capture-recorded-ready', 'capture-finish', 'capture-paidplay21', 'receipt-observer-cleanup', 'pending-hold-release', 'ui-smoke-report'} and type(item.get('code')) is int):
                         proof['secondary'].append({key: item[key] for key in ['stage', 'code', 'reason']})
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 browser_report_failed = True
@@ -134,7 +134,8 @@ def main():
             raise StageStop()
 
     try:
-        recorded = os.environ.get('P1_CI_CASE') == 'recorded-prep'
+        recorded_1c = os.environ.get('P1_CI_CASE') == 'recorded-1c'
+        recorded = recorded_1c or os.environ.get('P1_CI_CASE') == 'recorded-prep'
         fixtures = evidence / ('private-recorded-inputs' if recorded else 'private-fixtures')
         if recorded:
             guarded('p1-recorded-fixtures', ['cargo', 'test', '--locked', '-p', 'engine-wasm',
@@ -198,10 +199,10 @@ def main():
             str(Path(environment['RUNNER_TEMP']) / 'p1-browser-tools'), str(evidence / 'browser-tools.json')])
         browser_proof = json.loads((evidence / 'browser-tools.json').read_text())
         tools = {key: browser_proof[key]['path'] for key in ['P1_CHROME_BINARY', 'BOOTSTRAP_CHROMEDRIVER']}
-        for case in (['recorded-prep'] if recorded else ['auto-v']):
-            manual = case == 'manual-originals'
+        for case in (['recorded-1c' if recorded_1c else 'recorded-prep'] if recorded else ['auto-v']):
+            manual = recorded_1c or case == 'manual-originals'
             if recorded:
-                proof['scope'] = 'recorded-start-preparation-only'
+                proof['scope'] = checks.RECORDED_1C_SCOPE if recorded_1c else 'recorded-start-preparation-only'
             elif manual:
                 proof['scope'] = checks.NATIVE_ORIGINAL_SCOPE
             elif case=='auto-v':
@@ -217,7 +218,7 @@ def main():
                 '--entry-route', '/game/p1-'+case+'?mode=local&manual=1&p1Fixture='+('1c.recorded.B' if recorded else '1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B'),
                 '--scenario', str(VALIDATION / 'scripts/ci/p1-ui-smoke.py')],
                 dict({key: str(value) for key, value in tools.items()},
-                    P1_UI_CASE='prepayment1c' if manual else case, P1_NATIVE_CHECKS='1' if manual else '0'))
+                    P1_UI_CASE=case if recorded else 'prepayment1c' if manual else case, P1_NATIVE_CHECKS='1' if manual else '0'))
             # Each fresh case retains its own guarded attempt in its directory;
             # the unchanged guard still refuses a retry within that same case.
             proof['stages']['application'] = 'passed'
@@ -226,21 +227,23 @@ def main():
                 report = json.loads((browser_evidence / 'ui-smoke-report.json').read_text())
             except (OSError, ValueError):
                 raise checks.EvidenceFailure('operation-assertions', 'required-operation-report-unreadable')
-            if recorded:
+            if recorded_1c:
+                checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=True, recorded_1c=True)
+            elif recorded:
                 checks.validate_recorded_operations(report, manifest['consumer'], proof['consumer_execution'])
             else:
                 checks.validate_operations(report, manifest['consumer'], proof['consumer_execution'], s1_1c=manual, control=None if manual else case)
             if manual:
-                checks.validate_native_original_checks(report, final=True)
+                checks.validate_native_original_checks(report, final=True, recorded=recorded_1c)
             proof['cases'][case] = {'status':'operations-complete','operations':'passed','images':'not_run'}
             proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}
             proof['stage'] = 'required-images'
-            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], s1_1c=manual, control=None if manual or recorded else case, recorded_prep=recorded)
+            images = checks.validate_required_images(browser_evidence, manifest, proof['consumer_execution'], s1_1c=manual, control=None if manual or recorded else case, recorded_prep=recorded and not recorded_1c, recorded_1c=recorded_1c)
             proof['cases'][case] = {'status':'passed','images':images,'normal_ui':True,
                 'initial_fixture':('1c.recorded.B' if recorded else '1c.B' if manual else '11c.V.B' if case=='auto-v' else '1a.B')+'-fresh-before-designation-payment','opponent':'explicit-fixture-driver','opponent_ui':False,'two_client':False}
             if manual:
                 proof['cases'][case].update(refusal_ui=False,refusal_boundary='real-Worker-register-only',
-                    qL2_precommit_custody=False,adapter_historical_publication=False,full_1c_accepted=False)
+                    qL2_precommit_custody=recorded_1c,adapter_historical_publication=recorded_1c,full_1c_accepted=False)
         proof['stages']['operations'] = 'passed'
         proof['stages']['images'] = 'passed'
         proof['primary'] = {'stage':'operations-complete','code':0,'reason':'completed'}

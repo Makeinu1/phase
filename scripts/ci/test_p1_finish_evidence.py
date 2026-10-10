@@ -163,9 +163,18 @@ class FinishEvidenceTests(unittest.TestCase):
     def test_native_probe_failure_stage_survives_browser_report_validation(self):
         spec=importlib.util.spec_from_file_location('native_browser_checks',Path(__file__).with_name('p1-product-browser.py'))
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        for stage in ['native-original-checks','native-final-replay']:
+        for stage in ['native-original-checks','native-final-replay','registered-pending','capture-registered-pending']:
             primary=dict(stage=stage,code=1,reason='operation-assertion-failed')
             self.assertEqual(module.safe_primary(primary),primary)
+
+    def test_registered_pending_capture_step_is_finite_and_admitted(self):
+        source=Path(__file__).with_name('p1-product-capture.py').read_text()
+        pattern=next(n.args[0].value for n in ast.walk(ast.parse(source)) if isinstance(n,ast.Call)
+            and isinstance(n.func,ast.Attribute) and n.func.attr=='fullmatch' and n.args
+            and isinstance(n.args[0],ast.Constant) and 'recorded-initial|' in str(n.args[0].value))
+        self.assertIsNotNone(re.fullmatch(pattern,'registered-pending'))
+        for value in ['registered-pending-extra','../registered-pending','arbitrary-private-wire']:
+            self.assertIsNone(re.fullmatch(pattern,value))
 
     def test_case_guards_preserve_no_retry_rule_without_colliding_between_cases(self):
         module = ast.parse(Path(__file__).with_name('p1-ci-ui-smoke.py').read_text())
@@ -659,6 +668,103 @@ class FinishEvidenceTests(unittest.TestCase):
         report['native_final_replay']=dict(method='real-Worker-read-only-replay',sha256='c'*64,actions=18,manualLife=2,manualFinish=1)
         return report
 
+    def test_actual_pending_release_preserves_prior_failure_and_fails_closed(self):
+        import copy,sys
+        tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        finalbody=next(n.finalbody for n in ast.walk(tree) if isinstance(n,ast.Try) and n.finalbody
+            and any(isinstance(x,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='prior_pending_failure' for t in x.targets) for x in n.finalbody))
+        class PrimaryFailure(Exception):pass
+        class ReleaseFailure(Exception):pass
+        for earlier,had_wire in [(True,False),(True,True),(False,False)]:
+            namespace={'sys':sys,'report':{'secondary':[]},'stage':'registered-pending',
+                'call':lambda *args:(namespace['report'].update(webdriver_error={'source':'cleanup'}),(_ for _ in ()).throw(ReleaseFailure()))[1],'PrimaryFailure':PrimaryFailure}
+            if had_wire:namespace['report']['webdriver_error']={'source':'original'}
+            body=[ast.Raise(exc=ast.Call(func=ast.Name(id='PrimaryFailure',ctx=ast.Load()),args=[],keywords=[]),cause=None)] if earlier else [ast.Pass()]
+            node=ast.Try(body=body,handlers=[],orelse=[],finalbody=copy.deepcopy(finalbody))
+            code=compile(ast.fix_missing_locations(ast.Module(body=[node],type_ignores=[])),'<actual-pending-finally>','exec')
+            with self.subTest(prior=earlier),self.assertRaises(PrimaryFailure if earlier else ReleaseFailure):exec(code,namespace)
+            self.assertEqual(namespace['report'].get('webdriver_error'),({'source':'original'} if had_wire else None) if earlier else {'source':'cleanup'})
+            self.assertFalse(namespace['report']['pending_hold_released'])
+            self.assertEqual(namespace['report']['secondary'],[dict(stage='pending-hold-release',code=1,reason='pending-hold-release-failed')])
+            self.assertEqual(namespace['stage'],'registered-pending' if earlier else 'pending-hold-release')
+
+    def recorded_1c_report(self):
+        import copy
+        report=self.native_original_report();report.update(scope=capture.RECORDED_1C_SCOPE,fixture='1c.recorded.B',pending_hold_released=True)
+        for group in report['native_original_checks']:
+            group['countsBefore']['publications']*=2
+        report['receipt_summary']['publications']=9
+        h=report['historical_lookup'];h.update(method='actual-original-request-native-lookup-and-adapter-historical-publication',adapterPublishedHistoricalReply=True,
+            countsBefore=dict(publications=6,appliedResults=3,completed=3),countsAfter=dict(publications=7,appliedResults=3,completed=3),
+            originalRequestRetained=True,originalRequestFrozen=True,publicationSameOriginal=True,publicationSameOriginalResult=True,
+            publicationAppliedResultNull=True,publicationStatus='completed',publicationHistoricalLife=[dict(amount=-1,total=19)],publicationCurrentLife=[18,20])
+        hashes=dict(stateSha256='d'*64,replaySha256='e'*64,replayActions=9)
+        report['registered_pending']=dict(method='actual-registered-pending-before-apply-native-register-lookup',engineInFlight=False,
+            before=copy.deepcopy(report['life_first']),after=copy.deepcopy(report['life_first']),
+            countsBefore=dict(publications=5,appliedResults=2,completed=2),countsAfter=dict(publications=5,appliedResults=2,completed=2),
+            hashesBefore=hashes,hashesAfter=dict(hashes),originalRequestRetained=True,originalRequestFrozen=True,oneShotClaimed=True,
+            pendingResultNull=True,pendingAppliedResultNull=True,queries=[dict(operation=operation,status='pending',sameOriginal=True,resultNull=True,rejectionNull=True,appliedResultNull=True,currentLife=[19,20]) for operation in ['register','lookup']])
+        return report
+
+    def test_actual_recorded_subscriber_claims_pending_once_and_preserves_frozen_request(self):
+        tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
+        scripts=[n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and 'window.__p1ArmPending = ' in n.value]
+        self.assertEqual(len(scripts),1)
+        script=scripts[0].replace("import('/src/stores/gameStore.ts')","Promise.resolve({useGameStore})").replace("import('/src/adapter/wasm-adapter.ts')","Promise.resolve({unwrapClientGameState:s=>s})").replace("import('/src/adapter/types.ts')","Promise.resolve({sameLocalContinuationValue:(a,b)=>JSON.stringify(a)===JSON.stringify(b)})")
+        program=r'''
+const assert=require('node:assert/strict');global.crypto=require('node:crypto').webcrypto;global.window={};
+let listener, stopped=false, currentRequest, firstRequest, nativeCalls=[];const terminal=new Map();
+const cap={subscribe:l=>{listener=l;return()=>{stopped=true;};},commandPortFactory:()=>({getUnresolvedManualResolutionRequest:()=>currentRequest,reconcileManualResolution:async original=>{assert.strictEqual(original,firstRequest);await listener({receipt:terminal.get('first'),appliedResult:null,current:currentFrame()});return {status:'completed',binding:original.binding};}})};
+const currentFrame=()=>({context:{adapterGeneration:1},snapshot:{state:{players:[{life:18},{life:20}],derived:{manual_resolution:{phase:'open',source:{stackEntryId:9,sourceId:7}}},resolving_stack_entry:{id:9}}}});
+const publicState={life:[19,20]}, engine={exportReplayLog:async()=>'{"actions":[{}]}',submitLocalContinuation:async(actor,wire)=>{nativeCalls.push(wire.operation);if(terminal.has(wire.attempt.attemptId))return {receipt:terminal.get(wire.attempt.attemptId),appliedResult:null,current:currentFrame()};return {receipt:{attempt:wire.attempt,status:'pending',result:null,rejection:null},appliedResult:null,current:{snapshot:{state:{players:[{life:19},{life:20}]}}}};}};
+const useGameStore={getState:()=>({adapter:{localContinuation:()=>cap,getEngineClient:()=>engine,exportPersistenceState:async()=>'{"unchanged":true}'}})};
+window.__p1Observe=()=>publicState;
+const attempt=id=>({attemptId:id,context:{adapterGeneration:1},source:{stackEntryId:9,sourceId:7},submission:{interactionId:id,response:{type:'manualResolution',data:{decision:{type:'loseOwnLife',data:{amount:1}}}}}});
+const freeze=a=>Object.freeze({binding:Object.freeze({interactionId:a.submission.interactionId,adapterGeneration:1}),command:Object.freeze({type:'lose-life',affectedPlayerId:0,amount:1,stackEntryId:9,sourceObjectId:7})});
+const pending=a=>({receipt:{attempt:a,status:'pending',result:null,rejection:null},appliedResult:null});
+(async()=>{
+ await new Promise(done=>new Function('useGameStore','return function(){'+SCRIPT+'}')(useGameStore)(true,done));
+ const a1=attempt('first');currentRequest=freeze(a1);firstRequest=currentRequest;await listener(pending(a1));
+ terminal.set('first',{attempt:a1,status:'completed',rejection:null,result:{events:[{type:'LifeChanged',data:{player_id:0,amount:-1,new_total:19}}]}});
+ await listener({receipt:terminal.get('first'),appliedResult:{}});
+ assert.equal(window.__p1ArmPending(),true);
+ const a2=attempt('second');currentRequest=freeze(a2);let completed=false;
+ const held=listener(pending(a2)).then(()=>{completed=true;});
+ await Promise.resolve();assert.equal(window.__p1PendingReady(),true);assert.equal(completed,false);
+ const proof=await window.__p1ProbePending();assert.equal(proof.originalRequestRetained,true);assert.equal(proof.originalRequestFrozen,true);
+ assert.deepEqual(nativeCalls,['register','lookup']);assert.equal(proof.pendingResultNull,true);assert.equal(proof.pendingAppliedResultNull,true);
+ // Reentrant notification must never create another hold.
+ await listener(pending(a2));assert.equal(completed,false);
+ assert.equal(window.__p1ReleasePending(),true);await held;assert.equal(completed,true);
+ terminal.set('second',{attempt:a2,status:'completed',result:{events:[{type:'LifeChanged',data:{player_id:0,amount:-1,new_total:18}}]}});
+ await listener({receipt:terminal.get('second'),appliedResult:{}});publicState.life=[18,20];
+ const historic=await window.__p1LookupFirst();assert.equal(historic.originalRequestRetained,true);assert.equal(historic.adapterPublishedHistoricalReply,true);
+ assert.equal(historic.publicationSameOriginalResult,true);assert.equal(historic.publicationAppliedResultNull,true);assert.deepEqual(historic.publicationHistoricalLife,[{amount:-1,total:19}]);assert.deepEqual(historic.publicationCurrentLife,[18,20]);
+ assert.equal(window.__p1StopReceipts(),true);assert.equal(stopped,true);assert.equal(window.__p1ProbePending,undefined);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+        program=program.replace('SCRIPT',json.dumps(script))
+        subprocess.run(['node','-e',program],check=True,capture_output=True,timeout=10)
+
+    def test_recorded_1c_rejects_pending_mutation_and_false_historical_publication(self):
+        import copy
+        report=self.recorded_1c_report();capture.validate_recorded_1c(report,final=False)
+        faults=[(['pending_hold_released'],False),(['registered_pending','engineInFlight'],True),
+            (['registered_pending','originalRequestRetained'],False),(['registered_pending','countsAfter','appliedResults'],3),
+            (['registered_pending','hashesAfter','replaySha256'],'f'*64),(['registered_pending','queries',0,'status'],'completed'),
+            (['registered_pending','queries',1,'appliedResultNull'],False),(['registered_pending','after','life'],[18,20]),
+            (['historical_lookup','adapterPublishedHistoricalReply'],False),(['historical_lookup','publicationSameOriginal'],False),
+            (['historical_lookup','publicationAppliedResultNull'],False),(['historical_lookup','publicationHistoricalLife'],[dict(amount=-1,total=18)]),
+            (['historical_lookup','publicationCurrentLife'],[19,20]),(['historical_lookup','countsAfter','publications'],6),
+            (['historical_lookup','countsAfter','appliedResults'],4),(['native_original_checks',0,'countsBefore','publications'],2)]
+        for path,value in faults:
+            changed=copy.deepcopy(report);node=changed
+            for key in path[:-1]:node=node[key]
+            node[path[-1]]=value
+            with self.subTest(path=path),self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_1c(changed,final=False)
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_historical_lookup(report)
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_native_original_checks(report)
+
     def test_native_originals_require_both_phases_distinct_resends_and_atomic_refusals(self):
         report=self.native_original_report()
         capture.validate_operations(report,{}, {},s1_1c=True)
@@ -823,7 +929,7 @@ class FinishEvidenceTests(unittest.TestCase):
                       and any(isinstance(target, ast.Name) and target.id == 'report' for target in node.targets))
         expression = next(value for key, value in zip(report.keys, report.values)
                           if isinstance(key, ast.Constant) and key.value == 'scope')
-        ui_scope = eval(compile(ast.Expression(expression), '<ui-scope>', 'eval'), {'CHECKS': capture, 'PREPAYMENT': False, 'AUTO_CONTROL': None, 'RECORDED_PREP': False})
+        ui_scope = eval(compile(ast.Expression(expression), '<ui-scope>', 'eval'), {'CHECKS': capture, 'PREPAYMENT': False, 'AUTO_CONTROL': None, 'RECORDED_PREP': False, 'RECORDED_1C': False})
         ci = ast.parse(Path(__file__).with_name('p1-ci-ui-smoke.py').read_text())
         assignment = next(node for node in ast.walk(ci) if isinstance(node, ast.Assign)
                           and any(isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)

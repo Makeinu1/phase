@@ -13,6 +13,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -24,15 +25,18 @@ BASE = 'http://127.0.0.1:9515/session/' + SESSION
 spec = importlib.util.spec_from_file_location('p1_capture_checks', VALIDATION / 'scripts/ci/p1-product-capture.py')
 CHECKS = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CHECKS)
+RECORDED_1C = os.environ.get('P1_UI_CASE') == 'recorded-1c'
 RECORDED_PREP = os.environ.get('P1_UI_CASE') == 'recorded-prep'
+RECORDED_INPUTS = RECORDED_PREP or RECORDED_1C
 AUTO_CONTROL = os.environ.get('P1_UI_CASE') if os.environ.get('P1_UI_CASE') in {'auto-s','auto-n','auto-v'} else None
-SPLIT_APPLY = os.environ.get('P1_UI_CASE') == 'prepayment1c'
+SPLIT_APPLY = RECORDED_1C or os.environ.get('P1_UI_CASE') == 'prepayment1c'
 PREPAYMENT = SPLIT_APPLY or os.environ.get('P1_UI_CASE') == 'prepayment1a'
 NATIVE_CHECKS = SPLIT_APPLY and os.environ.get('P1_NATIVE_CHECKS') == '1'
-report = {'scope': 'recorded-start-preparation-only' if RECORDED_PREP else (CHECKS.AUTO_V_SCOPE if AUTO_CONTROL=='auto-v' else CHECKS.AUTO_CONTROLS_SCOPE) if AUTO_CONTROL else (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
-          'control_case': AUTO_CONTROL, 'fixture': '1c.recorded.B' if RECORDED_PREP else ('11c.V.B' if AUTO_CONTROL=='auto-v' else '1a.B') if AUTO_CONTROL else ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
+report = {'scope': CHECKS.RECORDED_1C_SCOPE if RECORDED_1C else 'recorded-start-preparation-only' if RECORDED_PREP else (CHECKS.AUTO_V_SCOPE if AUTO_CONTROL=='auto-v' else CHECKS.AUTO_CONTROLS_SCOPE) if AUTO_CONTROL else (CHECKS.S1_1C_SCOPE if SPLIT_APPLY else CHECKS.S1_1A_SCOPE) if PREPAYMENT else CHECKS.BOUNDED_K1_SCOPE,
+          'control_case': AUTO_CONTROL, 'fixture': '1c.recorded.B' if RECORDED_INPUTS else ('11c.V.B' if AUTO_CONTROL=='auto-v' else '1a.B') if AUTO_CONTROL else ('1c.B' if SPLIT_APPLY else '1a.B') if PREPAYMENT else '1c.K1', 'status': 'starting', 'assertions': [],
           'stages': {name: {'status': 'not_run', 'assertions_completed': False}
                      for name in (['recorded-initial','recorded-main','recorded-ready'] if RECORDED_PREP else ['control-initial','control-full-control','control-paid','control-response','control-completed'] if AUTO_CONTROL else ['prepayment', 'manual-options', 'manual-cast', 'initial'] + (['life19', 'life18', 'historical-lookup'] if SPLIT_APPLY else ['life18']) + ['finish', 'paidplay21'] if PREPAYMENT else ['initial', 'life19', 'finish', 'paidplay22'])}, 'secondary': [],
+          'recorded_1c': RECORDED_1C,
           'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
@@ -584,13 +588,46 @@ const done = arguments[arguments.length-1];
 import('/src/stores/gameStore.ts').then(({useGameStore}) => {
  const cap = useGameStore.getState().adapter?.localContinuation?.();
  if (!cap) return done(false);
- const unique = new Map(), originals = []; let delivered = 0, publications = 0, latest = null;
- const stop = cap.subscribe(p => {
+ const recorded=arguments[0], unique = new Map(), originals = [], requests = new Map();
+ let delivered = 0, publications = 0, latest = null, holdArmed=false, holdClaimed=false, releaseHold=null, held=null, observedHistorical=null, historicExpected=null;
+ const counts = () => ({publications,appliedResults:delivered,completed:unique.size});
+ const scopeFor = a => ({stackEntryId:a.source.stackEntryId,sourceObjectId:a.source.sourceId,adapterGeneration:a.context.adapterGeneration});
+ const isLoss = a => a.submission.response.type==='manualResolution' && a.submission.response.data.decision.type==='loseOwnLife' && a.submission.response.data.decision.data.amount===1;
+ window.__p1ArmPending = () => { if(!recorded || holdArmed || holdClaimed || originals.filter(r=>isLoss(r.attempt)).length!==1)throw Error('Pending hold admission');holdArmed=true;return true; };
+ window.__p1ReleasePending = () => {holdArmed=false;if(releaseHold){const release=releaseHold;releaseHold=null;release();}return true;};
+ window.__p1PendingReady = () => held!==null;
+ const digest = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),n=>n.toString(16).padStart(2,'0')).join('');
+ const hashes = async engine => {const replay=await engine.exportReplayLog(), state=await useGameStore.getState().adapter.exportPersistenceState(),parsed=JSON.parse(replay);if(!Array.isArray(parsed.actions))throw Error('Replay schema');return {stateSha256:await digest(state),replaySha256:await digest(replay),replayActions:parsed.actions.length};};
+ window.__p1ProbePending = async () => {
+  const [{unwrapClientGameState},{sameLocalContinuationValue}]=await Promise.all([import('/src/adapter/wasm-adapter.ts'),import('/src/adapter/types.ts')]);
+  if(!held || !holdClaimed || !releaseHold)throw Error('Actual pending unavailable');
+  const a=held.receipt.attempt, engine=useGameStore.getState().adapter.getEngineClient(), original=requests.get(a.attemptId);
+  const before=window.__p1Observe(),countsBefore=counts(),hashesBefore=await hashes(engine),queries=[];
+  for(const operation of ['register','lookup']){
+   const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation,attempt:a});
+   const current=reply.current&&unwrapClientGameState(reply.current.snapshot.state);
+   if(reply.receipt?.status!=='pending'||reply.receipt.result!==null||reply.receipt.rejection!==null||reply.appliedResult!==null||!sameLocalContinuationValue(a,reply.receipt.attempt)||current?.players?.[0]?.life!==19)throw Error('Pending native mismatch');
+   queries.push({operation,status:'pending',sameOriginal:true,resultNull:true,rejectionNull:true,appliedResultNull:true,currentLife:current.players.map(p=>p.life)});
+  }
+  const still=cap.commandPortFactory(scopeFor(a)).getUnresolvedManualResolutionRequest();
+  return {method:'actual-registered-pending-before-apply-native-register-lookup',engineInFlight:false,before,after:window.__p1Observe(),countsBefore,countsAfter:counts(),hashesBefore,hashesAfter:await hashes(engine),queries,
+   originalRequestRetained:original===still,originalRequestFrozen:Object.isFrozen(original)&&Object.isFrozen(original.binding)&&Object.isFrozen(original.command),oneShotClaimed:holdClaimed,
+   pendingResultNull:held.receipt.result===null,pendingAppliedResultNull:held.appliedResult===null};
+ };
+ const stop = cap.subscribe(async p => {
   latest = p;
   publications++;
   const r = p.receipt;
+  if (recorded && r?.status==='pending' && r.attempt.source.stackEntryId!==null) {
+   const a=r.attempt, original=cap.commandPortFactory(scopeFor(a)).getUnresolvedManualResolutionRequest();
+   if(!original || !Object.isFrozen(original) || original.binding.interactionId!==a.submission.interactionId || original.binding.adapterGeneration!==a.context.adapterGeneration || original.command.stackEntryId!==a.source.stackEntryId || original.command.sourceObjectId!==a.source.sourceId)throw Error('Original request capture mismatch');
+   if(isLoss(a) && (original.command.type!=='lose-life'||original.command.amount!==1||original.command.affectedPlayerId!==0))throw Error('Original request intent mismatch');
+   requests.set(a.attemptId,original);
+   if(holdArmed && !holdClaimed && isLoss(a)){holdClaimed=true;holdArmed=false;held=p;await new Promise(resolve=>{releaseHold=resolve;});}
+  }
   if (r?.status !== 'completed') return;
   const a = r.attempt;
+  if(recorded && historicExpected===a.attemptId)observedHistorical=p;
   if (!unique.has(a.attemptId)) {
    originals.push(r);
    unique.set(a.attemptId, {
@@ -601,8 +638,9 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
   }
   if (p.appliedResult) delivered++;
  });
- window.__p1ReceiptSummary = () => ({completed: [...unique.values()], appliedResults: delivered});
- window.__p1StopReceipts = () => { stop(); originals.length = 0; unique.clear(); latest = null;
+ window.__p1ReceiptSummary = () => ({completed: [...unique.values()], appliedResults: delivered, ...(recorded?{publications}:{})});
+ window.__p1StopReceipts = () => { window.__p1ReleasePending(); stop(); originals.length = 0; unique.clear(); requests.clear(); held=null; observedHistorical=null; historicExpected=null; latest = null;
+  delete window.__p1ArmPending;delete window.__p1ReleasePending;delete window.__p1PendingReady;delete window.__p1ProbePending;
   delete window.__p1NativeChecks; delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
  const nativeFailure = (phase,step,error,completedChecks) => {
   const messages = new Map([
@@ -721,11 +759,15 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
   const current = reply.current && unwrapClientGameState(reply.current.snapshot.state);
   const binding = {interactionId:a.submission.interactionId,adapterGeneration:a.context.adapterGeneration};
   const source = {stackEntryId:a.source.stackEntryId,sourceObjectId:a.source.sourceId,adapterGeneration:a.context.adapterGeneration};
-  const request = {binding,command:{type:'lose-life',affectedPlayerId:0,amount:1,
+  const request = recorded ? requests.get(a.attemptId) : {binding,command:{type:'lose-life',affectedPlayerId:0,amount:1,
    stackEntryId:a.source.stackEntryId,sourceObjectId:a.source.sourceId}};
+  if(recorded && !request)throw Error('Original request unavailable');
+  historicExpected=recorded?a.attemptId:null;
   const reconciled = await cap.commandPortFactory(source).reconcileManualResolution(request);
+  const historical=observedHistorical;
+  const historicalCurrent=historical?.current&&unwrapClientGameState(historical.current.snapshot.state);
   const after = window.__p1Observe();
-  return {method:'native-read-only-original-lookup-and-client-terminal-cache-reconcile', nativeLookupCount:1,
+  return {method:recorded?'actual-original-request-native-lookup-and-adapter-historical-publication':'native-read-only-original-lookup-and-client-terminal-cache-reconcile', nativeLookupCount:1,
    before, after, countsBefore, countsAfter:{publications,appliedResults:delivered,completed:unique.size},
    differentInteractions:a.submission.interactionId !== second.attempt.submission.interactionId,
    differentAttempts:a.attemptId !== second.attempt.attemptId,
@@ -739,11 +781,15 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
    currentEntryId:current?.resolving_stack_entry?.id,currentPhase:current?.derived?.manual_resolution?.phase,
    sameContext:sameLocalContinuationValue(a.context,reply.current?.context),
    cacheStatus:reconciled.status,cacheOriginalBinding:sameLocalContinuationValue(binding,reconciled.binding),
-   adapterPublishedHistoricalReply:false};
+   adapterPublishedHistoricalReply:recorded ? historical!==null : false,
+   ...(recorded?{originalRequestRetained:requests.get(a.attemptId)===request,originalRequestFrozen:Object.isFrozen(request),
+    publicationSameOriginal:sameLocalContinuationValue(a,historical?.receipt?.attempt),publicationSameOriginalResult:sameLocalContinuationValue(first.result,historical?.receipt?.result),
+    publicationStatus:historical?.receipt?.status,publicationAppliedResultNull:historical?.appliedResult===null,
+    publicationHistoricalLife:(historical?.receipt?.result?.events??[]).filter(e=>e.type==='LifeChanged'&&e.data.player_id===0).map(e=>({amount:e.data.amount,total:e.data.new_total})),publicationCurrentLife:historicalCurrent?.players?.map(p=>p.life)}:{})};
  };
  done(true);
 }, () => done(false));
-''', 'args': []})
+''', 'args': [RECORDED_1C]})
     assert receipts is True
     passed('prepayment')
     stage = 'prepayment-full-control'
@@ -755,7 +801,7 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     stage = 'manual-card-select'
     click('[data-hand-card][data-object-id="' + str(pre['sourceCardId']) + '"]')
     stage = 'manual-options'
-    click('//button[normalize-space()="Resolution options for P1 Self Loss"]', 'xpath')
+    click('//button[normalize-space()="Resolution options for '+('Replay Self Loss' if RECORDED_1C else 'P1 Self Loss')+'"]', 'xpath')
     disclosure = call('/execute/sync', {'script': "return document.body.textContent.includes('Its automatic spell body will be skipped');", 'args': []})
     assert disclosure is True and observe()['ownManaCount'] == 2 and observe()['stackCount'] == 0
     report['prepayment_scope_visible'] = True
@@ -795,7 +841,36 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
         amount = element(panel + '//input[@type="number"]', 'xpath')
         call('/element/' + amount + '/clear', {})
         call('/element/' + amount + '/value', {'text': str(amount_value)})
-        click(panel + '//button[@type="submit"]', 'xpath')
+        if RECORDED_1C and total==18:
+            assert call('/execute/sync',{'script':'return window.__p1ArmPending();','args':[]}) is True
+            try:
+                click(panel + '//button[@type="submit"]', 'xpath')
+                deadline=time.monotonic()+30
+                while not call('/execute/sync',{'script':'return window.__p1PendingReady();','args':[]}):
+                    assert time.monotonic()<deadline;time.sleep(0.1)
+                stage='registered-pending'
+                pending=call('/execute/async',{'script':'const done=arguments[arguments.length-1];window.__p1ProbePending().then(done,()=>done(null));','args':[]})
+                report['registered_pending']=pending
+                CHECKS.validate_recorded_pending(report)
+                passed('registered-pending');stage='capture-registered-pending';capture('registered-pending')
+            finally:
+                prior_pending_failure=sys.exc_info()[0] is not None
+                pending_had_webdriver='webdriver_error' in report
+                pending_webdriver_before=report.get('webdriver_error')
+                try:
+                    assert call('/execute/sync',{'script':'return window.__p1ReleasePending();','args':[]}) is True
+                    report['pending_hold_released']=True
+                except Exception:
+                    report['pending_hold_released']=False
+                    if prior_pending_failure:
+                        if pending_had_webdriver:report['webdriver_error']=pending_webdriver_before
+                        else:report.pop('webdriver_error',None)
+                    report['secondary'].append({'stage':'pending-hold-release','code':1,'reason':'pending-hold-release-failed'})
+                    if not prior_pending_failure:
+                        stage='pending-hold-release'
+                        raise
+        else:click(panel + '//button[@type="submit"]', 'xpath')
+        stage='life'+str(total)
         life = wait_for(lambda x: x['life'] == [total,20] and x['manualPhase'] == 'open')
         changes.append({'amount': -amount_value, 'total': total})
         assert life['sourceId'] == began['sourceId'] and life['resolvingEntryId'] == began['manualStackEntryId']
@@ -810,12 +885,12 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
             phase = 'before-second' if total == 19 else 'after-second'
             checked = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1NativeChecks(arguments[0]).then(done,()=>done({status:'failed',phase:arguments[0],step:'unhandled',completedChecks:[],reason:'unclassified-native-check-exception',exception:{name:'Unknown',message:null}}));", 'args': [phase]})
             report.setdefault('native_original_checks', []).append(checked)
-            CHECKS.validate_native_original_checks(report, complete=total == 18)
+            CHECKS.validate_native_original_checks(report, complete=total == 18, recorded=RECORDED_1C)
     if SPLIT_APPLY:
         stage = 'historical-lookup'
         lookup = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1LookupFirst().then(done,()=>done(null));", 'args': []})
         report['historical_lookup'] = lookup
-        CHECKS.validate_historical_lookup(report)
+        CHECKS.validate_historical_lookup(report, recorded=RECORDED_1C)
         passed('historical-lookup')
         stage = 'capture-historical-lookup'
         capture('historical-lookup')
@@ -865,7 +940,7 @@ const done=arguments[arguments.length-1];
 })().catch(()=>done(null));
 ''', 'args': [began['manualStackEntryId']]})
         report['native_final_replay'] = replay
-        CHECKS.validate_native_original_checks(report, final=True)
+        CHECKS.validate_native_original_checks(report, final=True, recorded=RECORDED_1C)
     report['receipt_summary'] = call('/execute/sync', {'script': 'return window.__p1ReceiptSummary();', 'args': []})
     rs = report['receipt_summary']
     assert len(rs['completed']) == (4 if SPLIT_APPLY else 3) and rs['appliedResults'] == (4 if SPLIT_APPLY else 3)
@@ -880,6 +955,7 @@ const done=arguments[arguments.length-1];
     passed('paidplay21')
     stage = 'capture-paidplay21'
     capture('paidplay21')
+    if RECORDED_1C: CHECKS.validate_recorded_1c(report, final=False)
     report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
     report['status'] = 'passed'
 
@@ -945,13 +1021,18 @@ Promise.all([import('/src/stores/gameStore.ts'), import('/src/stores/uiStore.ts'
         legalActionObjectIds: nextActions.slice(0,20).map(a => a.data?.object_id ?? null),
         automaticActionType: nextObject ? resolveSingleActionDispatch(nextActions, nextObject)?.type ?? null : null,
         pendingChoiceObjectId: useUiStore.getState().pendingAbilityChoice?.objectId ?? null},
-      nextInGraveyard: g?.players?.[0]?.graveyard?.some(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? false};
+      nextInGraveyard: recorded ? (g?.players?.[0]?.graveyard?.includes(selectedIds?.next) ?? false) : (g?.players?.[0]?.graveyard?.some(id => g.objects?.[id]?.name === 'Next Ordinary Play') ?? false)};
   };
   done(true);
 }, () => done(false));
-""", 'args': [RECORDED_PREP]})
+""", 'args': [RECORDED_INPUTS]})
     assert ready, 'Public observer module could not load'
-    if RECORDED_PREP:
+    if RECORDED_1C:
+        report['scope']='recorded-start-preparation-only'
+        run_recorded_prep()
+        report['scope']=CHECKS.RECORDED_1C_SCOPE;report['status']='starting'
+        run_s1_1a()
+    elif RECORDED_PREP:
         run_recorded_prep()
     elif AUTO_CONTROL:
         run_auto_control()
