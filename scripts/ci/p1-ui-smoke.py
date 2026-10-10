@@ -836,7 +836,7 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
  window.__p1ReceiptSummary = () => ({completed: [...unique.values()], appliedResults: delivered, ...(recorded?{publications}:{})});
  window.__p1StopReceipts = () => { window.__p1ReleasePending(); stop(); originals.length = 0; unique.clear(); requests.clear(); held=null; observedHistorical=null; historicExpected=null; latest = null;
   delete window.__p1ArmPending;delete window.__p1ReleasePending;delete window.__p1PendingReady;delete window.__p1ProbePending;
-  delete window.__p1NativeChecks; delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
+  delete window.__p1AdditionalChecks; delete window.__p1NativeChecks; delete window.__p1LookupFirst; delete window.__p1ReceiptSummary; delete window.__p1StopReceipts; return true; };
  const nativeFailure = (phase,step,error,completedChecks) => {
   const messages = new Map([
    ['No replay recording available. Start a game first, or it was invalidated by an undo/restore.','replay-recording-unavailable'],
@@ -941,6 +941,64 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
   return result;
   } catch(error) { return nativeFailure(phase,probeStep,error,completedChecks); }
  };
+ window.__p1AdditionalChecks = async (phase,nextCardId) => {
+  let probeStep='boundary';const completedVariants=[];
+  try {
+  const {unwrapClientGameState}=await import('/src/adapter/wasm-adapter.ts');
+  const {sameLocalContinuationValue:eq}=await import('/src/adapter/types.ts');
+  const adapter=useGameStore.getState().adapter,engine=adapter?.getEngineClient();
+  const before=window.__p1Observe();
+  const total=phase==='begin20'?20:phase==='life19'?19:18;
+  if(!engine||before.life[0]!==total)throw Error('Additional boundary unavailable');
+  const counts=()=>({publications,appliedResults:delivered,completed:unique.size});
+  const digest=async text=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),n=>n.toString(16).padStart(2,'0')).join('');
+  const hashes=async()=>{const state=await adapter.exportPersistenceState(),replay=await engine.exportReplayLog();const p=JSON.parse(replay);if(!Array.isArray(p.actions))throw Error('Replay schema');return {stateSha256:await digest(state),replaySha256:await digest(replay),replayActions:p.actions.length};};
+  const countsBefore=counts(),hashesBefore=await hashes(),rows=[];
+  const invariant=async()=>{const after=window.__p1Observe(),countsAfter=counts(),hashesAfter=await hashes();if(!eq(before,after)||!eq(countsBefore,countsAfter)||!eq(hashesBefore,hashesAfter))throw Error('Additional refusal changed resident');return {after,countsAfter,hashesAfter};};
+  probeStep='authenticated-current-read';
+  const currentRead=await engine.readLocalCurrent(),frame=currentRead?.current,resident=frame&&unwrapClientGameState(frame.snapshot.state);
+  if(!frame||currentRead.receipt!==null||currentRead.appliedResult!==null||resident?.players?.[0]?.life!==total||resident?.derived?.manual_resolution?.phase!==before.manualPhase||!eq(countsBefore,counts())||!eq(hashesBefore,await hashes()))throw Error('Authenticated read changed boundary');
+  if(phase==='closed18'){
+   const original=originals.find(r=>r.attempt.submission.response.type==='manualResolution'&&r.attempt.submission.response.data.decision.type==='finish');
+   if(!original||before.manualPhase!=='closed'||!before.sourceInGraveyard)throw Error('Original Finish unavailable');
+   for(const operation of ['register','apply','lookup']){
+    probeStep='qF-'+operation;
+    const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation,attempt:original.attempt});
+    const current=reply.current&&unwrapClientGameState(reply.current.snapshot.state);
+    if(reply.receipt?.status!=='completed'||reply.receipt.rejection!==null||reply.appliedResult!==null||!eq(original.attempt,reply.receipt.attempt)||!eq(original.result,reply.receipt.result)||current?.players?.[0]?.life!==18)throw Error('Finish original mismatch');
+    rows.push({variant:'qF-'+operation,operation,status:'completed',sameOriginal:true,sameOriginalResult:true,appliedResultNull:true,resultPresent:true,...await invariant()});completedVariants.push(probeStep);
+   }
+   probeStep='old-Finish-new-attempt';
+   const old={...structuredClone(original.attempt),attemptId:crypto.randomUUID()};
+   const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'register',attempt:old});
+   if(reply.receipt?.status!=='notApplied'||reply.receipt.rejection?.code!=='invalid_interaction_response'||reply.receipt.result!==null||reply.appliedResult!==null||!eq(old,reply.receipt.attempt))throw Error('Old Finish fresh attempt admitted');
+   rows.push({variant:'old-Finish-new-attempt',operation:'register',status:'notApplied',rejection:reply.receipt.rejection.code,resultNull:true,appliedResultNull:true,separateAttempt:old.attemptId!==original.attempt.attemptId,sameCapturedIntent:true,...await invariant()});completedVariants.push(probeStep);
+  }else{
+   if(before.manualPhase!=='open'||!resident?.derived?.manual_resolution?.source||nextCardId===before.sourceId)throw Error('Fresh Manual boundary unavailable');
+   const opportunity=frame.snapshot.viewerInteraction?.opportunities.find(o=>o.response.type==='schema'&&o.response.data.spec.type==='manualResolution');
+   const finish=opportunity?.response.data.candidates.find(c=>c.surfaces.some(s=>s.type==='action'&&s.data.code==='finishManualResolution'));
+   const previous=originals.at(-1)?.attempt;
+   if(!opportunity||!finish||!previous||previous.submission.interactionId===opportunity.interactionId)throw Error('Fresh opportunity unavailable');
+   const base={context:frame.context,source:resident.derived.manual_resolution.source,submission:{interactionId:opportunity.interactionId,response:{type:'manualResolution',data:{decision:{type:'loseOwnLife',data:{amount:1}}}}}};
+   const variants=[['amount-zero',a=>{a.submission.response.data.decision.data.amount=0;}],['amount-overflow',a=>{a.submission.response.data.decision.data.amount=2147483648;}],['source-N',a=>{a.source.sourceId=nextCardId;}],['mismatched-generation',a=>{a.context.adapterGeneration+=1;}],['wrong-Finish-choice',a=>{a.submission.response.data.decision={type:'finish',data:{choiceId:finish.id+'-wrong'}};}],['old-interaction',a=>{a.submission.interactionId=previous.submission.interactionId;}]];
+   const attempts=new Set();
+   for(const [variant,change] of variants){
+    probeStep=variant;
+    const attempt=structuredClone(base);if(variant==='wrong-Finish-choice')attempt.submission.response.data.decision={type:'finish',data:{choiceId:finish.id}};attempt.attemptId=crypto.randomUUID();
+    const legitimate=structuredClone(attempt);change(attempt);
+    const differences=(a,b,path='')=>{if(eq(a,b))return [];if(a&&b&&typeof a==='object'&&typeof b==='object')return [...new Set([...Object.keys(a),...Object.keys(b)])].flatMap(k=>differences(a[k],b[k],path?path+'.'+k:k));return [path];};
+    const expectedPath={'amount-zero':'submission.response.data.decision.data.amount','amount-overflow':'submission.response.data.decision.data.amount','source-N':'source.sourceId','mismatched-generation':'context.adapterGeneration','wrong-Finish-choice':'submission.response.data.decision.data.choiceId','old-interaction':'submission.interactionId'}[variant];
+    if(!eq(differences(legitimate,attempt),[expectedPath]))throw Error('Exactly one field must differ');
+    if(attempts.has(attempt.attemptId)||originals.some(r=>r.attempt.attemptId===attempt.attemptId))throw Error('Distinct attempt required');attempts.add(attempt.attemptId);
+    const reply=await engine.submitLocalContinuation(0,{type:'localContinuation',operation:'register',attempt});
+    const expected=variant==='mismatched-generation'?'stale_interaction':'invalid_interaction_response';
+    if(reply.receipt?.status!=='notApplied'||reply.receipt.rejection?.code!==expected||reply.receipt.result!==null||reply.appliedResult!==null||!eq(attempt,reply.receipt.attempt)||!eq(frame.context,reply.current?.context))throw Error('Additional refusal not certified');
+    rows.push({variant,operation:'register',layer:variant==='mismatched-generation'?'native-current-context':'native-typed-source-interaction',status:'notApplied',rejection:expected,resultNull:true,appliedResultNull:true,sameOriginal:true,separateAttempt:true,oneFieldChange:true,...await invariant()});completedVariants.push(probeStep);
+   }
+  }
+  return {status:'passed',currentReadMethod:'authenticated-Worker-readLocalCurrent',readOnlyFrameInvariant:true,method:'actual-Worker-finite-S5-and-qF-originals',phase,before,countsBefore,hashesBefore,rows,ledgerUnchangedClaim:false,refusalUi:false,oldGenerationProven:false,engineInFlightProven:false};
+  }catch{return {status:'failed',phase,step:probeStep,completedVariants,reason:'finite-probe-not-certified'};}
+ };
  window.__p1LookupFirst = async () => {
   const [{unwrapClientGameState}, {sameLocalContinuationValue}] = await Promise.all([
    import('/src/adapter/wasm-adapter.ts'), import('/src/adapter/types.ts')]);
@@ -1030,6 +1088,11 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
         report['primary']={'stage':'operations-complete','code':0,'reason':'completed'}
         report['status']='passed'
         return
+    if RECORDED_1C and NATIVE_CHECKS:
+        stage = 'additional-native-' + 'begin20'
+        extra = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1AdditionalChecks(arguments[0],arguments[1]).then(done,()=>done({status:'failed',phase:arguments[0],step:'unhandled',reason:'finite-probe-not-certified'}));", 'args': ['begin20', pre['nextCardId']]})
+        report.setdefault('additional_native_checks', []).append(extra)
+        CHECKS.validate_additional_native_checks(report, complete=False)
     panel = '//section[@aria-labelledby][.//h2[normalize-space()="Manual resolution"]]'
     stage = 'player-area-select'
     label = call('/execute/sync', {'script': "return document.querySelector('[data-testid=\"player-area-0\"] > button[aria-pressed]')?.textContent;", 'args': []})
@@ -1087,6 +1150,11 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
             checked = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1NativeChecks(arguments[0]).then(done,()=>done({status:'failed',phase:arguments[0],step:'unhandled',completedChecks:[],reason:'unclassified-native-check-exception',exception:{name:'Unknown',message:null}}));", 'args': [phase]})
             report.setdefault('native_original_checks', []).append(checked)
             CHECKS.validate_native_original_checks(report, complete=total == 18, recorded=RECORDED_1C)
+        if RECORDED_1C and NATIVE_CHECKS:
+            stage = 'additional-native-' + 'life' + str(total)
+            extra = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1AdditionalChecks(arguments[0],arguments[1]).then(done,()=>done({status:'failed',phase:arguments[0],step:'unhandled',reason:'finite-probe-not-certified'}));", 'args': ['life' + str(total), pre['nextCardId']]})
+            report.setdefault('additional_native_checks', []).append(extra)
+            CHECKS.validate_additional_native_checks(report, complete=False)
     if SPLIT_APPLY:
         stage = 'historical-lookup'
         lookup = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1LookupFirst().then(done,()=>done(null));", 'args': []})
@@ -1105,6 +1173,11 @@ import('/src/stores/gameStore.ts').then(({useGameStore}) => {
     passed('finish')
     stage = 'capture-finish'
     capture('finish')
+    if RECORDED_1C and NATIVE_CHECKS:
+        stage = 'additional-native-' + 'closed18'
+        extra = call('/execute/async', {'script': "const done=arguments[arguments.length-1]; window.__p1AdditionalChecks(arguments[0],arguments[1]).then(done,()=>done({status:'failed',phase:arguments[0],step:'unhandled',reason:'finite-probe-not-certified'}));", 'args': ['closed18', pre['nextCardId']]})
+        report.setdefault('additional_native_checks', []).append(extra)
+        CHECKS.validate_additional_native_checks(report, complete=False)
     stage = 'paidplay-normal-direct'
     click('[data-hand-card][data-object-id="' + str(pre['nextCardId']) + '"]', double=True)
     stage = 'paidplay-payment'
@@ -1156,7 +1229,9 @@ const done=arguments[arguments.length-1];
     passed('paidplay21')
     stage = 'capture-paidplay21'
     capture('paidplay21')
-    if RECORDED_1C: CHECKS.validate_recorded_1c(report, final=False)
+    if RECORDED_1C:
+        CHECKS.validate_recorded_1c(report, final=False)
+        CHECKS.validate_additional_native_checks(report, complete=True)
     report['primary'] = {'stage': 'operations-complete', 'code': 0, 'reason': 'completed'}
     report['status'] = 'passed'
 

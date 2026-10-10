@@ -943,6 +943,39 @@ class FinishEvidenceTests(unittest.TestCase):
             pendingResultNull=True,pendingAppliedResultNull=True,queries=[dict(operation=operation,status='pending',sameOriginal=True,resultNull=True,rejectionNull=True,appliedResultNull=True,currentLife=[19,20]) for operation in ['register','lookup']])
         return report
 
+    def additional_native_report(self):
+        report=self.recorded_1c_report();groups=[]
+        hashes={'stateSha256':'a'*64,'replaySha256':'b'*64,'replayActions':18}
+        phases=[('begin20','begin',1,2),('life19','life_first',2,4),('life18','life_applied',3,6),('closed18','finished',4,9)]
+        names=['amount-zero','amount-overflow','source-N','mismatched-generation','wrong-Finish-choice','old-interaction']
+        for phase,key,count,pubs in phases:
+            counts={'publications':pubs,'appliedResults':count,'completed':count};rows=[]
+            for name in (['qF-register','qF-apply','qF-lookup','old-Finish-new-attempt'] if phase=='closed18' else names):
+                row={'variant':name,'after':report[key],'countsAfter':counts,'hashesAfter':hashes,'appliedResultNull':True}
+                if name.startswith('qF-'):row.update(operation=name[3:],status='completed',sameOriginal=True,sameOriginalResult=True,resultPresent=True)
+                else:
+                    row.update(operation='register',status='notApplied',rejection='stale_interaction' if name=='mismatched-generation' else 'invalid_interaction_response',resultNull=True,separateAttempt=True)
+                    if phase=='closed18':row['sameCapturedIntent']=True
+                    else:row.update(sameOriginal=True,oneFieldChange=True,layer='native-current-context' if name=='mismatched-generation' else 'native-typed-source-interaction')
+                rows.append(row)
+            groups.append({'status':'passed','currentReadMethod':'authenticated-Worker-readLocalCurrent','readOnlyFrameInvariant':True,'method':'actual-Worker-finite-S5-and-qF-originals','phase':phase,'before':report[key],'countsBefore':counts,'hashesBefore':hashes,'rows':rows,'ledgerUnchangedClaim':False,'refusalUi':False,'oldGenerationProven':False,'engineInFlightProven':False})
+        report['additional_native_checks']=groups
+        return report
+
+    def test_additional_refusals_and_Finish_originals_fail_closed(self):
+        report=self.additional_native_report();capture.validate_additional_native_checks(report)
+        partial=json.loads(json.dumps(report));partial['additional_native_checks']=partial['additional_native_checks'][:1]
+        capture.validate_additional_native_checks(partial,complete=False)
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_additional_native_checks(partial)
+        faults=[([0,'rows',0,'status'],'pending'),([0,'rows',1,'rejection'],'stale_interaction'),([1,'rows',2,'hashesAfter','stateSha256'],'c'*64),([2,'rows',3,'countsAfter','publications'],7),([2,'oldGenerationProven'],True),([3,'rows',0,'sameOriginalResult'],False),([3,'rows',1,'appliedResultNull'],False),([3,'rows',3,'separateAttempt'],False),([3,'rows',2,'operation'],'apply'),([0,'rows',5,'oneFieldChange'],False)]
+        for path,value in faults:
+            changed=json.loads(json.dumps(report));target=changed['additional_native_checks']
+            for key in path[:-1]:target=target[key]
+            target[path[-1]]=value
+            with self.subTest(path=path),self.assertRaises(capture.EvidenceFailure):capture.validate_additional_native_checks(changed)
+        changed=json.loads(json.dumps(report));changed['additional_native_checks'][0]['rows'].pop()
+        with self.assertRaises(capture.EvidenceFailure):capture.validate_additional_native_checks(changed)
+
     def test_actual_recorded_subscriber_claims_pending_once_and_preserves_frozen_request(self):
         tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())
         scripts=[n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and 'window.__p1ArmPending = ' in n.value]

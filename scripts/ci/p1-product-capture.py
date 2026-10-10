@@ -614,6 +614,36 @@ def validate_native_original_checks(report, complete=True, final=False, recorded
             and type(replay.get('manualFinish')) is int and replay['manualFinish']==1, 'final-manual-replay-counts')
 
 
+def validate_additional_native_checks(report, complete=True):
+    def require(ok, reason):
+        if not ok: raise EvidenceFailure('operation-assertions','additional-native-'+reason)
+    groups=report.get('additional_native_checks')
+    expected=[('begin20','begin',20),('life19','life_first',19),('life18','life_applied',18),('closed18','finished',18)]
+    require(isinstance(groups,list) and 1<=len(groups)<=4 and (not complete or len(groups)==4),'phase-count')
+    variants=['amount-zero','amount-overflow','source-N','mismatched-generation','wrong-Finish-choice','old-interaction']
+    for g,(phase,boundary,total) in zip(groups,expected):
+        require(isinstance(g,dict) and g.get('status')=='passed' and g.get('currentReadMethod')=='authenticated-Worker-readLocalCurrent' and g.get('readOnlyFrameInvariant') is True and g.get('method')=='actual-Worker-finite-S5-and-qF-originals' and g.get('phase')==phase,'scope')
+        before=report.get(boundary);require(isinstance(before,dict) and before.get('life')==[total,20] and g.get('before')==before,'boundary')
+        require(all(g.get(k) is False for k in ['ledgerUnchangedClaim','refusalUi','oldGenerationProven','engineInFlightProven']),'overclaim')
+        hashes=g.get('hashesBefore');counts=g.get('countsBefore')
+        require(isinstance(hashes,dict) and set(hashes)=={'stateSha256','replaySha256','replayActions'} and all(isinstance(hashes[k],str) and re.fullmatch('[0-9a-f]{64}',hashes[k]) for k in ['stateSha256','replaySha256']) and type(hashes['replayActions']) is int and hashes['replayActions']>0,'hashes')
+        count={'begin20':1,'life19':2,'life18':3,'closed18':4}[phase]
+        pubs={'begin20':2,'life19':4,'life18':6,'closed18':9}[phase]
+        # qL1 historical adapter publication adds one before Finish.
+        require(counts=={'publications':pubs,'appliedResults':count,'completed':count},'counts')
+        rows=g.get('rows');names=['qF-register','qF-apply','qF-lookup','old-Finish-new-attempt'] if phase=='closed18' else variants
+        require(isinstance(rows,list) and len(rows)==len(names),'row-count')
+        for row,name in zip(rows,names):
+            require(isinstance(row,dict) and row.get('variant')==name and row.get('after')==before and row.get('countsAfter')==counts and row.get('hashesAfter')==hashes,'invariant')
+            require(row.get('appliedResultNull') is True,'applied-result')
+            if name.startswith('qF-'):
+                require(row.get('operation')==name[3:] and row.get('status')=='completed' and all(row.get(k) is True for k in ['sameOriginal','sameOriginalResult','resultPresent']),'original-Finish')
+            else:
+                code='stale_interaction' if name=='mismatched-generation' else 'invalid_interaction_response'
+                require(row.get('operation')=='register' and row.get('status')=='notApplied' and row.get('rejection')==code and row.get('resultNull') is True and row.get('separateAttempt') is True,'refusal')
+                if phase=='closed18':require(row.get('sameCapturedIntent') is True,'old-Finish')
+                else:require(row.get('sameOriginal') is True and row.get('oneFieldChange') is True and row.get('layer')==('native-current-context' if name=='mismatched-generation' else 'native-typed-source-interaction'),'typed-refusal')
+
 def validate_recorded_pending(report):
     def require(ok, reason):
         if not ok: raise EvidenceFailure('operation-assertions','recorded-pending-'+reason)
@@ -639,6 +669,7 @@ def validate_recorded_pending(report):
 
 
 def validate_recorded_1c(report, final=True):
+    if final: validate_additional_native_checks(report)
     if report.get('scope')!=RECORDED_1C_SCOPE or report.get('fixture')!='1c.recorded.B':
         raise EvidenceFailure('operation-assertions','recorded-1c-scope')
     if final:validate_recorded_prep(report,journey=True)
