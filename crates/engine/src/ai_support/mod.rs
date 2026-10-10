@@ -2945,7 +2945,7 @@ pub struct StuckDecisionDiagnostic {
 ///
 /// Returns `None` for `Priority` (passing priority is always legal) and for
 /// states with no acting player (e.g. `GameOver`), and only fires when *every*
-/// authorized submitter has an empty legal-action set.
+/// authorized submitter has no legal flat action or admitted Manual response.
 pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagnostic> {
     // Cheap pre-gate: `Priority` (passing is always legal) and states with no
     // acting player are never wedged, and this branch enumerates no actions.
@@ -2965,9 +2965,56 @@ pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagn
     if !legal_actions_full(state).0.is_empty() {
         return None;
     }
+    #[cfg(feature = "manual_resolution_prototype")]
+    if matches!(state.waiting_for, WaitingFor::ManualResolution { .. })
+        && has_admitted_manual_progress(state, &submitters)
+    {
+        return None;
+    }
     Some(StuckDecisionDiagnostic {
         waiting_for_kind: state.waiting_for.variant_name(),
         stuck_players: submitters,
+    })
+}
+
+#[cfg(feature = "manual_resolution_prototype")]
+fn has_admitted_manual_progress(state: &GameState, submitters: &[PlayerId]) -> bool {
+    use crate::game::interaction::{derive_viewer_interaction, preview_interaction};
+    use crate::types::interaction::{
+        InteractionOpportunityResponse, InteractionPreviewRequest, InteractionPreviewStatus,
+        InteractionResponse, InteractionResponseSpec, ManualResolutionDecision, PreviewRequestId,
+    };
+
+    // Manual intentionally has no flat AI actions. Candidate presentation alone
+    // does not prove progress: validate Finish through the normal admitted
+    // interaction and reducer on a throwaway clone, including its carrier.
+    submitters.iter().copied().any(|actor| {
+        let filtered = crate::game::visibility::filter_state_for_viewer(state, actor);
+        let view = derive_viewer_interaction(state, &filtered, actor);
+        view.opportunities.iter().any(|opportunity| {
+            let InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::ManualResolution { .. },
+                candidates,
+            } = &opportunity.response
+            else {
+                return false;
+            };
+            candidates.iter().any(|candidate| {
+                let request = InteractionPreviewRequest {
+                    request_id: PreviewRequestId("stuck-diagnostic".into()),
+                    interaction_id: opportunity.interaction_id.clone(),
+                    response: InteractionResponse::ManualResolution {
+                        decision: ManualResolutionDecision::Finish {
+                            choice_id: candidate.id.clone(),
+                        },
+                    },
+                };
+                matches!(
+                    preview_interaction(state, actor, &request).status,
+                    InteractionPreviewStatus::Confirmable
+                )
+            })
+        })
     })
 }
 

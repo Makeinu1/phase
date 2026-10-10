@@ -558,19 +558,19 @@ function ManualResolutionSandboxSession({
         <span className="rounded-full border border-amber-200/30 bg-amber-100/5 px-3 py-1 text-xs text-amber-100">{t("manualResolution.localOnly")}</span>
       </header>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.4fr)]">
+      <div className="grid gap-5">
         <aside aria-label={t("manualResolution.sourceCard")} className="rounded-lg border border-white/10 bg-black/20 p-4">
           <h3 className="mb-3 text-xs font-semibold uppercase tracking-[0.15em] text-slate-400">{t("manualResolution.source")}</h3>
-          <div className="flex flex-col items-center gap-3 sm:flex-row sm:items-start">
+          <div className="flex flex-col items-center gap-3">
             <div
               className="shrink-0"
               style={{ "--card-w": "9rem", "--card-h": "12.6rem", "--card-size-scale": 1 } as CSSProperties}
             >
               <CardImage cardName={source.cardName} oracleText={source.oracleText} size="normal" />
             </div>
-            <div className="min-w-0">
-              <h4 className="font-semibold text-white">{source.cardName}</h4>
-              <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-300">{source.oracleText}</p>
+            <div className="min-w-0 w-full">
+              <h4 className="break-words font-semibold text-white">{source.cardName}</h4>
+              <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-300">{source.oracleText}</p>
               {onPreviewSource && (
                 <button type="button" onClick={onPreviewSource} className="mt-2 rounded px-2 py-1 text-sm text-cyan-100 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200">
                   {t("manualResolution.readSource")}

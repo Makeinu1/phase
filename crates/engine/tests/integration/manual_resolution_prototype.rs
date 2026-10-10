@@ -128,6 +128,110 @@ mod enabled_tests {
             .count()
     }
 
+    fn manual_finish_preview(
+        state: &GameState,
+        player: PlayerId,
+    ) -> engine::types::interaction::InteractionPreviewStatus {
+        let view = viewer_interaction(state, player);
+        let request = engine::types::interaction::InteractionPreviewRequest {
+            request_id: engine::types::interaction::PreviewRequestId("stuck-diagnostic".into()),
+            interaction_id: view.opportunities[0].interaction_id.clone(),
+            response: InteractionResponse::ManualResolution {
+                decision: ManualResolutionDecision::Finish {
+                    choice_id: finish_choice_id(state, player),
+                },
+            },
+        };
+        engine::game::interaction::preview_interaction(state, player, &request).status
+    }
+
+    #[test]
+    fn stuck_diagnostic_accepts_legal_manual_progress_without_mutating_state() {
+        let (mut runner, player, _, _, entry) = designated_runner();
+        enter_manual_wait(&mut runner, player, entry);
+        bind_interaction_authority(
+            runner.state_mut(),
+            InteractionSessionId("manual-stuck-diagnostic".into()),
+        )
+        .unwrap();
+        let before = runner.state().clone();
+        assert!(engine::ai_support::legal_actions_full(&before).0.is_empty());
+        assert!(matches!(
+            manual_finish_preview(&before, player),
+            engine::types::interaction::InteractionPreviewStatus::Confirmable
+        ));
+        assert!(engine::ai_support::stuck_decision_diagnostic(runner.state()).is_none());
+        assert_eq!(runner.state(), &before);
+    }
+
+    #[test]
+    fn stuck_diagnostic_retains_manual_with_rejected_carrier_or_authority() {
+        let (mut runner, player, other, _, entry) = designated_runner();
+        enter_manual_wait(&mut runner, player, entry);
+        bind_interaction_authority(
+            runner.state_mut(),
+            InteractionSessionId("manual-stuck-diagnostic-invalid".into()),
+        )
+        .unwrap();
+        let mut missing_carrier = runner.state().clone();
+        missing_carrier.resolving_stack_entry = None;
+        assert!(matches!(
+            manual_finish_preview(&missing_carrier, player),
+            engine::types::interaction::InteractionPreviewStatus::Rejected { .. }
+        ));
+        let mut unbound = runner.state().clone();
+        unbound.interaction_session_id = None;
+        unbound.active_interaction_slots.clear();
+        assert!(viewer_interaction(&unbound, player)
+            .opportunities
+            .is_empty());
+        let mut wrong_owner = runner.state().clone();
+        wrong_owner.waiting_for = WaitingFor::ManualResolution {
+            player: other,
+            stack_entry_id: entry,
+        };
+        bind_interaction_authority(
+            &mut wrong_owner,
+            InteractionSessionId("manual-stuck-diagnostic-wrong-owner".into()),
+        )
+        .unwrap();
+        assert!(matches!(
+            manual_finish_preview(&wrong_owner, other),
+            engine::types::interaction::InteractionPreviewStatus::Rejected { .. }
+        ));
+        for (state, actor) in [
+            (missing_carrier, player),
+            (unbound, player),
+            (wrong_owner, other),
+        ] {
+            let before = state.clone();
+            let diagnostic = engine::ai_support::stuck_decision_diagnostic(&state)
+                .expect("Manual without a legal admitted response is still stuck");
+            assert_eq!(diagnostic.waiting_for_kind, "ManualResolution");
+            assert_eq!(diagnostic.stuck_players, vec![actor]);
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
+    fn stuck_diagnostic_retains_unsatisfiable_non_manual_decision() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(0),
+            choice_type: engine::types::ability::ChoiceType::Labeled { options: vec![] },
+            options: vec![],
+            source: None,
+            persist_player: None,
+        };
+        let before = state.clone();
+        assert!(engine::ai_support::legal_actions_full(&state).0.is_empty());
+        let diagnostic = engine::ai_support::stuck_decision_diagnostic(&state).unwrap();
+        assert_eq!(diagnostic.waiting_for_kind, "NamedChoice");
+        assert_eq!(diagnostic.stuck_players, vec![PlayerId(0)]);
+        assert_eq!(state, before);
+    }
+
     #[test]
     fn unrelated_response_preserves_lower_designated_occurrence() {
         let p0 = PlayerId(0);
