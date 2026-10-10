@@ -243,8 +243,8 @@ def finish_native_input_observation():
     return call('/execute/sync', {'script': 'return window.__p1NativeInputObservation();', 'args': []})
 
 
-def click(selector, using='css selector', double=False):
-    identifier = element(selector, using)
+def click(selector, using='css selector', double=False, *, acquired_identifier=None):
+    identifier = acquired_identifier if acquired_identifier is not None else element(selector, using)
     if selector.startswith('[data-hand-card]'):
         prepare_hand_click(selector, identifier)
     report['click_observation'] = hit_observation(selector, using=using)
@@ -395,6 +395,40 @@ def capture(step):
         '--state-script', str(VALIDATION / 'scripts/ci/p1-public-state.js')], check=True)
 
 
+def advance_recorded_priority():
+    """Acquire a real own control while observing legal automatic priority changes."""
+    selector = '//div[@data-mobile-action-right]//button[starts-with(normalize-space(),"To ") or starts-with(normalize-space(),"Pass")]'
+    deadline = time.monotonic() + 40
+    def eligibility(state):
+        assert state['waitingType']=='Priority' and state['activePlayer']==0
+        assert state['life']==[20,20] and state['ownManaCount']==0 and state['stackCount']==0
+        assert state['manualPhase'] is None and state['resolvingEntryId'] is None
+        if state['priorityPlayer']==1:return 'priority-switched'
+        assert state['priorityPlayer']==0
+        return 'main-ready' if state['phase']=='PreCombatMain' else 'own-priority'
+    while time.monotonic() < deadline:
+        before=observe();status=eligibility(before)
+        if status!='own-priority':
+            report.setdefault('prep_own_advances',[]).append({'status':status,'before':before})
+            return
+        matches=call('/elements',{'using':'xpath','value':selector})
+        if matches:
+            identifier=matches[0]['element-6066-11e4-a52e-4f735466cecf']
+            if call('/element/'+identifier+'/displayed') and call('/element/'+identifier+'/enabled'):
+                before=observe();status=eligibility(before)
+                if status!='own-priority':
+                    report.setdefault('prep_own_advances',[]).append({'status':status,'before':before})
+                    return
+                click(selector,'xpath',acquired_identifier=identifier)
+                report.setdefault('prep_own_advances',[]).append({'status':'native-click','before':before})
+                return
+        time.sleep(0.25)
+    report['control_acquisition_failure']={'operation':stage,'phase':'element-acquisition',
+        'locator':selector,'using':'xpath','condition':'current-own-priority-and-visible-enabled',
+        'publicStateAtFailure':observe()}
+    raise AssertionError('Required product control did not become visible and enabled')
+
+
 def run_recorded_prep():
     global stage
     def passed(name):
@@ -425,7 +459,7 @@ const done=arguments[arguments.length-1];
 })().catch(e=>done({ok:false,error_type:e?.name??'Error'}));
 """,'args':[]});assert result.get('ok') is True;report['prep_opponent_drivers'].append(result)
         elif current['waitingType']=='Priority' and current['priorityPlayer']==0 and current['activePlayer']==0:
-            stage='recorded-own-advance';click('//div[@data-mobile-action-right]//button[starts-with(normalize-space(),"To ") or normalize-space()="Pass Priority"]','xpath')
+            stage='recorded-own-advance';advance_recorded_priority()
         else:raise AssertionError('Unexpected recorded prep waiting')
         steps+=1
         wait_for(lambda x:x!=current)

@@ -493,6 +493,18 @@ def validate_recorded_prep(report):
         require((driver['action']=='MulliganDecision' and before.get('waitingType')=='MulliganDecision'
             and 1 in before.get('mulliganPlayers',[])) or (driver['action']=='PassPriority'
             and before.get('waitingType')=='Priority' and before.get('priorityPlayer')==1),'driver-before')
+    advances=report.get('prep_own_advances', [])
+    require(isinstance(advances,list),'own-advance-checks')
+    for advance in advances:
+        before=advance.get('before') or {}
+        require(before.get('waitingType')=='Priority' and before.get('activePlayer')==0
+            and before.get('life')==[20,20] and before.get('ownManaCount')==0 and before.get('stackCount')==0
+            and before.get('manualPhase') is None and before.get('resolvingEntryId') is None,'own-advance-boundary')
+        status=advance.get('status')
+        require((status=='priority-switched' and before.get('priorityPlayer')==1)
+            or (status=='main-ready' and before.get('priorityPlayer')==0 and before.get('phase')=='PreCombatMain')
+            or (status=='native-click' and before.get('priorityPlayer')==0 and before.get('phase')!='PreCombatMain'),'own-advance-eligibility')
+    require(sum(a.get('status')=='native-click' for a in advances)==sum(c.get('operation')=='recorded-own-advance' and c.get('status')=='completed' for c in report.get('click_commands',[])),'own-advance-click-count')
     commands=report.get('click_commands') or []
     for operation,kind in [('recorded-own-keep','native-element-click'),('recorded-land-play','native-pointer-double-click'),('recorded-land-mana','native-element-click')]:
         matches=[c for c in commands if c.get('operation')==operation]

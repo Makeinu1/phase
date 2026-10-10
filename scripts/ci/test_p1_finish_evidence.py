@@ -42,6 +42,13 @@ class FinishEvidenceTests(unittest.TestCase):
         report['prep_opponent_drivers'][0].update(before=initial,after=main)
         report['click_commands'][1]['native_double_click_verified']=True
         capture.validate_recorded_prep(report)
+        for advance in [
+            {'status':'priority-switched','before':dict(base,priorityPlayer=0)},
+            {'status':'native-click','before':dict(base,phase='Upkeep')},
+            {'status':'main-ready','before':dict(base,life=[19,20])}]:
+            bad=copy.deepcopy(report);bad['prep_own_advances']=[advance]
+            with self.subTest(advance=advance),self.assertRaises(capture.EvidenceFailure):
+                capture.validate_recorded_prep(bad)
         report.update(consumer={},consumer_execution={},secondary=[],
             primary={'stage':'operations-complete','code':0,'reason':'completed'},
             stages={stage:{'status':'passed','assertions_completed':True}
@@ -85,6 +92,40 @@ class FinishEvidenceTests(unittest.TestCase):
         with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
         bad=copy.deepcopy(report);bad['prep_opponent_drivers']*=2
         with self.assertRaises(capture.EvidenceFailure):capture.validate_recorded_prep(bad)
+
+    def test_recorded_priority_rechecks_before_using_acquired_native_control(self):
+        import copy
+        node=next(n for n in ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text()).body
+            if isinstance(n,ast.FunctionDef) and n.name=='advance_recorded_priority')
+        base={'waitingType':'Priority','activePlayer':0,'life':[20,20],'ownManaCount':0,
+            'stackCount':0,'manualPhase':None,'resolvingEntryId':None,'priorityPlayer':0,'phase':'Upkeep'}
+        for label,states,expected,clicks in [
+            ('opponent',[dict(base,priorityPlayer=1)],'priority-switched',0),
+            ('acquisition-race',[base,dict(base,priorityPlayer=1)],'priority-switched',0),
+            ('main',[dict(base,phase='PreCombatMain')],'main-ready',0),
+            ('own',[base,base],'native-click',1)]:
+            with self.subTest(label=label):
+                states=iter(copy.deepcopy(states));report={};recorded=[];calls=[]
+                def call(path,body=None):
+                    calls.append((path,body))
+                    return [{'element-6066-11e4-a52e-4f735466cecf':'acquired'}] if path=='/elements' else True
+                namespace={'time':SimpleNamespace(monotonic=lambda:0),'observe':lambda:next(states),
+                    'report':report,'call':call,'click':lambda *args,**kwargs:recorded.append((args,kwargs))}
+                exec(compile(ast.Module(body=[node],type_ignores=[]),'<actual-priority-acquisition>','exec'),namespace)
+                namespace['advance_recorded_priority']()
+                self.assertEqual(report['prep_own_advances'][0]['status'],expected)
+                self.assertEqual(len(recorded),clicks)
+                if clicks:self.assertEqual(recorded[0][1],{'acquired_identifier':'acquired'})
+                if calls:self.assertIn('starts-with(normalize-space(),"Pass")',calls[0][1]['value'])
+        namespace={'time':SimpleNamespace(monotonic=lambda:0),'observe':lambda:dict(base,life=[19,20])}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<actual-priority-boundary>','exec'),namespace)
+        with self.assertRaises(AssertionError):namespace['advance_recorded_priority']()
+        ticks=iter([0,41]);report={}
+        namespace={'time':SimpleNamespace(monotonic=lambda:next(ticks)),'observe':lambda:base,
+            'report':report,'stage':'recorded-own-advance'}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'<actual-priority-timeout>','exec'),namespace)
+        with self.assertRaisesRegex(AssertionError,'Required product control'):namespace['advance_recorded_priority']()
+        self.assertEqual(report['control_acquisition_failure']['operation'],'recorded-own-advance')
 
     def test_recorded_prep_actual_function_marks_initial_before_capture(self):
         tree=ast.parse(Path(__file__).with_name('p1-ui-smoke.py').read_text())

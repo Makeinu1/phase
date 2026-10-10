@@ -21,7 +21,7 @@ permissions:
 # Change these two literals only after receiving the reviewed product SHA.
 env:
   P1_PUSH_CANDIDATE_SHA: 806c8e92a41f3b43caec2c9541cc90baca667649
-  P1_PUSH_MODE: build
+  P1_PUSH_MODE: reuse
 
 jobs:
   candidate-runtime:
@@ -63,7 +63,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 validation-source/scripts/ci/p1-runtime-reuse.py \
+          python3 validation-source/scripts/ci/p1-recorded-runtime-reuse.py \
             --source "$GITHUB_WORKSPACE/product-source" --evidence "$RUNNER_TEMP/p1-evidence"
       - name: Guarded preflight or one fresh candidate build
         if: ${{ github.event_name != 'push' || env.P1_PUSH_MODE != 'reuse' }}
