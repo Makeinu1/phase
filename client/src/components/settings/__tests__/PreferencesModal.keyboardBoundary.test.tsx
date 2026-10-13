@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GameAction, GameEvent } from "../../../adapter/types";
 import { useGameStore } from "../../../stores/gameStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
+import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { useUiStore } from "../../../stores/uiStore";
-import { buildGameState, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory";
+import { gameStateFactory } from "../../../test/factories/gameStateFactory";
+import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers";
 import { useKeyboardShortcuts } from "../../../hooks/useKeyboardShortcuts";
 import { ChromeControls } from "../../chrome/ChromeControls";
 
@@ -36,22 +38,33 @@ function KeyboardSettingsHarness() {
 }
 
 function seedFirstPriority(): void {
-  const waitingFor = buildPriorityWaitingFor({ data: { player: 0 } });
   act(() => {
     useGameStore.getState().reset();
-    useGameStore.setState({
-      gameMode: "ai",
-      dispatch: storeDispatchMock,
-      gameState: buildGameState({
-        waiting_for: waitingFor,
-        active_player: 0,
-        priority_player: 0,
-      }),
-      waitingFor,
-    });
     useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false });
     useMultiplayerStore.setState({ displayName: "" });
-    useUiStore.setState({ fullControl: false, flexEditMode: false, helpSheetOpen: false });
+    useUiStore.getState().dismissPreview();
+    useUiStore.setState({
+      fullControl: false,
+      flexEditMode: false,
+      helpSheetOpen: false,
+      debugPanelOpen: false,
+      debugInteractionMode: false,
+      shiftHeld: false,
+      altHeld: false,
+      isDragging: false,
+      mobileHandGesture: null,
+    });
+    usePreferencesStore.setState({
+      cardPreviewMode: "follow",
+      cardPreviewHoverDelayMs: 0,
+      boardBackground: "auto-wubrg",
+    });
+  });
+  setGameStoreForTest({
+    gameMode: "ai",
+    dispatch: storeDispatchMock,
+    gameState: gameStateFactory.withPlayers(0, 1).activePlayer(0).priority(0)
+      .build(),
   });
 }
 
@@ -65,7 +78,12 @@ async function openSettingsAndFocusControl() {
 }
 
 describe("PreferencesModal keyboard boundary", () => {
+  let savedPreferences: ReturnType<typeof usePreferencesStore.getState>;
+  let savedMultiplayer: ReturnType<typeof useMultiplayerStore.getState>;
+
   beforeEach(() => {
+    savedPreferences = usePreferencesStore.getState();
+    savedMultiplayer = useMultiplayerStore.getState();
     dispatchActionMock.mockReset();
     dispatchActionMock.mockResolvedValue(undefined);
     storeDispatchMock.mockReset();
@@ -76,8 +94,49 @@ describe("PreferencesModal keyboard boundary", () => {
   afterEach(() => {
     cleanup();
     useGameStore.getState().reset();
-    useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false });
-    useUiStore.setState({ fullControl: false, flexEditMode: false, helpSheetOpen: false });
+    useMultiplayerStore.setState(savedMultiplayer);
+    usePreferencesStore.setState(savedPreferences);
+    useUiStore.getState().dismissPreview();
+    useUiStore.setState({
+      fullControl: false,
+      flexEditMode: false,
+      helpSheetOpen: false,
+      debugPanelOpen: false,
+      debugInteractionMode: false,
+      shiftHeld: false,
+    });
+  });
+
+  it("reaches authorized Space, F and Enter shortcuts outside Settings", () => {
+    render(<KeyboardSettingsHarness />);
+    const launcher = screen.getByRole("button", { name: "Settings" });
+    launcher.focus();
+
+    fireEvent.keyDown(launcher, { key: " " });
+    expect(
+      [...storeDispatchMock.mock.calls, ...dispatchActionMock.mock.calls]
+        .map(([action]) => action),
+    ).toEqual([{ type: "PassPriority" }]);
+    storeDispatchMock.mockClear();
+    dispatchActionMock.mockClear();
+
+    fireEvent.keyDown(launcher, { key: "f" });
+    expect(useUiStore.getState().fullControl).toBe(true);
+    expect(
+      [...storeDispatchMock.mock.calls, ...dispatchActionMock.mock.calls]
+        .map(([action]) => action),
+    ).toEqual([]);
+    storeDispatchMock.mockClear();
+    dispatchActionMock.mockClear();
+
+    fireEvent.keyDown(launcher, { key: "Enter" });
+    expect(
+      [...storeDispatchMock.mock.calls, ...dispatchActionMock.mock.calls]
+        .map(([action]) => action),
+    ).toEqual([{
+      type: "SetAutoPass",
+      data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+    }]);
   });
 
   it("does not pass Space from an open Settings panel to the game shortcut", async () => {
@@ -102,8 +161,47 @@ describe("PreferencesModal keyboard boundary", () => {
 
     expect(dialog).toBeInTheDocument();
     expect(useUiStore.getState().fullControl).toBe(false);
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+    expect(storeDispatchMock).not.toHaveBeenCalled();
     expect(event.defaultPrevented).toBe(false);
   });
+
+  it("does not arm end-turn auto-pass from an open Settings panel", async () => {
+    render(<KeyboardSettingsHarness />);
+    const { dialog, control } = await openSettingsAndFocusControl();
+    const event = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+
+    fireEvent(control, event);
+
+    expect(dialog).toBeInTheDocument();
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+    expect(storeDispatchMock).not.toHaveBeenCalled();
+    expect(useUiStore.getState().fullControl).toBe(false);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it.each([" ", "{Enter}"])(
+    "keeps native tab activation working with %s",
+    async (key) => {
+      const user = userEvent.setup();
+      render(<KeyboardSettingsHarness />);
+      const { dialog } = await openSettingsAndFocusControl();
+      const tab = within(dialog).getByRole("button", { name: "Multiplayer" });
+      tab.focus();
+
+      await user.keyboard(key);
+
+      expect(await within(dialog).findByPlaceholderText("Enter your name"))
+        .toBeInTheDocument();
+      expect(dispatchActionMock).not.toHaveBeenCalled();
+      expect(storeDispatchMock).not.toHaveBeenCalled();
+      expect(useUiStore.getState().fullControl).toBe(false);
+    },
+  );
 
   it("keeps text editing inside Settings working", async () => {
     const user = userEvent.setup();
@@ -118,6 +216,10 @@ describe("PreferencesModal keyboard boundary", () => {
 
     expect(nameInput).toHaveValue("Pilot");
     expect(useMultiplayerStore.getState().displayName).toBe("Pilot");
+    await user.type(nameInput, " fzt");
+    expect(nameInput).toHaveValue("Pilot fzt");
+    expect(useMultiplayerStore.getState().displayName).toBe("Pilot fzt");
+    expect(useUiStore.getState().fullControl).toBe(false);
     expect(dispatchActionMock).not.toHaveBeenCalled();
     expect(storeDispatchMock).not.toHaveBeenCalled();
   });
@@ -133,10 +235,132 @@ describe("PreferencesModal keyboard boundary", () => {
     expect(dialog).not.toBeInTheDocument();
     expect(launcher).toHaveFocus();
 
+    storeDispatchMock.mockClear();
+    dispatchActionMock.mockClear();
     fireEvent.keyDown(launcher, { key: "f" });
     expect(useUiStore.getState().fullControl).toBe(true);
+    expect(
+      [...storeDispatchMock.mock.calls, ...dispatchActionMock.mock.calls]
+        .map(([action]) => action),
+    ).toEqual([]);
 
+    storeDispatchMock.mockClear();
+    dispatchActionMock.mockClear();
     fireEvent.keyDown(launcher, { key: " " });
-    expect(storeDispatchMock).toHaveBeenCalledWith({ type: "PassPriority" });
+    expect(
+      [...storeDispatchMock.mock.calls, ...dispatchActionMock.mock.calls]
+        .map(([action]) => action),
+    ).toEqual([{ type: "PassPriority" }]);
+  });
+
+  it("observes Alt in the registered background portal while containing game keys and local arrows", async () => {
+    render(<KeyboardSettingsHarness />);
+    const { launcher, dialog, control } = await openSettingsAndFocusControl();
+    const trigger = within(dialog).getByRole("button", {
+      name: "Board Background",
+    });
+    fireEvent.click(trigger);
+    const listbox = await screen.findByRole("listbox", {
+      name: "Board Background",
+    });
+    expect(dialog).not.toContainElement(listbox);
+    const selected = within(listbox).getByRole("option", {
+      name: "Auto (match deck)",
+    });
+    const next = within(listbox).getByRole("option", { name: "Random" });
+    expect(selected).toBeEnabled();
+    expect(selected).toHaveFocus();
+
+    fireEvent.keyDown(selected, { key: "ArrowDown" });
+    expect(next).toHaveFocus();
+    fireEvent.keyDown(next, { key: "ArrowUp" });
+    expect(selected).toHaveFocus();
+
+    control.focus();
+    const outsideArrow = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(control, outsideArrow);
+    expect(control).toHaveFocus();
+    expect(outsideArrow.defaultPrevented).toBe(false);
+    expect(listbox).toBeInTheDocument();
+    selected.focus();
+
+    const alt = new KeyboardEvent("keydown", {
+      key: "Alt",
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(selected, alt);
+    expect(useUiStore.getState().altHeld).toBe(true);
+    expect(alt.defaultPrevented).toBe(true);
+    const repeat = new KeyboardEvent("keydown", {
+      key: "Alt",
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(selected, repeat);
+    fireEvent.keyUp(selected, { key: "Alt" });
+    expect(useUiStore.getState().altHeld).toBe(true);
+    expect(repeat.defaultPrevented).toBe(false);
+
+    for (const key of ["f", " ", "Enter"]) {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      fireEvent(selected, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(listbox).toBeInTheDocument();
+      expect(useUiStore.getState().fullControl).toBe(false);
+      expect(dispatchActionMock).not.toHaveBeenCalled();
+      expect(storeDispatchMock).not.toHaveBeenCalled();
+    }
+
+    fireEvent.keyDown(selected, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Board Background" })).not
+      .toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(dialog).toBeInTheDocument();
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(dialog).not.toBeInTheDocument();
+    expect(launcher).toHaveFocus();
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+    expect(storeDispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("selects a background through native Enter without arming game auto-pass", async () => {
+    const user = userEvent.setup();
+    render(<KeyboardSettingsHarness />);
+    const { dialog } = await openSettingsAndFocusControl();
+    const trigger = within(dialog).getByRole("button", {
+      name: "Board Background",
+    });
+    fireEvent.click(trigger);
+    const listbox = await screen.findByRole("listbox", {
+      name: "Board Background",
+    });
+    const selected = within(listbox).getByRole("option", {
+      name: "Auto (match deck)",
+    });
+    const next = within(listbox).getByRole("option", { name: "Random" });
+    expect(selected).toHaveFocus();
+    fireEvent.keyDown(selected, { key: "ArrowDown" });
+    expect(next).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+
+    expect(screen.queryByRole("listbox", { name: "Board Background" })).not
+      .toBeInTheDocument();
+    expect(usePreferencesStore.getState().boardBackground).toBe("random");
+    expect(trigger).toHaveTextContent("Random");
+    expect(trigger).toHaveFocus();
+    expect(dialog).toBeInTheDocument();
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+    expect(storeDispatchMock).not.toHaveBeenCalled();
   });
 });

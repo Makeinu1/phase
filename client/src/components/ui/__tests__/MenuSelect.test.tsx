@@ -70,6 +70,34 @@ describe("MenuSelect", () => {
     expect(options[1]).toHaveFocus();
   });
 
+  it("leaves an unrelated focused control alone while the menu is open", () => {
+    const onSelect = vi.fn();
+    render(
+      <>
+        <MenuSelect label="Load deck..." items={items} onSelect={onSelect} />
+        <button type="button">Other control</button>
+      </>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load deck..." }));
+    const options = screen.getAllByRole("option");
+    fireEvent.keyDown(options[0], { key: "ArrowDown" });
+    expect(options[1]).toHaveFocus();
+
+    const otherControl = screen.getByRole("button", { name: "Other control" });
+    otherControl.focus();
+    const outsideArrow = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(otherControl, outsideArrow);
+
+    expect(otherControl).toHaveFocus();
+    expect(outsideArrow.defaultPrevented).toBe(false);
+    expect(screen.getByRole("listbox", { name: "Load deck..." })).toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it("closes on Escape and restores focus to the trigger", () => {
     renderMenu();
     const trigger = screen.getByRole("button", { name: "Load deck..." });
