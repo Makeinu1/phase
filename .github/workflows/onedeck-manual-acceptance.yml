@@ -87,13 +87,25 @@ jobs:
         with:
           path: data/card-data.json
           key: onedeck-card-data-${{ steps.week.outputs.week }}-${{ hashFiles('crates/engine/src/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+      - uses: actions/cache/restore@v4
+        id: wasmcache
+        with:
+          path: client/src/wasm
+          key: onedeck-manual-wasm-out-${{ hashFiles('crates/**', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       - name: Engine WASM with manual resolution admitted
+        if: steps.wasmcache.outputs.cache-hit != 'true'
         run: |
           mkdir -p client/src/wasm
           cargo build --package engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --features manual_resolution_local_bootstrap
           wasm-bindgen --target web --out-dir client/src/wasm --out-name engine_wasm target/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm
           cargo build --package draft-wasm --target wasm32-unknown-unknown --profile wasm-dev
           wasm-bindgen --target web --out-dir client/src/wasm --out-name draft_wasm target/wasm32-unknown-unknown/wasm-dev/draft_wasm.wasm
+      - uses: actions/cache/save@v4
+        if: steps.wasmcache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          path: client/src/wasm
+          key: onedeck-manual-wasm-out-${{ hashFiles('crates/**', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}
       - name: Client install and focused tests
         working-directory: client
         run: |

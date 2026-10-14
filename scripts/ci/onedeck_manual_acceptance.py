@@ -81,6 +81,7 @@ class Journey:
         self.out = out
         self.scenario = scenario
         self.strings = strings
+        self.full_control_label = re.escape(strings.get("__fullControlLabel", "コントロール"))
         self.steps: list[dict] = []
         self.hook_log: list[dict] = []
         (out / "screens").mkdir(parents=True, exist_ok=True)
@@ -251,6 +252,18 @@ def reach_main_phase(j: Journey) -> None:
             break
         time.sleep(1.5)
     j.step("after-mulligan", "ui", True, j.summary().get("waitingFor"))
+    # The table plays with full control: no automatic priority passes.
+    full_control = j.page.locator("button[aria-pressed]", has_text=re.compile(j.full_control_label))
+    try:
+        full_control.first.wait_for(state="visible", timeout=8000)
+        if full_control.first.get_attribute("aria-pressed") != "true":
+            full_control.first.click()
+            time.sleep(1.0)
+        enabled = full_control.first.get_attribute("aria-pressed") == "true"
+    except Exception as exc:
+        trace(f"full control toggle failed: {exc}")
+        enabled = False
+    j.step("full-control", "ui", enabled, "コントロール (full control) on")
     # Setup: put the human in their precombat main with priority.
     j.debug("SetPhase", {"phase": "PreCombatMain", "active_player": 0})
     j.settle()
@@ -477,7 +490,9 @@ def main() -> int:
         }
     else:
         decks = json.loads(raw_decks)
-    strings = json.load(open(args.locale, encoding="utf-8"))["manualResolution"]
+    locale = json.load(open(args.locale, encoding="utf-8"))
+    strings = dict(locale["manualResolution"])
+    strings["__fullControlLabel"] = locale["fullControl"]["label"]
     if args.child:
         run_one(args, args.child, synthetic, decks, strings)
         return 0
