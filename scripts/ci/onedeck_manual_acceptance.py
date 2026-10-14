@@ -183,7 +183,7 @@ def boot(page: Page, base_url: str, game_id: str, decks: dict, deck_name: str) -
             localStorage.setItem('phase-deck:' + name, JSON.stringify({ ...deck, format: 'Commander' }));
           }
           localStorage.setItem('phase-active-deck', active);
-          localStorage.setItem('phase-preferences', JSON.stringify({ state: { language: 'ja', dismissedSandboxToolsNudge: true, nativeEngineEnabled: false }, version: 37 }));
+          localStorage.setItem('phase-preferences', JSON.stringify({ state: { language: 'ja', dismissedSandboxToolsNudge: true, dismissedFlowHelpNudge: true, dismissedReportCardNudge: true, nativeEngineEnabled: false }, version: 37 }));
         }""",
         [decks, deck_name],
     )
