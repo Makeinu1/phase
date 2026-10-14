@@ -245,7 +245,10 @@ def reach_main_phase(j: Journey) -> None:
         wf = s and s.get("waitingFor")
         if wf and "Mulligan" in wf:
             if not j.click_text(r"^(この手札で始める|Keep)"):
-                j.step("mulligan-keep", "ui", False, "keep button not found")
+                misses = getattr(j, "_keep_misses", 0) + 1
+                j._keep_misses = misses
+                if misses >= 6:
+                    j.step("mulligan-keep", "ui", False, "keep button not found")
             time.sleep(1.5)
             continue
         if wf in ("Priority", "ManaPayment") or (s and s.get("phase") not in (None, "Untap")):
@@ -291,7 +294,7 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     for _ in range(6):
         if j.summary().get("waitingFor") == "ManualResolution":
             break
-        j.click_text(r"^(パス|Pass)")
+        j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
         time.sleep(1.5)
     paused = j.summary().get("waitingFor") == "ManualResolution"
     j.step("paused-for-manual", "ui", paused, "engine paused before the first instruction")
@@ -331,7 +334,7 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     for _ in range(6):
         if any(b["name"] == next_play for b in j.summary()["battlefield"]):
             break
-        j.click_text(r"^(パス|Pass)")
+        j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
         time.sleep(1.5)
     resolved = any(b["name"] == next_play for b in j.summary()["battlefield"])
     j.step("next-normal-play", "ui", clicked and resolved, next_play)
