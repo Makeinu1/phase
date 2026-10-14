@@ -9,6 +9,7 @@ import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
 import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { useManualPickStore } from "../../stores/manualPickStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -114,6 +115,7 @@ export function PlayerHand({ interactionDisabled = false, manualCast = null }: P
   const isCompactHeight = useIsCompactHeight();
   const [expanded, setExpanded] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
+  const manualPickedIds = useManualPickStore((s) => s.selectedObjectIds);
   const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
   const interactionWasDisabledRef = useRef(false);
 
@@ -483,6 +485,11 @@ export function PlayerHand({ interactionDisabled = false, manualCast = null }: P
         });
         return;
       }
+      if (useManualPickStore.getState().active) {
+        e?.stopPropagation();
+        useManualPickStore.getState().pickObject(objectId);
+        return;
+      }
       if (isMobile) {
         setMobileHandOpen(true);
         return;
@@ -717,7 +724,7 @@ export function PlayerHand({ interactionDisabled = false, manualCast = null }: P
                 zIndex={j}
                 theme={ZONE_THEME.exile}
                 hasPriority={hasPriority}
-                isSelected={selectedCardId === obj.id}
+                isSelected={selectedCardId === obj.id || manualPickedIds.includes(obj.id)}
                 onPlay={playCard}
                 onDragStart={previewManaPayment}
                 onDragStop={handleDragStop}
@@ -754,7 +761,7 @@ export function PlayerHand({ interactionDisabled = false, manualCast = null }: P
               hoverY={verticalMetrics.hoverY}
               marginLeft={i === 0 ? 0 : fan.overlap}
               isPlayable={isPlayable}
-              isSelected={selectedCardId === obj.id}
+              isSelected={selectedCardId === obj.id || manualPickedIds.includes(obj.id)}
               hasPriority={hasPriority}
               isMobile={isMobile}
               stormCopyCount={prospectiveStormCounts[String(obj.id)]}
@@ -791,7 +798,7 @@ export function PlayerHand({ interactionDisabled = false, manualCast = null }: P
                 zIndex={handSize + j}
                 theme={ZONE_THEME.graveyard}
                 hasPriority={hasPriority}
-                isSelected={selectedCardId === obj.id}
+                isSelected={selectedCardId === obj.id || manualPickedIds.includes(obj.id)}
                 onPlay={playCard}
                 onDragStart={previewManaPayment}
                 onDragStop={handleDragStop}

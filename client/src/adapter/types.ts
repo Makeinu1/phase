@@ -3025,6 +3025,19 @@ export type DebugAction =
   | { type: "Reveal"; data: { player_id: PlayerId; count: number } }
   | { type: "RevealHand"; data: { player_id: PlayerId } }
   | { type: "Discard"; data: { object_id: ObjectId } }
+  | { type: "Destroy"; data: { object_ids: ObjectId[]; regeneration: "Allowed" | "Forbidden" } }
+  | {
+      type: "PutCards";
+      data: {
+        object_ids: ObjectId[];
+        destination:
+          | { type: "Battlefield"; data: { control: "Owner" | "Actor" } }
+          | { type: "Hand" }
+          | { type: "Graveyard" }
+          | { type: "Exile" };
+      };
+    }
+  | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
   | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
   | { type: "Proliferate"; data: { player_id: PlayerId } }
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }

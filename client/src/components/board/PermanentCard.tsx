@@ -30,6 +30,7 @@ import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
+import { useManualPickStore } from "../../stores/manualPickStore.ts";
 import { KeywordStrip } from "./KeywordStrip.tsx";
 import {
   boardChoiceMaxSelection,
@@ -352,6 +353,8 @@ export const PermanentCard = memo(function PermanentCard({
     validAttackerIds,
     validTargetObjectIds,
   } = useBoardInteractionState();
+  const manualPickActive = useManualPickStore((s) => s.active);
+  const isManualPicked = useManualPickStore((s) => s.selectedObjectIds.includes(objectId));
 
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
   const selectObject = useUiStore((s) => s.selectObject);
@@ -550,7 +553,10 @@ export const PermanentCard = memo(function PermanentCard({
   // imposed state — under attack, (3) affordances offered — mana cost selection,
   // valid target, activatable, tap undo, (4) idle selection.
   let glowClass = "";
-  if (isAttacking) {
+  if (isManualPicked) {
+    glowClass =
+      "ring-4 ring-fuchsia-300 shadow-[0_0_16px_5px_rgba(240,171,252,0.65)]";
+  } else if (isAttacking) {
     glowClass =
       "ring-2 ring-teal-300 shadow-[0_0_12px_3px_rgba(94,234,212,0.6)]";
   } else if (isBlocking) {
@@ -638,6 +644,11 @@ export const PermanentCard = memo(function PermanentCard({
         y: e.clientY,
         surface: "game",
       });
+      return;
+    }
+    if (manualPickActive) {
+      e.stopPropagation();
+      useManualPickStore.getState().pickObject(objectId);
       return;
     }
     if (onPrimaryClickOverride) {

@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useManualPickStore } from "../../stores/manualPickStore.ts";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, ObjectId } from "../../adapter/types.ts";
@@ -114,6 +115,7 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   // its own useLongPress nor a firedRef guard on the button.
   const hoverProps = useInspectHoverProps();
   const dispatchAction = useGameDispatch();
+  const manualPickActive = useManualPickStore((s) => s.active);
 
   const isMyLibrary = playerId === myId;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
@@ -151,7 +153,8 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   // A visible top (public reveal or private look) means there's something to
   // see in the library viewer; clicking opens it (when the parent wires onView)
   // rather than casting directly. Cast-from-top then lives inside the modal.
-  const canView = isPeeking && onView != null;
+  // While a manual resolution is performed, the library opens in its panel.
+  const canView = (isPeeking || manualPickActive) && onView != null;
   // Desktop hover preview for the revealed top card (skipped on mobile by the
   // hook, where a tap would spuriously open the full-screen preview overlay).
   const topHoverProps =

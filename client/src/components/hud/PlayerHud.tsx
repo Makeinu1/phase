@@ -18,6 +18,7 @@ import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBa
 import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { useManualPickStore } from "../../stores/manualPickStore.ts";
 import { NextUpBadge } from "./NextUpBadge.tsx";
 import { StormCounter } from "./StormCounter.tsx";
 import { PlayerLatency } from "./PlayerLatency.tsx";
@@ -65,7 +66,9 @@ export function PlayerHud() {
     }
   }, [isValidTarget, dispatch, playerId]);
 
-  const hudTone = isValidTarget ? "cyan" : isMyTurn ? "emerald" : "neutral";
+  const manualPickActive = useManualPickStore((s) => s.active);
+  const manualPicked = useManualPickStore((s) => s.selectedPlayerId === playerId);
+  const hudTone = manualPicked ? "amber" : isValidTarget ? "cyan" : isMyTurn ? "emerald" : "neutral";
   const seatColor = useSeatColor(playerId);
   const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
 
@@ -81,13 +84,13 @@ export function PlayerHud() {
       <HudPlate
         label={getPlayerDisplayName(playerId, playerId)}
         tone={hudTone}
-        active={isMyTurn}
+        active={isMyTurn || manualPicked}
         seatColor={seatColor}
         underAttack={isUnderAttack}
         avatarIdentity={avatarIdentity}
         playerId={playerId}
         density={compact ? "compact" : "default"}
-        onClick={isValidTarget ? handleTargetClick : undefined}
+        onClick={manualPickActive ? () => useManualPickStore.getState().pickPlayer(playerId) : isValidTarget ? handleTargetClick : undefined}
         cornerBadge={<NextUpBadge playerId={playerId} compact={compact} />}
         trailing={
           <>

@@ -23,6 +23,7 @@ import type {
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
   LocalContinuationCapability,
+  TargetRef,
 } from "../adapter/types";
 import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
 import type {
@@ -61,10 +62,9 @@ import { BlockRequirementBadges } from "../components/combat/BlockRequirementBad
 import { AttackRequirementBadges } from "../components/combat/AttackRequirementBadges.tsx";
 import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
-import { ManualResolutionSandbox, type ManualResolutionSandboxTarget } from "../components/sandbox/ManualResolutionSandbox.tsx";
-import { ManualBoardTools, type ManualBoardToolsPlayer } from "../components/sandbox/ManualBoardTools.tsx";
+import { ManualResolutionPanel } from "../components/sandbox/ManualResolutionPanel.tsx";
+import { useManualPickStore } from "../stores/manualPickStore.ts";
 import { useManualUndoStore } from "../stores/manualUndoStore.ts";
-import { useEngineCardData } from "../hooks/useEngineCardData.ts";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
@@ -1041,7 +1041,6 @@ function GamePageContent({
   const adapter = useGameStore((s) => s.adapter);
   const localContext = useGameStore((s) => s.localContinuationContext);
   const manualView = gameState?.derived?.manual_resolution ?? null;
-  const manualCard = useEngineCardData(manualView?.source.name ?? null);
   const continuation = adapter?.localContinuation?.() ?? null;
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
   const [manualCastAttempt, setManualCastAttempt] = useState<ManualHandCastController["attempt"]>(null);
@@ -1165,9 +1164,6 @@ function GamePageContent({
       {manualUndoMessage ? <span role="alert" className="text-xs text-rose-300">{manualUndoMessage}</span> : null}
     </div>
   ) : null;
-  const [manualTarget, setManualTarget] = useState<ManualResolutionSandboxTarget | null>(null);
-  const [manualAmount, setManualAmount] = useState("");
-  const manualReturnFocusRef = useRef<HTMLElement | null>(null);
   const manualIdentity = manualView && localContext
     ? JSON.stringify([localContext.restoreEpoch, localContext.adapterGeneration, manualView.source]) : null;
   const previousManualIdentity = useRef(manualIdentity);
@@ -1179,22 +1175,41 @@ function GamePageContent({
   useEffect(() => {
     if (previousManualIdentity.current === manualIdentity) return;
     previousManualIdentity.current = manualIdentity;
-    setManualTarget(null);
-    setManualAmount("");
+    useManualPickStore.getState().clearSelection();
   }, [manualIdentity]);
   const manualInteractionId = manualView?.interactionId
     ?? (lastManualBinding.current?.identity === manualIdentity ? lastManualBinding.current?.interactionId : null);
-  const manualAmountBounds = manualView?.minLifeLoss != null
-    ? { minimum: manualView.minLifeLoss, maximum: manualView.maxLifeLoss }
-    : lastManualBinding.current?.identity === manualIdentity ? {
-      minimum: lastManualBinding.current.minimum, maximum: lastManualBinding.current.maximum,
-    } : null;
   const manualOwnedView = manualView?.source.actor === playerId && perspectivePlayerId === playerId;
   const manualToolsOpen = manualOwnedView && manualView?.phase === "open";
-  const manualPlayers: ManualBoardToolsPlayer[] = (gameState?.players ?? []).map((player) => ({
-    id: player.id, name: getPlayerDisplayName(player.id),
-  }));
-  const focusManualPlayer = (player: ManualBoardToolsPlayer) => setManualTarget({ playerId: player.id, name: player.name });
+  // Paper-style picking is live only while the actor performs the resolution.
+  useEffect(() => {
+    useManualPickStore.getState().setActive(manualToolsOpen);
+  }, [manualToolsOpen]);
+  useEffect(() => () => useManualPickStore.getState().setActive(false), []);
+  // The targets the spell chose when it was cast (CR 601.2c), as the engine
+  // displayed them on the stack, start out picked once the resolution opens.
+  const manualCastTargets = useRef<{ stackEntryId: number; targets: TargetRef[] } | null>(null);
+  const manualSourceStackEntryId = manualView?.source.stackEntryId ?? null;
+  const manualStackTargets = manualSourceStackEntryId == null ? undefined
+    : gameState?.derived?.stack_entry_details?.[String(manualSourceStackEntryId)]?.targets;
+  if (manualSourceStackEntryId != null && manualStackTargets && manualStackTargets.length > 0) {
+    manualCastTargets.current = { stackEntryId: manualSourceStackEntryId, targets: manualStackTargets.map((entry) => entry.target) };
+  }
+  const preselectedManualEpisode = useRef<number | null>(null);
+  useEffect(() => {
+    if (!manualToolsOpen || manualSourceStackEntryId == null) return;
+    if (preselectedManualEpisode.current === manualSourceStackEntryId) return;
+    preselectedManualEpisode.current = manualSourceStackEntryId;
+    const remembered = manualCastTargets.current;
+    if (!remembered || remembered.stackEntryId !== manualSourceStackEntryId) return;
+    const pick = useManualPickStore.getState();
+    for (const target of remembered.targets) {
+      if ("Player" in target) pick.pickPlayer(target.Player);
+      else pick.pickObject(target.Object);
+    }
+  }, [manualToolsOpen, manualSourceStackEntryId]);
+  const manualToolsOpenRef = useRef(manualToolsOpen);
+  manualToolsOpenRef.current = manualToolsOpen;
   const manualStackEntryId = manualView?.source.stackEntryId;
   const manualSourceObjectId = manualView?.source.sourceId;
   const localAdapterGeneration = localContext?.adapterGeneration;
@@ -1554,6 +1569,11 @@ function GamePageContent({
       zonePlayerId: number,
       launcher?: HTMLButtonElement,
     ) => {
+      // While a manual resolution is performed, piles open in its panel.
+      if (manualToolsOpenRef.current) {
+        useManualPickStore.getState().showZone(zonePlayerId, zone);
+        return;
+      }
       zoneViewerReturnFocusRef.current =
         launcher ?? gameMenuTriggerRef.current;
       setViewingZone({ zone, playerId: zonePlayerId });
@@ -1756,22 +1776,6 @@ function GamePageContent({
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
           <GameBoard
-            manualPlayerAreaSelection={manualToolsOpen && manualPort ? {
-              playerId,
-              playerName: getPlayerDisplayName(playerId),
-              selected: manualTarget?.playerId === playerId,
-              onSelect: () => setManualTarget({ playerId, name: getPlayerDisplayName(playerId) }),
-              returnFocusRef: manualReturnFocusRef,
-            } : null}
-            manualPlayerAreaChoices={manualToolsOpen && manualPort ? manualPlayers
-              .filter((player) => player.id !== playerId)
-              .map((player) => ({
-                playerId: player.id,
-                playerName: player.name,
-                selected: manualTarget?.playerId === player.id,
-                onSelect: () => focusManualPlayer(player),
-                returnFocusRef: manualReturnFocusRef,
-              })) : undefined}
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
@@ -1782,35 +1786,18 @@ function GamePageContent({
           {/* A closed view only records the last source; the board shows the
               result, so the panel gives way and only the Undo offer stays. */}
           {manualView && manualView.phase !== "closed" && localContext && manualStackEntryId != null && (
-            <div className="absolute bottom-2 right-2 z-50 max-h-[70vh] w-[min(30rem,calc(100vw-1rem))] overflow-auto">
-              {manualInteractionId && manualAmountBounds ? <ManualResolutionSandbox
-                source={{ episodeId: manualIdentity!, stackEntryId: manualStackEntryId as ObjectId,
-                  sourceObjectId: manualView.source.sourceId as ObjectId, cardName: manualView.source.name,
-                  oracleText: manualCard?.oracle_text ?? "" }}
-                viewerPlayerId={manualOwnedView ? playerId : null}
-                selectedTarget={manualTarget?.playerId === playerId ? manualTarget : null}
-                onSelectedTargetChange={setManualTarget}
-                amountText={manualAmount}
-                onAmountTextChange={setManualAmount}
-                onPreviewSource={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}
-                operationAvailability={{ available: manualView.phase === "open" && manualView.minLifeLoss !== null,
-                  amountBounds: manualAmountBounds }}
-                canFinish={manualView.phase === "open"}
-                resolutionPhase={manualView.phase}
-                commandBinding={{ interactionId: manualInteractionId, adapterGeneration: localContext.adapterGeneration }}
-                confirmedRestoreEpoch={localContext.restoreEpoch}
-                commandPort={manualOwnedView ? manualPort : null}
-                returnFocusRef={manualReturnFocusRef}
-              /> : <section className="rounded-lg bg-slate-950 p-4 text-slate-100" aria-label={t("manualResolution.title")}>
-                <h2>{manualView.source.name}</h2><p className="whitespace-pre-wrap">{manualCard?.oracle_text ?? ""}</p>
-                <button type="button" onClick={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}>{t("manualResolution.readSource")}</button>
-                <p>{t(manualView.phase === "armed" ? "manualResolution.armed" : "manualResolution.displayOnly")}</p>
-              </section>}
-              {manualToolsOpen ? (
-                <ManualBoardTools viewerId={playerId} players={manualPlayers}
-                  focusedPlayerId={manualTarget?.playerId ?? null} onFocusPlayer={focusManualPlayer} />
-              ) : null}
-              {manualUndoControl}
+            <div className="absolute bottom-2 right-2 z-50 max-h-[80vh] w-[min(36rem,calc(100vw-1rem))] overflow-auto">
+              <ManualResolutionPanel
+                viewerId={playerId}
+                source={{ name: manualView.source.name, stackEntryId: manualStackEntryId as ObjectId,
+                  sourceObjectId: manualView.source.sourceId as ObjectId }}
+                operable={manualToolsOpen}
+                finish={manualToolsOpen && manualPort && manualInteractionId
+                  ? { interactionId: manualInteractionId, adapterGeneration: localContext.adapterGeneration, port: manualPort }
+                  : null}
+                playerName={(id) => getPlayerDisplayName(id)}
+                undoControl={manualUndoControl}
+              />
             </div>
           )}
           {(!manualView || manualView.phase === "closed") && manualUndo?.episodeEnded && manualUndoControl ? (

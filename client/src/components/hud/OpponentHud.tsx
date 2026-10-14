@@ -35,6 +35,7 @@ import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { useManualPickStore } from "../../stores/manualPickStore.ts";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
 import { NextUpBadge } from "./NextUpBadge.tsx";
@@ -241,6 +242,8 @@ export function OpponentHud({
   );
   // Always-called hook (rules-of-hooks) — used only on the 1v1 branch below.
   const primaryOpponentDesignations = usePlayerDesignations(primaryOpponentId);
+  const manualPickActive = useManualPickStore((s) => s.active);
+  const manualPickedPlayer = useManualPickStore((s) => s.selectedPlayerId);
 
   if (!isMultiplayer) {
     // 1v1: single opponent pill (existing design)
@@ -262,7 +265,8 @@ export function OpponentHud({
     const opponentAvatarIdentity = primaryOpponentAvatarIdentity;
     const compact = forceCompactHud;
 
-    const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
+    const manualPicked = manualPickedPlayer === opponentId;
+    const hudTone = manualPicked ? "amber" : isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
     const opponentSeatColor = getSeatColor(opponentId, gameState?.seat_order);
     const isOpponentUnderAttack = gameState?.combat?.attackers.some(
       (a) => a.attack_target.type === "Player" && a.attack_target.data === opponentId,
@@ -279,13 +283,13 @@ export function OpponentHud({
         <HudPlate
           label={label}
           tone={hudTone}
-          active={isOpponentTurn}
+          active={isOpponentTurn || manualPicked}
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
           avatarIdentity={opponentAvatarIdentity}
           playerId={opponentId}
           density={compact ? "compact" : "default"}
-          onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
+          onClick={manualPickActive ? () => useManualPickStore.getState().pickPlayer(opponentId) : isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           cornerBadge={<NextUpBadge playerId={opponentId} compact={compact} />}
           trailing={
             <>

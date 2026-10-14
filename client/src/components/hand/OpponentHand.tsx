@@ -10,6 +10,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { useManualPickStore } from "../../stores/manualPickStore.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import type { GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getOpponentIds, resolveFocusedOpponent } from "../../viewmodel/gameStateView.ts";
@@ -41,6 +42,8 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
     ?? (myId === 0 ? 1 : 0);
   const opponent = players?.[opponentId];
   const objects = useGameStore((s) => s.gameState?.objects);
+  const manualPickActive = useManualPickStore((s) => s.active);
+  const { t } = useTranslation("game");
 
   if (!opponent) return null;
 
@@ -64,7 +67,17 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
 
   return (
     <div
-      className={`flex items-start justify-center overflow-visible ${isSplitLayout ? "px-1 pb-0" : "px-4 pb-1"} ${minHeightClass}`}
+      data-testid="opponent-hand"
+      {...(manualPickActive ? {
+        role: "button",
+        tabIndex: 0,
+        "aria-label": t("manualResolution.panel.openHand"),
+        onClick: () => useManualPickStore.getState().showZone(opponentId, "hand"),
+        onKeyDown: (event: React.KeyboardEvent) => {
+          if (event.key === "Enter" || event.key === " ") useManualPickStore.getState().showZone(opponentId, "hand");
+        },
+      } : {})}
+      className={`flex items-start justify-center overflow-visible ${manualPickActive ? "cursor-pointer rounded-lg ring-2 ring-fuchsia-300/40 hover:ring-fuchsia-300" : ""} ${isSplitLayout ? "px-1 pb-0" : "px-4 pb-1"} ${minHeightClass}`}
       style={
         {
           perspective: "800px",

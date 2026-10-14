@@ -263,6 +263,40 @@ class Journey:
         time.sleep(0.8)
         return True
 
+    # ---- paper-style manual instructions (board + panel) -------------------
+    def panel(self):
+        return self.page.locator('[data-testid="manual-resolution-panel"]')
+
+    def ui_pick_player(self, player_id: int) -> None:
+        trace(f"pick player {player_id}")
+        self.page.locator(f'[data-player-hud="{player_id}"] button').first.click(timeout=10000)
+        time.sleep(0.5)
+
+    def ui_open_zone(self, player_id: int, zone: str) -> None:
+        trace(f"open zone {zone} of {player_id}")
+        selector = {
+            "graveyard": f'[data-graveyard-pile="{player_id}"]',
+            "library": f'[data-library-pile="{player_id}"] button',
+            "hand": '[data-testid="opponent-hand"]',
+        }[zone]
+        self.page.locator(selector).locator("visible=true").first.click(timeout=10000)
+        self.page.locator('[data-testid="manual-zone-strip"]').wait_for(state="visible", timeout=10000)
+
+    def ui_amount(self, amount: int) -> None:
+        self.panel().get_by_role("spinbutton", name=self.strings["amount"]).first.fill(str(amount))
+
+    def ui_strip_cards(self):
+        return self.page.locator('[data-testid="manual-zone-strip"] li button')
+
+    def ui_pick_strip(self, name: str) -> None:
+        trace(f"pick strip card {name}")
+        self.page.locator(f'[data-testid="manual-zone-strip"] button[aria-label="{name}"]').first.click(timeout=10000)
+
+    def ui_panel_button(self, label: str) -> None:
+        trace(f"panel button {label}")
+        self.panel().get_by_role("button", name=label, exact=True).first.click(timeout=10000)
+        time.sleep(1.0)
+
     def choose_card_option(self, card: str, option: str) -> bool:
         """Open the card's resolution menu ("<card>の解決方法") and pick an option."""
         trigger = self.strings["cardOptions"].replace("{{card}}", card)
@@ -423,9 +457,15 @@ def scenario_rejoin(j: Journey) -> None:
     j.step("setup-cards", "hook(setup)", True, "Rejoin the Fight + Sol Ring to hand, Sun Titan to graveyard")
 
     def corrections(j: Journey):
-        j.debug("Mill", {"player_id": 0, "count": 3})
-        # The AI opponent's choice is made by the human on its behalf.
-        j.move("Sun Titan", 0, ["Graveyard"], "Battlefield")
+        panel = j.strings["panel"]
+        # "Mill three cards": pick yourself on the board, 3, Mill.
+        j.ui_pick_player(0)
+        j.ui_amount(3)
+        j.ui_panel_button(panel["mill"])
+        # The opponent's choice from your graveyard, returned under your control.
+        j.ui_open_zone(0, "graveyard")
+        j.ui_pick_strip("Sun Titan")
+        j.ui_panel_button(panel["toBattlefield"])
 
     def verify(j: Journey, before):
         s = j.summary()
@@ -442,28 +482,28 @@ def scenario_breach(j: Journey) -> None:
     j.ensure("Breach the Multiverse", 0, "Hand")
     j.ensure("Sol Ring", 0, "Hand")
     j.trim_hand(7, ("Rejoin the Fight", "Breach the Multiverse", "Fact or Fiction", "Sol Ring"))
-    j.step("setup-cards", "hook(setup)", True, "Breach the Multiverse + Sol Ring to hand")
+    # Guarantee a creature card in the opponent's graveyard to choose.
+    j.ensure("Grizzly Bears", 1, "Graveyard")
+    j.step("setup-cards", "hook(setup)", True, "Breach the Multiverse + Sol Ring to hand, a creature in the opponent's graveyard")
 
     def corrections(j: Journey):
-        j.debug("Mill", {"player_id": 0, "count": 10})
-        j.debug("Mill", {"player_id": 1, "count": 10})
-        s = j.page.evaluate("""() => {
-          const s = window.__phaseAcceptance.state();
-          const pick = (pid) => (s.players[pid].graveyard ?? []).find((id) => {
-            const o = s.objects[id]; const t = o?.card_types?.core_types ?? [];
-            return t.includes('Creature') || t.includes('Planeswalker');
-          });
-          return [pick(0) ?? null, pick(1) ?? null];
-        }""")
-        for object_id in [i for i in s if i is not None]:
-            j.debug("MoveToZone", {"object_id": object_id, "to_zone": "Battlefield", "simulate": False})
-            j.debug("SetController", {"object_id": object_id, "controller": 0})
-        j.page.evaluate("(ids) => window.__acceptancePicked = ids", s)
+        panel = j.strings["panel"]
+        # "Each player mills ten cards."
+        for player_id in (0, 1):
+            j.ui_pick_player(player_id)
+            j.ui_amount(10)
+            j.ui_panel_button(panel["mill"])
+        # "Choose a creature or planeswalker card in that player's graveyard ...
+        # onto the battlefield under your control."
+        j.ui_open_zone(1, "graveyard")
+        j.ui_pick_strip("Grizzly Bears")
+        j.ui_panel_button(panel["toBattlefieldMine"])
 
     def verify(j: Journey, before):
         s = j.summary()
         stolen = [b for b in s["battlefield"] if b["owner"] == 1 and b["controller"] == 0]
         ok = "Breach the Multiverse" in s["players"][0]["graveyard"] \
+            and any(b["name"] == "Grizzly Bears" for b in stolen) \
             and s["players"][1]["library"] == before["players"][1]["library"] - 10 \
             and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
         j.step("verify-after-finish", "state", ok,
@@ -479,12 +519,22 @@ def scenario_fact_or_fiction(j: Journey) -> None:
     j.step("setup-cards", "hook(setup)", True, "Fact or Fiction created in hand + Sol Ring to hand")
 
     def corrections(j: Journey):
-        j.debug("Reveal", {"player_id": 0, "count": 5})
-        top = j.page.evaluate("() => window.__phaseAcceptance.state().players[0].library.slice(0, 5)")
-        for object_id in top[:2]:
-            j.debug("MoveToZone", {"object_id": object_id, "to_zone": "Hand", "simulate": False})
-        for object_id in top[2:]:
-            j.debug("MoveToZone", {"object_id": object_id, "to_zone": "Graveyard", "simulate": False})
+        panel = j.strings["panel"]
+        # "Reveal the top five cards of your library."
+        j.ui_open_zone(0, "library")
+        j.ui_amount(5)
+        j.ui_panel_button(panel["revealTop"].replace("{{count}}", "5"))
+        cards = j.ui_strip_cards()
+        cards.nth(4).wait_for(state="visible", timeout=10000)
+        # The opponent's piles (agreed at the table): two to hand, three to the graveyard.
+        cards.nth(0).click()
+        cards.nth(1).click()
+        j.ui_panel_button(panel["toHand"])
+        cards = j.ui_strip_cards()
+        cards.nth(2).wait_for(state="visible", timeout=10000)
+        for index in range(3):
+            cards.nth(index).click()
+        j.ui_panel_button(panel["toGraveyard"])
 
     def verify(j: Journey, before):
         s = j.summary()
@@ -513,36 +563,28 @@ def scenario_thoughtseize(j: Journey) -> None:
         raise AssertionError("could not place Llanowar Elves in the opponent's hand")
     j.trim_hand(7, ("Thoughtseize", "Sol Ring"))
     j.step("setup-cards", "hook(setup)", True, "Thoughtseize + Sol Ring to hand, a nonland card in the opponent's hand")
-    tools = j.strings["tools"]
+    panel = j.strings["panel"]
 
     def corrections(j: Journey):
-        panel = j.page.locator('[data-testid="manual-board-tools"]')
-        # 1. Target the opponent on the board.
-        opponent_area = j.page.locator('[data-testid="player-area-1"] button[aria-pressed]')
-        opponent_area.first.click(timeout=10000)
-        j.step("target-opponent", "ui", j.wait_for(
-            "() => document.querySelector('[data-testid=\"player-area-1\"] button[aria-pressed=\"true\"]') != null", 10),
-            "opponent selected on the board")
-        # 2. Reveal their hand.
-        panel.get_by_role("button", name=tools["revealHand"]).click(timeout=10000)
-        card = panel.get_by_role("button", name="Llanowar Elves", exact=True)
-        try:
-            card.wait_for(state="visible", timeout=15000)
-            shown = True
-        except Exception:
-            shown = False
-        j.step("reveal-hand", "ui", shown, "the opponent's hand is revealed in the tools")
-        # 3-4. Choose the nonland card and discard it.
-        card.click()
-        panel.get_by_role("button", name=tools["discard"], exact=True).click(timeout=10000)
+        # The spell's target (chosen when cast) starts out picked.
+        targeted = j.wait_for("() => window.__phaseAcceptance.manualPick?.().selectedPlayerId === 1", 10)
+        j.step("target-preselected", "ui", targeted, "the opponent chosen at cast time is already picked")
+        # "Target player reveals their hand": click their hand, reveal it.
+        j.ui_open_zone(1, "hand")
+        j.ui_panel_button(panel["revealHand"])
+        shown = j.wait_for("() => document.querySelector('[data-testid=\"manual-zone-strip\"] button[aria-label=\"Llanowar Elves\"]') != null", 15)
+        j.step("reveal-hand", "ui", shown, "the opponent's hand is revealed in the panel")
+        # "You choose a nonland card from it. That player discards that card."
+        j.ui_pick_strip("Llanowar Elves")
+        j.ui_panel_button(panel["discard"])
         discarded = j.wait_for(
             "() => { const s = window.__phaseAcceptance.state(); return s.players[1].graveyard.some((id) => s.objects[id]?.name === 'Llanowar Elves'); }", 15)
         j.step("discard-chosen-card", "ui", discarded, "Llanowar Elves discarded from the revealed hand")
-        # 5. "You lose 2 life": select yourself, then the life-loss operation.
+        # "You lose 2 life."
         life_before = j.summary()["players"][0]["life"]
-        j.page.locator('[data-testid="player-area-0"] button[aria-pressed]').first.click(timeout=10000)
-        j.page.get_by_role("spinbutton", name=j.strings["amount"]).fill("2")
-        j.click_text("^" + re.escape(j.strings["apply"]) + "$")
+        j.ui_pick_player(0)
+        j.ui_amount(2)
+        j.ui_panel_button(panel["loseLife"])
         lost = j.wait_for("(n) => window.__phaseAcceptance.state().players[0].life === n - 2", 15, life_before)
         j.step("lose-two-life", "ui", lost, f"{life_before} -> {life_before - 2}")
 
