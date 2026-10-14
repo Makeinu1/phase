@@ -66,6 +66,15 @@ FIND_JS = """
 """
 
 
+TRACE: Path | None = None
+
+
+def trace(message: str) -> None:
+    if TRACE is not None:
+        with TRACE.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%H:%M:%S')} {message}\n")
+
+
 class Journey:
     def __init__(self, page: Page, out: Path, scenario: str, strings: dict):
         self.page = page
@@ -78,9 +87,11 @@ class Journey:
 
     # ---- observation -------------------------------------------------
     def summary(self):
+        trace("summary")
         return self.page.evaluate(SUMMARY_JS)
 
     def shot(self, label: str) -> str:
+        trace(f"screenshot {label}")
         path = self.out / "screens" / f"{self.scenario}-{len(self.steps):02d}-{label}.png"
         self.page.screenshot(path=str(path), full_page=False)
         return path.name
@@ -111,6 +122,7 @@ class Journey:
 
     # ---- hook setup (never used for the journey itself) ---------------
     def dispatch(self, action: dict, actor: int = 0):
+        trace(f"hook dispatch {json.dumps(action)[:200]}")
         outcome = self.page.evaluate(
             """([a, p]) => Promise.race([
                  window.__phaseAcceptance.dispatch(a, p).then(() => 'done', (e) => 'error: ' + (e?.message ?? e)),
@@ -148,6 +160,7 @@ class Journey:
 
     # ---- UI helpers ---------------------------------------------------
     def click_text(self, pattern: str, timeout_ms: int = 8000) -> bool:
+        trace(f"click {pattern}")
         locator = self.page.get_by_role("button", name=re.compile(pattern))
         try:
             locator.first.wait_for(state="visible", timeout=timeout_ms)
@@ -363,12 +376,55 @@ SCENARIOS = {
 }
 
 
+def run_one(args, name: str, synthetic: bool, decks: dict, strings: dict) -> dict:
+    global TRACE
+    out = Path(args.out)
+    TRACE = out / f"trace-{name}.log"
+    deck, run = SCENARIOS[name]
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        context = browser.new_context(viewport={"width": 1440, "height": 900}, locale="ja-JP")
+        page = context.new_page()
+        console_log = out / f"console-{name}.log"
+
+        def on_console(message):
+            with console_log.open("a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%H:%M:%S')} {message.type}: {message.text[:600]}\n")
+
+        page.on("console", on_console)
+        page.on("pageerror", lambda e: on_console(type("E", (), {"type": "pageerror", "text": str(e)})()))
+        journey = Journey(page, out, name, strings)
+        status, error = "pass", None
+        try:
+            trace("boot")
+            boot(page, args.base_url, f"acc-{name}", decks, deck)
+            reach_main_phase(journey)
+            run(journey)
+        except Exception as exc:
+            status = "fail"
+            error = f"{exc}\n{traceback.format_exc()[-2000:]}"
+            try:
+                journey.steps.append({"step": "failure", "state": journey.summary(), "screen": journey.shot("failure")})
+            except Exception:
+                pass
+        result = {"status": status, "deck": "synthetic" if synthetic else "real", "error": error,
+                  "hook": journey.hook_log, "steps": journey.steps}
+        (out / f"result-{name}.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        context.close()
+        browser.close()
+    return result
+
+
 def main() -> int:
+    import subprocess
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--locale", required=True, help="client/src/i18n/locales/ja/game.json")
     parser.add_argument("--only", default="")
+    parser.add_argument("--child", default="")
+    parser.add_argument("--scenario-timeout", type=int, default=900)
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -385,44 +441,34 @@ def main() -> int:
     else:
         decks = json.loads(raw_decks)
     strings = json.load(open(args.locale, encoding="utf-8"))["manualResolution"]
+    if args.child:
+        run_one(args, args.child, synthetic, decks, strings)
+        return 0
     results = {}
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        for name, (deck, run) in SCENARIOS.items():
-            if args.only and name not in args.only.split(","):
-                continue
-            context = browser.new_context(viewport={"width": 1440, "height": 900}, locale="ja-JP")
-            page = context.new_page()
-            console: list[str] = []
-            page.on("console", lambda m: console.append(f"{m.type}: {m.text}"[:500]))
-            page.on("pageerror", lambda e: console.append(f"pageerror: {e}"[:800]))
-            journey = Journey(page, out, name, strings)
-            status = "pass"
-            error = None
-            try:
-                boot(page, args.base_url, f"acc-{name}", decks, deck)
-                reach_main_phase(journey)
-                run(journey)
-            except Exception as exc:  # record and continue with the next scenario
-                status = "fail"
-                error = f"{exc}\n{traceback.format_exc()[-2000:]}"
-                try:
-                    journey.steps.append({"step": "failure", "state": journey.summary(), "screen": journey.shot("failure")})
-                except Exception:
-                    pass
-            results[name] = {"status": status, "deck": "synthetic" if synthetic else "real", "error": error,
-                             "hook": journey.hook_log, "steps": journey.steps,
-                             "console": [c for c in console if "error" in c.lower()][-40:]}
-            context.close()
-        browser.close()
+    for name in SCENARIOS:
+        if args.only and name not in args.only.split(","):
+            continue
+        command = [sys.executable, __file__, "--base-url", args.base_url, "--out", args.out,
+                   "--locale", args.locale, "--child", name]
+        try:
+            subprocess.run(command, timeout=args.scenario_timeout, check=False)
+        except subprocess.TimeoutExpired:
+            pass
+        result_file = out / f"result-{name}.json"
+        if result_file.exists():
+            results[name] = json.loads(result_file.read_text(encoding="utf-8"))
+        else:
+            trace_file = out / f"trace-{name}.log"
+            last = trace_file.read_text(encoding="utf-8").splitlines()[-1] if trace_file.exists() else "no trace"
+            results[name] = {"status": "timeout", "deck": "synthetic" if synthetic else "real",
+                             "error": f"scenario exceeded {args.scenario_timeout}s; last trace: {last}", "steps": []}
     (out / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     for name, result in results.items():
-        last = result["steps"][-2]["step"] if len(result["steps"]) >= 2 else "boot"
+        steps = [step["step"] for step in result["steps"]]
+        last = steps[-2] if len(steps) >= 2 else (steps[-1] if steps else "boot")
         level = "notice" if result["status"] == "pass" else "error"
-        # Card names of the scenario sources are public; deck contents are never printed.
         reason = (result["error"] or "").splitlines()[0][:300] if result["error"] else "all steps passed"
         print(f"::{level}::{name} [{result['deck']} deck]: {result['status']} (last step {last}) {reason}")
-    print(json.dumps({k: v["status"] for k, v in results.items()}))
     return 0 if all(v["status"] == "pass" for v in results.values()) else 1
 
 
