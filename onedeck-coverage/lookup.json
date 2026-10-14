@@ -1,0 +1,51 @@
+[
+ {
+  "name": "Spell Queller",
+  "found": true,
+  "supported": true,
+  "oracle_text": "Flash\nFlying\nWhen this creature enters, exile target spell with mana value 4 or less.\nWhen this creature leaves the battlefield, the exiled card's owner may cast that card without paying its mana cost.",
+  "gaps": []
+ },
+ {
+  "name": "Ghalta, Stampede Tyrant",
+  "found": true,
+  "supported": true,
+  "oracle_text": "Trample\nWhen Ghalta enters, put any number of creature cards from your hand onto the battlefield.",
+  "gaps": []
+ },
+ {
+  "name": "Wrath of God",
+  "found": true,
+  "supported": true,
+  "oracle_text": "Destroy all creatures. They can't be regenerated.",
+  "gaps": []
+ },
+ {
+  "name": "Go for the Throat",
+  "found": true,
+  "supported": true,
+  "oracle_text": "Destroy target nonartifact creature.",
+  "gaps": []
+ },
+ {
+  "name": "Surgical Extraction",
+  "found": true,
+  "supported": true,
+  "oracle_text": "({B/P} can be paid with either {B} or 2 life.)\nChoose target card in a graveyard other than a basic land card. Search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them. Then that player shuffles.",
+  "gaps": []
+ },
+ {
+  "name": "Consider",
+  "found": true,
+  "supported": true,
+  "oracle_text": "Surveil 1. (Look at the top card of your library. You may put it into your graveyard.)\nDraw a card.",
+  "gaps": []
+ },
+ {
+  "name": "Thoughtseize",
+  "found": true,
+  "supported": true,
+  "oracle_text": "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life.",
+  "gaps": []
+ }
+]
