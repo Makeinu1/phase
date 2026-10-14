@@ -584,7 +584,10 @@ def main() -> int:
     (out / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     for name, result in results.items():
         steps = [step["step"] for step in result["steps"]]
-        last = steps[-2] if len(steps) >= 2 else (steps[-1] if steps else "boot")
+        # A failing run ends with a synthetic "failure" step; report the step before it.
+        if steps and steps[-1] == "failure":
+            steps = steps[:-1]
+        last = steps[-1] if steps else "boot"
         level = "notice" if result["status"] == "pass" else "error"
         reason = (result["error"] or "").splitlines()[0][:300] if result["error"] else "all steps passed"
         print(f"::{level}::{name} [{result['deck']} deck]: {result['status']} (last step {last}) {reason}")
