@@ -282,6 +282,12 @@ class Journey:
         self.page.locator(selector).locator("visible=true").first.click(timeout=10000)
         self.page.locator('[data-testid="manual-zone-strip"]').wait_for(state="visible", timeout=10000)
 
+    def ui_click_permanent(self, card: str, owner: int) -> None:
+        object_id = self.find(card, owner, ["Battlefield"])
+        trace(f"click permanent {card} ({object_id})")
+        self.page.locator(f'[data-permanent-card="{object_id}"]').first.click(timeout=10000)
+        time.sleep(0.5)
+
     def ui_amount(self, amount: int) -> None:
         self.panel().get_by_role("spinbutton", name=self.strings["amount"]).first.fill(str(amount))
 
@@ -363,7 +369,8 @@ def reach_main_phase(j: Journey) -> None:
     j.step("setup-main-phase", "hook(setup)", ok, "SetPhase PreCombatMain + infinite mana for seat 0")
 
 
-def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next_play: str) -> None:
+def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next_play: str,
+                   target_object: str | None = None) -> None:
     before = j.summary()
     # 1. Hand card -> cast manually (UI).
     clicked = j.click_hand_card(card)
@@ -372,13 +379,17 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     j.step("cast-manually", "ui", ok, j.strings["castManually"])
     # Targets are chosen while casting (CR 601.2c), manual or not: pick the opponent.
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'TargetSelection'", 4):
-        target = j.page.get_by_role("button", name=re.compile(r"^(?!あなた).+を選択$"))
         try:
-            target.first.click(timeout=8000)
+            if target_object is not None:
+                # An object target is chosen by clicking it on the board.
+                j.ui_click_permanent(target_object, 1)
+            else:
+                j.page.get_by_role("button", name=re.compile(r"^(?!あなた).+を選択$")).first.click(timeout=8000)
             chose = True
-        except Exception:
+        except Exception as error:
+            trace(f"choose target failed: {str(error).splitlines()[0][:200]}")
             chose = False
-        j.step("choose-target", "ui", chose, "the opponent is the spell's target")
+        j.step("choose-target", "ui", chose, target_object or "the opponent is the spell's target")
     # 2. Payment (UI if a payment prompt appears).
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
         j.click_text(r"^(支払う|Pay)$")
@@ -472,8 +483,12 @@ def scenario_rejoin(j: Journey) -> None:
         ok = "Rejoin the Fight" in s["players"][0]["graveyard"] \
             and any(b["name"] == "Sun Titan" and b["controller"] == 0 for b in s["battlefield"]) \
             and len(s["players"][0]["graveyard"]) == len(before["players"][0]["graveyard"]) + 3 \
-            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
-        j.step("verify-after-finish", "state", ok, "spell in graveyard, 3 milled, Sun Titan returned, undo offered")
+            and s["waitingFor"] in ("Priority", "TriggerTargetSelection") and s["manualUndo"] is not None
+        # Sun Titan really entered the battlefield, so its own ETB trigger goes
+        # on the stack after the resolution and asks for its target.
+        j.step("verify-after-finish", "state", ok,
+               {"note": "spell in graveyard, 3 milled, Sun Titan returned, undo offered",
+                "afterResolution": s["waitingFor"]})
 
     manual_journey(j, "Rejoin the Fight", corrections, verify, "Sol Ring")
 
@@ -600,11 +615,69 @@ def scenario_thoughtseize(j: Journey) -> None:
     manual_journey(j, "Thoughtseize", corrections, verify, "Sol Ring")
 
 
+def scenario_wrath(j: Journey) -> None:
+    """Destroy all creatures, picked on the board; they can't be regenerated."""
+    j.ensure("Wrath of God", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Wrath of God", "Sol Ring"))
+    j.ensure("Serra Angel", 0, "Battlefield")
+    j.ensure("Grizzly Bears", 1, "Battlefield")
+    j.ensure("Darksteel Myr", 1, "Battlefield")
+    j.step("setup-cards", "hook(setup)", True, "Wrath of God in hand; Serra Angel, Grizzly Bears, indestructible Darksteel Myr on the battlefield")
+    panel = j.strings["panel"]
+
+    def corrections(j: Journey):
+        for name, owner in (("Serra Angel", 0), ("Grizzly Bears", 1), ("Darksteel Myr", 1)):
+            j.ui_click_permanent(name, owner)
+        picked = j.page.evaluate("() => window.__phaseAcceptance.manualPick().selectedObjectIds.length")
+        j.step("pick-creatures", "ui", picked == 3, f"{picked} creatures picked on the board")
+        j.panel().get_by_role("checkbox", name=panel["noRegeneration"]).check()
+        j.ui_panel_button(panel["destroy"])
+
+    def verify(j: Journey, before):
+        s = j.summary()
+        ok = "Wrath of God" in s["players"][0]["graveyard"] \
+            and "Serra Angel" in s["players"][0]["graveyard"] \
+            and "Grizzly Bears" in s["players"][1]["graveyard"] \
+            and any(b["name"] == "Darksteel Myr" for b in s["battlefield"]) \
+            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
+        j.step("verify-after-finish", "state", ok, "creatures destroyed, indestructible Darksteel Myr remains")
+
+    manual_journey(j, "Wrath of God", corrections, verify, "Sol Ring")
+
+
+def scenario_go_for_the_throat(j: Journey) -> None:
+    """The cast-time target starts out picked; one click destroys it."""
+    j.ensure("Go for the Throat", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Go for the Throat", "Sol Ring"))
+    j.ensure("Grizzly Bears", 1, "Battlefield")
+    j.step("setup-cards", "hook(setup)", True, "Go for the Throat in hand, Grizzly Bears on the opponent's battlefield")
+    panel = j.strings["panel"]
+
+    def corrections(j: Journey):
+        bears = j.find("Grizzly Bears", 1, ["Battlefield"])
+        preselected = j.wait_for("(id) => window.__phaseAcceptance.manualPick().selectedObjectIds.includes(id)", 10, bears)
+        j.step("target-preselected", "ui", preselected, "the creature targeted at cast time is already picked")
+        j.ui_panel_button(panel["destroy"])
+
+    def verify(j: Journey, before):
+        s = j.summary()
+        ok = "Go for the Throat" in s["players"][0]["graveyard"] \
+            and "Grizzly Bears" in s["players"][1]["graveyard"] \
+            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
+        j.step("verify-after-finish", "state", ok, "the targeted creature was destroyed")
+
+    manual_journey(j, "Go for the Throat", corrections, verify, "Sol Ring", target_object="Grizzly Bears")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
     "C-fact-or-fiction": ("Celes", scenario_fact_or_fiction),
     "D-thoughtseize": ("Celes", scenario_thoughtseize),
+    "E-wrath-of-god": ("Celes", scenario_wrath),
+    "F-go-for-the-throat": ("Celes", scenario_go_for_the_throat),
 }
 
 

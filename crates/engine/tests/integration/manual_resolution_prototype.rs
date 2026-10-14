@@ -2936,12 +2936,6 @@ mod enabled_baseline_tests {
                 regeneration: RegenerationPermission::Forbidden,
             }))
             .expect("the actor destroys the chosen creatures");
-        eprintln!(
-            "DIAG after destroy: deferred={} stack={} waiting={:?}",
-            runner.state().deferred_triggers.len(),
-            runner.state().stack.len(),
-            runner.state().waiting_for
-        );
         assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
         assert_eq!(
             runner.state().objects[&wall].zone,
@@ -2969,11 +2963,6 @@ mod enabled_baseline_tests {
             }))
             .expect("a creature card from hand is put onto the battlefield");
         assert_eq!(runner.state().objects[&entering].zone, Zone::Battlefield);
-        eprintln!(
-            "DIAG after entering: deferred={} stack={}",
-            runner.state().deferred_triggers.len(),
-            runner.state().stack.len()
-        );
 
         runner
             .act(GameAction::Debug(DebugAction::LoseLife {
@@ -2997,23 +2986,9 @@ mod enabled_baseline_tests {
         assert_eq!(life(&runner, p1), p1_life - 3);
         // The drawn card replaces the cast spell and the creature put onto the battlefield.
         assert_eq!(runner.state().players[p0.0 as usize].hand.len(), p0_hand);
-
-        eprintln!(
-            "DIAG before finish: deferred={} stack={}",
-            runner.state().deferred_triggers.len(),
-            runner.state().stack.len()
-        );
         runner
             .act(GameAction::FinishManualResolution { stack_entry_id })
             .expect("Finish closes the resolution");
-        eprintln!(
-            "DIAG after finish: deferred={} stack={} waiting={:?} life0={} life1={}",
-            runner.state().deferred_triggers.len(),
-            runner.state().stack.len(),
-            runner.state().waiting_for,
-            life(&runner, p0),
-            life(&runner, p1)
-        );
         assert_eq!(
             runner.state().stack.len(),
             2,
