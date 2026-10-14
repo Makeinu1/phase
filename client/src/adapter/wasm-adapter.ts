@@ -254,6 +254,25 @@ function describeCardDbError(err: unknown): string {
   return `: ${trimmed}`;
 }
 
+/**
+ * Structural equality for engine-serialized values. The engine and the client
+ * serialize the same record with different key orders, so identity checks on
+ * Local continuation attempts must not compare raw JSON text.
+ */
+function sameEngineValue(a: unknown, b: unknown): boolean {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, entry]) => [key, canonical(entry)]));
+    }
+    return value;
+  };
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
 export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
   private initialized = false;
   private disposed = false;
@@ -298,7 +317,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       if (!currentOwner()) current = null;
       if (current && this.localContext) {
         const expected = this.localContext;
-        const matching = JSON.stringify(current.context) === JSON.stringify(expected);
+        const matching = sameEngineValue(current.context, expected);
         const rekey = restoring && current.context.ownerLineage === expected.ownerLineage
           && current.context.restoreEpoch === expected.restoreEpoch + 1 && current.context.adapterGeneration === expected.adapterGeneration + 1;
         if (!matching && !rekey) current = null;
@@ -320,11 +339,11 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         engineSnapshot = this.localLatest.engineSnapshot;
       }
       const latest = engineSnapshot !== null && (!this.localLatest?.engineSnapshot || engineSnapshot.seq >= this.localLatest.engineSnapshot.seq);
-      const receipt = attempt && JSON.stringify(reply.receipt?.attempt) !== JSON.stringify(attempt)
+      const receipt = attempt && !sameEngineValue(reply.receipt?.attempt, attempt)
         ? { attempt, status: "indeterminate" as const, result: null, rejection: null }
         : reply.receipt;
       const appliedResult = currentOwner() && current && engineSnapshot && attempt && receipt?.status === "completed"
-        && JSON.stringify(attempt.context) === JSON.stringify(this.localContext)
+        && sameEngineValue(attempt.context, this.localContext)
         && receipt.result && !deliveredResults.has(attempt) ? receipt.result : null;
       if (appliedResult && attempt) deliveredResults.add(attempt);
       const publication: LocalContinuationPublication = { ...reply, current, engineSnapshot,
@@ -338,7 +357,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const capture = (key: object, submission: InteractionSubmission, source: ManualResolutionSource): LocalOriginalAttempt => {
       const existing = this.localAttempts.get(key);
       if (existing) {
-        if (JSON.stringify(existing.submission) !== JSON.stringify(submission) || JSON.stringify(existing.source) !== JSON.stringify(source)) throw new Error("Local original intent changed");
+        if (!sameEngineValue(existing.submission, submission) || !sameEngineValue(existing.source, source)) throw new Error("Local original intent changed");
         return existing;
       }
       if (!currentOwner() || !this.localContext) throw new Error("Authenticated Local continuation unavailable");
