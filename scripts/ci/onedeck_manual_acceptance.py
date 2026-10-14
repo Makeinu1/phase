@@ -187,8 +187,8 @@ class Journey:
                 trace(f"  {line[:300]}")
             return False
 
-    def click_hand_card(self, card: str) -> bool:
-        trace(f"click hand card {card}")
+    def click_hand_card(self, card: str, double: bool = False) -> bool:
+        trace(f"{'double-' if double else ''}click hand card {card}")
         object_id = self.find(card, 0, ["Hand"])
         if object_id is None:
             return False
@@ -213,7 +213,10 @@ class Journey:
         if point is None:
             trace("hand card has no topmost point")
             return False
-        self.page.mouse.click(point["x"], point["y"])
+        if double:
+            self.page.mouse.dblclick(point["x"], point["y"])
+        else:
+            self.page.mouse.click(point["x"], point["y"])
         time.sleep(0.8)
         return True
 
@@ -336,14 +339,12 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     # 7. Next ordinary plays (UI): a land drop, then a spell through the stack.
     lands_before = sum(1 for b in j.summary()["battlefield"] if b["controller"] == 0)
     land = next((n for n in j.summary()["players"][0]["hand"] if n in ("Plains", "Mountain", "Island", "Swamp", "Forest")), None)
-    played = land is not None and j.click_hand_card(land) and j.wait_for(
+    played = land is not None and j.click_hand_card(land, double=True) and j.wait_for(
         "(n) => (window.__phaseAcceptance.state()?.battlefield ?? []).filter((id) => window.__phaseAcceptance.state().objects[id]?.controller === 0).length > n",
         10, lands_before)
     j.step("next-land-drop", "ui", bool(played), land)
-    clicked = j.click_hand_card(next_play)
-    # Permanents have no manual offer; a resolution menu appears only for
-    # supported spells, where "cast normally" is the ordinary path.
-    j.choose_card_option(next_play, j.strings["castNormally"])
+    # Double-click is the desktop hand's ordinary play gesture.
+    clicked = j.click_hand_card(next_play, double=True)
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
         j.click_text(r"^(支払う|Pay)$")
     for _ in range(6):
