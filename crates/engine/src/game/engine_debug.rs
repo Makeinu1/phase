@@ -1597,8 +1597,16 @@ fn settle_instruction_triggers(
     events: &mut Vec<GameEvent>,
 ) {
     if resolving_source.is_some() {
-        super::triggers::collect_triggers_into_deferred(state, &events[event_start..]);
-        super::triggers::collect_delayed_triggers_into_deferred(state, &events[event_start..]);
+        // A zone change delivered through a logical owner already parked its
+        // own triggers and claimed its events; collect only the rest once.
+        let unclaimed = super::triggers::filter_already_collected_trigger_events_from(
+            state,
+            events,
+            event_start,
+            &state.consumed_before_priority_trigger_events,
+        );
+        super::triggers::collect_triggers_into_deferred(state, &unclaimed);
+        super::triggers::collect_delayed_triggers_into_deferred(state, &unclaimed);
     } else {
         let new_events = events[event_start..].to_vec();
         super::triggers::process_triggers(state, &new_events);
