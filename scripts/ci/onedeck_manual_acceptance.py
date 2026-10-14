@@ -189,16 +189,29 @@ class Journey:
         if object_id is None:
             return False
         self.page.mouse.move(5, 5)
-        locator = self.page.locator(f'[data-player-hand] [data-object-id="{object_id}"]')
-        try:
-            locator.first.wait_for(state="visible", timeout=8000)
-            # Fanned cards overlap; press the card's own visible top-left strip.
-            locator.first.click(position={"x": 14, "y": 24}, timeout=8000)
-            time.sleep(0.8)
-            return True
-        except Exception as exc:
-            trace(f"hand card click failed: {exc}")
+        time.sleep(0.5)
+        # Fanned cards overlap their neighbours. Find a point on this card that
+        # is actually topmost, then press it with the real pointer.
+        point = self.page.evaluate(
+            """(id) => {
+              const el = document.querySelector(`[data-player-hand] [data-object-id="${id}"]`);
+              if (!el) return null;
+              const r = el.getBoundingClientRect();
+              for (const fy of [0.15, 0.3, 0.5, 0.7]) {
+                for (const fx of [0.85, 0.7, 0.55, 0.4, 0.25, 0.1]) {
+                  const x = r.left + r.width * fx, y = r.top + r.height * fy;
+                  const hit = document.elementFromPoint(x, y);
+                  if (hit && el.contains(hit)) return { x, y };
+                }
+              }
+              return null;
+            }""", object_id)
+        if point is None:
+            trace("hand card has no topmost point")
             return False
+        self.page.mouse.click(point["x"], point["y"])
+        time.sleep(0.8)
+        return True
 
     def choose_card_option(self, card: str, option: str) -> bool:
         """Open the card's resolution menu ("<card>の解決方法") and pick an option."""
