@@ -184,21 +184,28 @@ class Journey:
             return False
 
     def click_hand_card(self, card: str) -> bool:
-        candidates = [
-            self.page.locator(f'[data-card-name="{card}"]'),
-            self.page.get_by_role("button", name=re.compile(re.escape(card))),
-            self.page.locator(f'[aria-label*="{card}"]'),
-            self.page.locator(f'img[alt*="{card}"]'),
-        ]
-        for locator in candidates:
-            try:
-                if locator.count() > 0:
-                    locator.last.click()
-                    time.sleep(0.8)
-                    return True
-            except Exception:
-                continue
-        return False
+        trace(f"click hand card {card}")
+        object_id = self.find(card, 0, ["Hand"])
+        if object_id is None:
+            return False
+        self.page.mouse.move(5, 5)
+        locator = self.page.locator(f'[data-player-hand] [data-object-id="{object_id}"]')
+        try:
+            locator.first.wait_for(state="visible", timeout=8000)
+            # Fanned cards overlap; press the card's own visible top-left strip.
+            locator.first.click(position={"x": 14, "y": 24}, timeout=8000)
+            time.sleep(0.8)
+            return True
+        except Exception as exc:
+            trace(f"hand card click failed: {exc}")
+            return False
+
+    def choose_card_option(self, card: str, option: str) -> bool:
+        """Open the card's resolution menu ("<card>の解決方法") and pick an option."""
+        trigger = self.strings["cardOptions"].replace("{{card}}", card)
+        if not self.click_text(re.escape(trigger)):
+            return False
+        return self.click_text(re.escape(option))
 
 
 def boot(page: Page, base_url: str, game_id: str, decks: dict, deck_name: str) -> None:
@@ -245,7 +252,7 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     # 1. Hand card -> cast manually (UI).
     clicked = j.click_hand_card(card)
     j.step("select-hand-card", "ui", clicked, card)
-    ok = j.click_text(re.escape(j.strings["castManually"]))
+    ok = j.choose_card_option(card, j.strings["castManually"])
     j.step("cast-manually", "ui", ok, j.strings["castManually"])
     # 2. Payment (UI if a payment prompt appears).
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
@@ -290,8 +297,9 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     j.step("undo-before-cast", "ui", ok and same, {"restoredCardInHand": restored, "zonesMatchPreCast": same})
     # 7. Next ordinary play (UI): cast normally and let it resolve automatically.
     clicked = j.click_hand_card(next_play)
-    if j.click_text(re.escape(j.strings["castNormally"])) is False:
-        j.click_text(r"唱える|Cast")
+    # Permanents have no manual offer; a resolution menu appears only for
+    # supported spells, where "cast normally" is the ordinary path.
+    j.choose_card_option(next_play, j.strings["castNormally"])
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
         j.click_text(r"^(支払う|Pay)$")
     for _ in range(6):

@@ -606,7 +606,9 @@ export function PlayerHand({ interactionDisabled = false, manualCast = null }: P
       style={{
         perspective: "800px",
         ...playerHandFanSizingStyle(totalFanCards),
-        zIndex: draggingCardId != null || expanded ? 40 : undefined,
+        // The manual-resolution menu trigger sits above the hand; lift the hand
+        // over the HUD while it is offered so the trigger stays reachable.
+        zIndex: draggingCardId != null || expanded || (manualOffer && selectedCardId !== null) ? 40 : undefined,
       }}
       {...handScrubHandlers}
       onClick={handleContainerClick}
