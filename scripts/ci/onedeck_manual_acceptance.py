@@ -178,10 +178,13 @@ class Journey:
         locator = self.page.get_by_role("button", name=re.compile(pattern))
         try:
             locator.first.wait_for(state="visible", timeout=timeout_ms)
-            locator.first.click()
+            locator.first.click(timeout=10000)
             time.sleep(0.8)
             return True
-        except Exception:
+        except Exception as error:  # record why (disabled, intercepted, missing)
+            trace(f"click failed {pattern}: {str(error).splitlines()[0][:300]}")
+            for line in str(error).splitlines()[1:12]:
+                trace(f"  {line[:300]}")
             return False
 
     def click_hand_card(self, card: str) -> bool:
@@ -304,6 +307,11 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
            "still paused after corrections")
     # 5. Finish (UI).
     ok = j.click_text(re.escape(j.strings["finish"]))
+    if not ok:
+        state = j.page.evaluate("""(name) => [...document.querySelectorAll('button')].filter((b) => b.innerText.trim() === name)
+          .map((b) => { const r = b.getBoundingClientRect(); const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return { disabled: b.disabled, top: top === b || b.contains(top) ? 'self' : (top?.outerHTML ?? '').slice(0, 200) }; })""", j.strings["finish"])
+        j.step("finish-button-state", "diagnostic", False, state)
     finished = j.wait_for("() => window.__phaseAcceptance.state()?.derived?.manual_resolution == null", 15)
     notes = j.page.evaluate("() => [...document.querySelectorAll('[role=status],[role=alert]')].map((e) => e.innerText.trim()).filter(Boolean)")
     j.step("finish", "ui", ok and finished, {"button": j.strings["finish"], "panelNotes": notes})
