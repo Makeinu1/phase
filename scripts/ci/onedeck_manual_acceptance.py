@@ -253,7 +253,7 @@ def reach_main_phase(j: Journey) -> None:
         time.sleep(1.5)
     j.step("after-mulligan", "ui", True, j.summary().get("waitingFor"))
     # The table plays with full control: no automatic priority passes.
-    full_control = j.page.locator("button[aria-pressed]", has_text=re.compile(j.full_control_label))
+    full_control = j.page.locator("button[aria-pressed]:visible", has_text=re.compile(j.full_control_label))
     try:
         full_control.first.wait_for(state="visible", timeout=8000)
         if full_control.first.get_attribute("aria-pressed") != "true":
