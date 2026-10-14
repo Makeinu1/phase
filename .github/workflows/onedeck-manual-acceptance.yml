@@ -57,12 +57,11 @@ jobs:
       - name: Week key
         id: week
         run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: data/mtgjson/AtomicCards.json
           key: onedeck-mtgjson-atomic-${{ steps.week.outputs.week }}
-      - uses: actions/cache@v4
-        id: cardgen
+      - uses: actions/cache/restore@v4
         with:
           path: data/card-data.json
           key: onedeck-card-data-${{ steps.week.outputs.week }}-${{ hashFiles('crates/engine/src/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
@@ -76,6 +75,18 @@ jobs:
           fi
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
           cp data/card-data.json client/public/card-data.json
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true
+        with:
+          path: data/mtgjson/AtomicCards.json
+          key: onedeck-mtgjson-atomic-${{ steps.week.outputs.week }}
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true
+        with:
+          path: data/card-data.json
+          key: onedeck-card-data-${{ steps.week.outputs.week }}-${{ hashFiles('crates/engine/src/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
       - name: Engine WASM with manual resolution admitted
         run: |
           mkdir -p client/src/wasm

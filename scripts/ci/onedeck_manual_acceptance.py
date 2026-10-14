@@ -147,16 +147,29 @@ class Journey:
         self.debug("MoveToZone", {"object_id": object_id, "to_zone": to_zone, "simulate": False})
         return object_id
 
+    def settle(self, seconds: float = 2.0):
+        """Wait until the seat-0 priority window is stable (the AI is idle)."""
+        self.wait_for("() => { const s = window.__phaseAcceptance.state(); return s?.waiting_for?.type === 'Priority' && s.waiting_for.data?.player === 0; }", 20)
+        time.sleep(seconds)
+
     def ensure(self, card: str, owner: int, to_zone: str):
         """Setup only: take the card from the real deck's library, or create it
-        when the run uses the synthetic fallback deck."""
-        if self.find(card, owner, ["Library"]) is not None:
-            return self.move(card, owner, ["Library"], to_zone)
-        self.debug("CreateCard", {"card_name": card, "owner": owner, "zone": to_zone, "count": 1})
-        object_id = self.find(card, owner, [to_zone])
-        if object_id is None:
-            raise AssertionError(f"could not place {card} in {to_zone}")
-        return object_id
+        when the run uses the synthetic fallback deck. The client drops a queued
+        action whose decision changed meanwhile, so each placement is verified
+        and retried."""
+        for _ in range(3):
+            existing = self.find(card, owner, [to_zone])
+            if existing is not None:
+                return existing
+            self.settle(1.0)
+            library_copy = self.find(card, owner, ["Library"])
+            if library_copy is not None:
+                self.debug("MoveToZone", {"object_id": library_copy, "to_zone": to_zone, "simulate": False})
+            else:
+                self.debug("CreateCard", {"card_name": card, "owner": owner, "zone": to_zone, "count": 1})
+            if self.wait_for("([c, o, z]) => { const s = window.__phaseAcceptance.state(); return Object.values(s?.objects ?? {}).some((x) => x.name === c && x.owner === o && x.zone === z); }", 6, [card, owner, to_zone]):
+                return self.find(card, owner, [to_zone])
+        raise AssertionError(f"could not place {card} in {to_zone}")
 
     # ---- UI helpers ---------------------------------------------------
     def click_text(self, pattern: str, timeout_ms: int = 8000) -> bool:
@@ -220,7 +233,9 @@ def reach_main_phase(j: Journey) -> None:
     j.step("after-mulligan", "ui", True, j.summary().get("waitingFor"))
     # Setup: put the human in their precombat main with priority.
     j.debug("SetPhase", {"phase": "PreCombatMain", "active_player": 0})
+    j.settle()
     j.debug("SetInfiniteMana", {"player_id": 0, "enabled": True})
+    j.settle()
     ok = j.wait_for("() => { const s = window.__phaseAcceptance.state(); return s?.waiting_for?.type === 'Priority' && s.waiting_for.data?.player === 0; }", 30)
     j.step("setup-main-phase", "hook(setup)", ok, "SetPhase PreCombatMain + infinite mana for seat 0")
 
