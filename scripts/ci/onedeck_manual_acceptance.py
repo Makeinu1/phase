@@ -342,6 +342,8 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     played = land is not None and j.click_hand_card(land, double=True) and j.wait_for(
         "(n) => (window.__phaseAcceptance.state()?.battlefield ?? []).filter((id) => window.__phaseAcceptance.state().objects[id]?.controller === 0).length > n",
         10, lands_before)
+    if not played:
+        j.step("next-land-drop-legal", "diagnostic", False, j.page.evaluate("() => window.__phaseAcceptance.legal()"))
     j.step("next-land-drop", "ui", bool(played), land)
     # Double-click is the desktop hand's ordinary play gesture.
     clicked = j.click_hand_card(next_play, double=True)

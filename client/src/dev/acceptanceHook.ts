@@ -15,6 +15,7 @@ declare global {
       state: () => unknown;
       waitingFor: () => unknown;
       manualUndo: () => unknown;
+      legal: () => unknown;
       dispatch: (action: GameAction, actor?: number) => Promise<void>;
     };
   }
@@ -24,5 +25,9 @@ window.__phaseAcceptance = {
   state: () => useGameStore.getState().gameState,
   waitingFor: () => useGameStore.getState().waitingFor,
   manualUndo: () => useManualUndoStore.getState().checkpoint,
+  legal: () => {
+    const s = useGameStore.getState();
+    return { actions: s.legalActions.map((a) => a.type), byObject: Object.keys(s.legalActionsByObject), stuck: s.stuckDiagnostic };
+  },
   dispatch: (action, actor) => dispatchAction(action, actor),
 };
