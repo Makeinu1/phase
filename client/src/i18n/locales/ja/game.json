@@ -20,7 +20,7 @@
     "lossPreview": "{{player}}が{{amount}}点のライフを失います。",
     "apply": "適用",
     "applyingButton": "適用中…",
-    "finish": "Finish",
+    "finish": "処理を完了",
     "finishingButton": "終了処理中…",
     "checkStatus": "結果を確認",
     "checkingButton": "確認中…",

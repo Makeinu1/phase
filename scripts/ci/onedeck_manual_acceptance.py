@@ -243,7 +243,13 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     j.step("finish", "ui", ok and finished, j.strings["finish"])
     verify_after_finish(j, before)
     # 6. Undo to before casting (UI).
-    ok = j.click_text(re.escape(j.strings["undoBeforeCast"].split("{{")[0] or "前に戻す") + r"|前に戻す|Undo")
+    undo = j.page.locator('[data-testid="manual-undo"] button')
+    try:
+        undo.first.wait_for(state="visible", timeout=8000)
+        undo.first.click()
+        ok = True
+    except Exception:
+        ok = False
     restored = j.wait_for(
         "(c) => { const s = window.__phaseAcceptance.state(); return s && (s.players?.[0]?.hand ?? []).some((id) => s.objects?.[id]?.name === c); }",
         20, card)

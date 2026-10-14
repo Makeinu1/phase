@@ -61,8 +61,14 @@ jobs:
         with:
           path: data/mtgjson/AtomicCards.json
           key: onedeck-mtgjson-atomic-${{ steps.week.outputs.week }}
+      - uses: actions/cache@v4
+        id: cardgen
+        with:
+          path: data/card-data.json
+          key: onedeck-card-data-${{ steps.week.outputs.week }}-${{ hashFiles('crates/engine/src/**', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
       - name: Card data (MTGJSON -> card-data.json)
         run: |
+          if [ -s data/card-data.json ]; then cp data/card-data.json client/public/card-data.json; exit 0; fi
           mkdir -p data/mtgjson
           if [ ! -f data/mtgjson/AtomicCards.json ]; then
             source scripts/lib/mtgjson-fetch.sh
