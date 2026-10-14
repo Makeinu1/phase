@@ -127,6 +127,17 @@ class Journey:
         self.debug("MoveToZone", {"object_id": object_id, "to_zone": to_zone, "simulate": False})
         return object_id
 
+    def ensure(self, card: str, owner: int, to_zone: str):
+        """Setup only: take the card from the real deck's library, or create it
+        when the run uses the synthetic fallback deck."""
+        if self.find(card, owner, ["Library"]) is not None:
+            return self.move(card, owner, ["Library"], to_zone)
+        self.debug("CreateCard", {"card_name": card, "owner": owner, "zone": to_zone, "count": 1})
+        object_id = self.find(card, owner, [to_zone])
+        if object_id is None:
+            raise AssertionError(f"could not place {card} in {to_zone}")
+        return object_id
+
     # ---- UI helpers ---------------------------------------------------
     def click_text(self, pattern: str, timeout_ms: int = 8000) -> bool:
         locator = self.page.get_by_role("button", name=re.compile(pattern))
@@ -252,10 +263,10 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
 # ---- scenarios ---------------------------------------------------------
 
 def scenario_rejoin(j: Journey) -> None:
-    j.move("Rejoin the Fight", 0, ["Library"], "Hand")
-    j.move("Sol Ring", 0, ["Library"], "Hand")
+    j.ensure("Rejoin the Fight", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
     # Guarantee a creature card in the caster's graveyard after the mill.
-    j.move("Sun Titan", 0, ["Library"], "Graveyard")
+    j.ensure("Sun Titan", 0, "Graveyard")
     j.step("setup-cards", "hook(setup)", True, "Rejoin the Fight + Sol Ring to hand, Sun Titan to graveyard")
 
     def corrections(j: Journey):
@@ -275,8 +286,8 @@ def scenario_rejoin(j: Journey) -> None:
 
 
 def scenario_breach(j: Journey) -> None:
-    j.move("Breach the Multiverse", 0, ["Library"], "Hand")
-    j.move("Sol Ring", 0, ["Library"], "Hand")
+    j.ensure("Breach the Multiverse", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
     j.step("setup-cards", "hook(setup)", True, "Breach the Multiverse + Sol Ring to hand")
 
     def corrections(j: Journey):
@@ -308,8 +319,8 @@ def scenario_breach(j: Journey) -> None:
 
 
 def scenario_fact_or_fiction(j: Journey) -> None:
-    j.debug("CreateCard", {"card_name": "Fact or Fiction", "owner": 0, "zone": "Hand", "count": 1})
-    j.move("Sol Ring", 0, ["Library"], "Hand")
+    j.ensure("Fact or Fiction", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
     j.step("setup-cards", "hook(setup)", True, "Fact or Fiction created in hand + Sol Ring to hand")
 
     def corrections(j: Journey):
@@ -347,7 +358,18 @@ def main() -> int:
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    decks = json.loads(os.environ["ONEDECK_DECKS"])
+    raw_decks = os.environ.get("ONEDECK_DECKS", "").strip()
+    synthetic = not raw_decks
+    if synthetic:
+        # Fallback until the private decks are provided: a legal-shaped
+        # Commander list (public commanders + basics). Results are labelled.
+        basics = lambda names: [{"count": 33, "name": n} for n in names]
+        decks = {
+            "Celes": {"main": basics(["Plains", "Swamp", "Mountain"]), "sideboard": [], "commander": ["Celes, Rune Knight"]},
+            "Muldrotha": {"main": basics(["Forest", "Island", "Swamp"]), "sideboard": [], "commander": ["Muldrotha, the Gravetide"]},
+        }
+    else:
+        decks = json.loads(raw_decks)
     strings = json.load(open(args.locale, encoding="utf-8"))["manualResolution"]
     results = {}
     with sync_playwright() as pw:
@@ -374,7 +396,7 @@ def main() -> int:
                     journey.steps.append({"step": "failure", "state": journey.summary(), "screen": journey.shot("failure")})
                 except Exception:
                     pass
-            results[name] = {"status": status, "error": error, "steps": journey.steps,
+            results[name] = {"status": status, "deck": "synthetic" if synthetic else "real", "error": error, "steps": journey.steps,
                              "console": [c for c in console if "error" in c.lower()][-40:]}
             context.close()
         browser.close()
@@ -384,7 +406,7 @@ def main() -> int:
         level = "notice" if result["status"] == "pass" else "error"
         # Card names of the scenario sources are public; deck contents are never printed.
         reason = (result["error"] or "").splitlines()[0][:300] if result["error"] else "all steps passed"
-        print(f"::{level}::{name}: {result['status']} (last step {last}) {reason}")
+        print(f"::{level}::{name} [{result['deck']} deck]: {result['status']} (last step {last}) {reason}")
     print(json.dumps({k: v["status"] for k, v in results.items()}))
     return 0 if all(v["status"] == "pass" for v in results.values()) else 1
 
