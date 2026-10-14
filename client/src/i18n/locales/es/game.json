@@ -92,7 +92,17 @@
       "toBattlefieldMine": "Put onto the battlefield under your control",
       "mixedZones": "Select cards from one zone",
       "failed": "That couldn't be done: {{reason}}",
-      "finishUnknown": "Couldn't confirm the finish. Check its status."
+      "finishUnknown": "Couldn't confirm the finish. Check its status.",
+      "sacrifice": "Sacrifice",
+      "damage": "Deal {{count}} damage",
+      "tap": "Tap",
+      "untap": "Untap",
+      "addCounter": "Put {{count}} +1/+1 counter(s)",
+      "removeCounter": "Remove {{count}} +1/+1 counter(s)",
+      "toLibraryTop": "Put on top of library",
+      "toLibraryBottom": "Put on bottom of library",
+      "gainLife": "Gain life",
+      "clear": "Clear selection"
     }
   },
   "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},

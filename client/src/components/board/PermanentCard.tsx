@@ -451,8 +451,12 @@ export const PermanentCard = memo(function PermanentCard({
   // for why this is a denylist on "touch" rather than a "mouse" allowlist.
   const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile || event.pointerType === "touch") return;
-    hoverObject(objectId); inspectObject(objectId);
-  }, [hoverObject, inspectObject, isMobile, objectId]);
+    hoverObject(objectId);
+    // While picking for a manual resolution the preview moves to the side so
+    // it never covers the permanents being picked.
+    if (manualPickActive) inspectObject(objectId, undefined, "hover", "side");
+    else inspectObject(objectId);
+  }, [hoverObject, inspectObject, isMobile, objectId, manualPickActive]);
 
   // Composes with useLongPress's own `onPointerLeave` instead of replacing it —
   // this handler wins the key collision in the spread below, so dropping the

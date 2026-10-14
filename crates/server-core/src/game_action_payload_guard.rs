@@ -408,6 +408,14 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         DebugAction::PutCards { object_ids, .. } => {
             bound_serialized_json("Debug.PutCards.object_ids", object_ids)?;
         }
+        DebugAction::DealDamage {
+            object_ids,
+            player_ids,
+            ..
+        } => {
+            bound_serialized_json("Debug.DealDamage.object_ids", object_ids)?;
+            bound_serialized_json("Debug.DealDamage.player_ids", player_ids)?;
+        }
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
         | DebugAction::Sacrifice { .. }
@@ -415,6 +423,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::RevealHand { .. }
         | DebugAction::Discard { .. }
         | DebugAction::LoseLife { .. }
+        | DebugAction::GainLife { .. }
         | DebugAction::DrawCards { .. }
         | DebugAction::Mill { .. }
         | DebugAction::ShuffleLibrary { .. }

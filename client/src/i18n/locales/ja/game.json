@@ -92,7 +92,17 @@
       "toBattlefieldMine": "自分のコントロールで戦場に出す",
       "mixedZones": "同じ領域のカードを選んでください",
       "failed": "できませんでした：{{reason}}",
-      "finishUnknown": "完了したか確認できません。状態を確認してください。"
+      "finishUnknown": "完了したか確認できません。状態を確認してください。",
+      "sacrifice": "生け贄にする",
+      "damage": "{{count}}点のダメージ",
+      "tap": "タップする",
+      "untap": "アンタップする",
+      "addCounter": "+1/+1カウンターを{{count}}個置く",
+      "removeCounter": "+1/+1カウンターを{{count}}個取り除く",
+      "toLibraryTop": "ライブラリーの一番上へ",
+      "toLibraryBottom": "ライブラリーの一番下へ",
+      "gainLife": "ライフを得る",
+      "clear": "選択を解除"
     }
   },
   "playerLatency": {

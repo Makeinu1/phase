@@ -2711,7 +2711,7 @@ mod enabled_baseline_tests {
                 player_id: p0,
                 count: 3,
             }))
-            .expect("the paused actor mills as an inert correction");
+            .expect("the paused actor mills as one of the spell's instructions");
         assert_eq!(runner.state().waiting_for, paused);
         assert_eq!(runner.state().players[p0.0 as usize].graveyard.len(), 3);
         assert_eq!(runner.state().players[p0.0 as usize].library.len(), 1);
@@ -2854,6 +2854,10 @@ mod enabled_baseline_tests {
         runner
             .act(GameAction::FinishManualResolution { stack_entry_id })
             .expect("Finish closes the resolution");
+        assert!(
+            !runner.state().revealed_cards.contains(&secret_two),
+            "CR 701.20a: the reveal lasts only as long as the resolution needs it"
+        );
         assert_eq!(runner.state().objects[&designated].zone, Zone::Graveyard);
         assert_eq!(
             runner.state().stack.len(),
@@ -3003,6 +3007,229 @@ mod enabled_baseline_tests {
         assert!(runner.state().stack.is_empty());
         assert_eq!(life(&runner, p0), p0_life + 3);
         assert_eq!(life(&runner, p1), p1_life - 3 + 1);
+    }
+
+    /// Shared board for the wider instruction tests: a designated spell
+    /// paused for p0 with creatures on both sides.
+    fn paused_instruction_board(setup: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId) {
+        let p0 = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        setup(&mut scenario);
+        let designated = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Manual Instruction Spell",
+                false,
+                "You gain 3 life.",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+        let stack_entry_id;
+        {
+            let mut cast = runner.cast(designated).commit();
+            stack_entry_id = cast.state().stack.back().expect("cast is on stack").id;
+            cast.act(GameAction::DesignateManualResolution { stack_entry_id })
+                .expect("controller designates the spell");
+        }
+        runner.act(GameAction::PassPriority).expect("caster passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent pass enters the manual wait");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManualResolution { .. }
+        ));
+        (runner, stack_entry_id)
+    }
+
+    /// CR 603.10a: the creatures one Destroy instruction destroys leave
+    /// together, so a dies observer destroyed with them sees the others.
+    #[test]
+    fn a_multi_permanent_destroy_is_simultaneous() {
+        use engine::types::actions::RegenerationPermission;
+        let p1 = PlayerId(1);
+        let mut ids = Vec::new();
+        let (mut runner, _) = paused_instruction_board(|scenario| {
+            ids.push(
+                scenario
+                    .add_creature_from_oracle(
+                        p1,
+                        "Dying Watcher",
+                        1,
+                        1,
+                        "Whenever another creature dies, you gain 1 life.",
+                    )
+                    .id(),
+            );
+            ids.push(scenario.add_creature(p1, "Bear One", 2, 2).id());
+            ids.push(scenario.add_creature(p1, "Bear Two", 2, 2).id());
+        });
+        let before = runner.state().deferred_triggers.len();
+        runner
+            .act(GameAction::Debug(DebugAction::Destroy {
+                object_ids: ids.clone(),
+                regeneration: RegenerationPermission::Allowed,
+            }))
+            .expect("the actor destroys all three together");
+        assert_eq!(
+            runner.state().deferred_triggers.len() - before,
+            2,
+            "the watcher sees both bears that died with it"
+        );
+    }
+
+    /// Damage, life gain, counters, tapping, sacrifice, and putting a card on
+    /// the bottom of its library are real instructions during the pause; a
+    /// lethally damaged creature dies only when state-based actions are next
+    /// checked, after the resolution (CR 704.3).
+    #[test]
+    fn paused_actor_uses_the_wider_instruction_set() {
+        use engine::types::actions::{CardDestination, LibraryEnd};
+        use engine::types::counter::CounterType;
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut ids = Vec::new();
+        let (mut runner, stack_entry_id) = paused_instruction_board(|scenario| {
+            scenario.with_library_top(p1, &["Library Card"]);
+            ids.push(scenario.add_creature(p1, "Burnt Bear", 2, 2).id());
+            ids.push(scenario.add_creature(p0, "Grown Elf", 1, 1).id());
+            ids.push(scenario.add_creature(p0, "Offered Goblin", 1, 1).id());
+            ids.push(
+                scenario
+                    .add_creature_to_graveyard(p1, "Buried Card", 1, 1)
+                    .id(),
+            );
+        });
+        let [bear, elf, goblin, buried] = ids[..] else {
+            unreachable!()
+        };
+        let life =
+            |runner: &GameRunner, player: PlayerId| runner.state().players[player.0 as usize].life;
+        let (p0_life, p1_life) = (life(&runner, p0), life(&runner, p1));
+
+        runner
+            .act(GameAction::Debug(DebugAction::DealDamage {
+                object_ids: vec![bear],
+                player_ids: vec![p1],
+                amount: 3,
+            }))
+            .expect("the spell deals damage to a creature and a player");
+        assert_eq!(life(&runner, p1), p1_life - 3);
+        assert_eq!(
+            runner.state().objects[&bear].zone,
+            Zone::Battlefield,
+            "no SBA mid-resolution"
+        );
+        runner
+            .act(GameAction::Debug(DebugAction::GainLife {
+                player_id: p0,
+                amount: 4,
+            }))
+            .expect("the actor gains life");
+        assert_eq!(life(&runner, p0), p0_life + 4);
+        runner
+            .act(GameAction::Debug(DebugAction::ModifyCounters {
+                object_id: elf,
+                counter_type: CounterType::Plus1Plus1,
+                delta: 2,
+            }))
+            .expect("two +1/+1 counters are put on the elf");
+        assert_eq!(
+            runner.state().objects[&elf]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&2)
+        );
+        runner
+            .act(GameAction::Debug(DebugAction::SetTapped {
+                object_id: elf,
+                tapped: true,
+            }))
+            .expect("the elf becomes tapped");
+        assert!(runner.state().objects[&elf].tapped);
+        runner
+            .act(GameAction::Debug(DebugAction::Sacrifice {
+                object_id: goblin,
+            }))
+            .expect("the goblin is sacrificed");
+        assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
+        runner
+            .act(GameAction::Debug(DebugAction::PutCards {
+                object_ids: vec![buried],
+                destination: CardDestination::Library {
+                    end: LibraryEnd::Bottom,
+                },
+            }))
+            .expect("a graveyard card goes to the bottom of its owner's library");
+        assert_eq!(
+            runner.state().players[p1.0 as usize].library.back(),
+            Some(&buried)
+        );
+
+        // One instruction names each object once, and amounts stay in range.
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::DealDamage {
+                object_ids: vec![elf, elf],
+                player_ids: vec![],
+                amount: 1,
+            },
+        );
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::LoseLife {
+                player_id: p1,
+                amount: u32::MAX,
+            },
+        );
+
+        runner
+            .act(GameAction::FinishManualResolution { stack_entry_id })
+            .expect("Finish closes the resolution");
+        assert_eq!(
+            runner.state().objects[&bear].zone,
+            Zone::Graveyard,
+            "the lethally damaged bear dies once state-based actions are checked"
+        );
+    }
+
+    /// Outside a manual pause these are ordinary Sandbox tools: a creature
+    /// put onto the battlefield triggers its entering ability exactly once.
+    #[test]
+    fn sandbox_put_cards_outside_a_pause_triggers_once() {
+        use engine::types::actions::{BattlefieldEntryControl, CardDestination};
+        let p0 = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let elf = scenario
+            .add_creature_to_hand_from_oracle(
+                p0,
+                "Sandbox Elf",
+                1,
+                1,
+                "When this creature enters, you gain 3 life.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+        runner
+            .act(GameAction::Debug(DebugAction::PutCards {
+                object_ids: vec![elf],
+                destination: CardDestination::Battlefield {
+                    control: BattlefieldEntryControl::Owner,
+                },
+            }))
+            .expect("the Sandbox puts the creature onto the battlefield");
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "the entering ability triggers once"
+        );
     }
 
     #[test]

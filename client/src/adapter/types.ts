@@ -3034,10 +3034,13 @@ export type DebugAction =
           | { type: "Battlefield"; data: { control: "Owner" | "Actor" } }
           | { type: "Hand" }
           | { type: "Graveyard" }
-          | { type: "Exile" };
+          | { type: "Exile" }
+          | { type: "Library"; data: { end: "Top" | "Bottom" } };
       };
     }
   | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
+  | { type: "GainLife"; data: { player_id: PlayerId; amount: number } }
+  | { type: "DealDamage"; data: { object_ids: ObjectId[]; player_ids: PlayerId[]; amount: number } }
   | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
   | { type: "Proliferate"; data: { player_id: PlayerId } }
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }

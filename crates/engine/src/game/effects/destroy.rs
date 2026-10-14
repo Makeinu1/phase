@@ -198,13 +198,27 @@ pub fn resolve(
             ..
         }
     );
+    let event_start = events.len();
+    let mut destroyed = Vec::new();
     for target in destroyed_targets(state, ability) {
         if let TargetRef::Object(obj_id) = target {
             match destroy_single_object(state, obj_id, ability.source_id, cant_regenerate, events) {
-                DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
+                DestroyOutcome::Completed | DestroyOutcome::Skipped => destroyed.push(obj_id),
                 DestroyOutcome::NeedsChoice => return Ok(()),
             }
         }
+    }
+
+    // CR 603.10a + CR 704.3: the permanents one Destroy instruction destroys
+    // ("destroy two target creatures") leave the battlefield simultaneously,
+    // so co-departing dies/leaves observers must observe each other — the
+    // same stamp `resolve_all` applies. Regenerated or skipped members stay
+    // out of the group through `departed_subset`.
+    if destroyed.len() > 1 {
+        crate::game::zones::mark_simultaneous_departures(
+            &mut events[event_start..],
+            &crate::game::zones::departed_subset(state, &destroyed),
+        );
     }
 
     events.push(GameEvent::EffectResolved {

@@ -11192,6 +11192,9 @@ fn finish_manual_resolution(
             "the designated spell could not enter the manual terminal path".to_string(),
         ));
     }
+    // CR 701.20a: cards revealed for this resolution stay revealed only as
+    // long as the effect needs them; the effect is now over.
+    state.revealed_cards.clear();
     resume_pending_continuation_if_priority(state, events)?;
 
     // The normal all-pass path always runs the post-resolution pipeline, even

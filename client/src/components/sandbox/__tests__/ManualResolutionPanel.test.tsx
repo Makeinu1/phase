@@ -93,6 +93,34 @@ describe("ManualResolutionPanel", () => {
     expect(useManualPickStore.getState().selectedObjectIds).toEqual([]);
   });
 
+  it("deals damage and puts +1/+1 counters on picked permanents by the chosen amount", async () => {
+    const user = userEvent.setup();
+    setBoard({ revealed: false });
+    renderPanel();
+    act(() => useManualPickStore.getState().pickObject(10));
+    await user.click(screen.getByRole("button", { name: "+" }));
+    await user.click(screen.getByRole("button", { name: "+" }));
+    await user.click(screen.getByRole("button", { name: "Deal 3 damage" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "DealDamage", data: { object_ids: [10], player_ids: [], amount: 3 } }));
+    act(() => useManualPickStore.getState().pickObject(10));
+    await user.click(screen.getByRole("button", { name: "Put 3 +1/+1 counter(s)" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({
+      type: "ModifyCounters", data: { object_id: 10, counter_type: "Plus1Plus1", delta: 3 },
+    }));
+  });
+
+  it("puts down the picks with the clear button or Esc", async () => {
+    const user = userEvent.setup();
+    setBoard({ revealed: false });
+    renderPanel();
+    act(() => useManualPickStore.getState().pickObject(10));
+    await user.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(useManualPickStore.getState().selectedObjectIds).toEqual([]);
+    act(() => useManualPickStore.getState().pickPlayer(1));
+    await user.keyboard("{Escape}");
+    expect(useManualPickStore.getState().selectedPlayerId).toBeNull();
+  });
+
   it("makes a picked player lose life", async () => {
     const user = userEvent.setup();
     setBoard({ revealed: false });

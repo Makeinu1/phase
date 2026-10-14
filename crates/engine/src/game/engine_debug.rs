@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Effect, LibraryPosition, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef,
+    ContinuousModification, ControllerRef, Effect, EffectScope, LibraryPosition, QuantityExpr,
+    ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::action_rejection::ActionRejection;
 use crate::types::actions::{
     BattlefieldEntryControl, CardDestination, DebugAction, DebugCardCreationKind,
-    DebugTokenRequest, GameAction, RegenerationPermission,
+    DebugTokenRequest, GameAction, LibraryEnd, RegenerationPermission,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
@@ -113,6 +113,32 @@ pub fn apply_debug_action(
             crate::game::layers::mark_layers_full(state);
         }
 
+        DebugAction::Sacrifice { object_id }
+            if paused_manual_resolution_source(state).is_some() =>
+        {
+            validate_object(state, object_id)?;
+            // CR 701.21a: the controller sacrifices it as one of the resolving
+            // spell's instructions; its triggers wait for the resolution.
+            let controller = state.objects[&object_id].controller;
+            let event_start = events.len();
+            match super::sacrifice::sacrifice_permanent(state, object_id, controller, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?
+            {
+                super::sacrifice::SacrificeOutcome::Complete => settle_instruction_triggers(
+                    state,
+                    paused_manual_resolution_source(state),
+                    event_start,
+                    events,
+                ),
+                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => {
+                    return Err(EngineError::InvalidAction(
+                        "This sacrifice needs a replacement choice; agree on it at the table"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
         DebugAction::Sacrifice { object_id } => {
             validate_object(state, object_id)?;
             // CR 701.21: A player sacrifices a permanent they control. Route
@@ -148,7 +174,7 @@ pub fn apply_debug_action(
                 actor,
                 Effect::Draw {
                     count: QuantityExpr::Fixed {
-                        value: count as i32,
+                        value: instruction_amount(count)?,
                     },
                     target: TargetFilter::Player,
                 },
@@ -195,7 +221,7 @@ pub fn apply_debug_action(
                 actor,
                 Effect::Mill {
                     count: QuantityExpr::Fixed {
-                        value: count as i32,
+                        value: instruction_amount(count)?,
                     },
                     target: TargetFilter::Player,
                     destination: Zone::Graveyard,
@@ -311,6 +337,7 @@ pub fn apply_debug_action(
             object_ids,
             regeneration,
         } => {
+            ensure_distinct(&object_ids)?;
             for &object_id in &object_ids {
                 validate_object(state, object_id)?;
                 if state.objects[&object_id].zone != Zone::Battlefield {
@@ -335,6 +362,7 @@ pub fn apply_debug_action(
             object_ids,
             destination,
         } => {
+            ensure_distinct(&object_ids)?;
             for &object_id in &object_ids {
                 validate_object(state, object_id)?;
                 if state.objects[&object_id].zone == Zone::Stack {
@@ -343,26 +371,10 @@ pub fn apply_debug_action(
                     ));
                 }
             }
-            let (zone, enters_under) = match destination {
-                CardDestination::Battlefield { control } => (
-                    Zone::Battlefield,
-                    match control {
-                        BattlefieldEntryControl::Owner => None,
-                        // CR 110.2a: "under your control" names the player
-                        // performing the instruction.
-                        BattlefieldEntryControl::Actor => Some(ControllerRef::You),
-                    },
-                ),
-                CardDestination::Hand => (Zone::Hand, None),
-                CardDestination::Graveyard => (Zone::Graveyard, None),
-                CardDestination::Exile => (Zone::Exile, None),
-            };
-            perform_instruction(
-                state,
-                actor,
-                Effect::ChangeZone {
+            let change_zone =
+                |destination: Zone, enters_under: Option<ControllerRef>| Effect::ChangeZone {
                     origin: None,
-                    destination: zone,
+                    destination,
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
@@ -374,8 +386,98 @@ pub fn apply_debug_action(
                     conditional_enter_with_counters: Vec::new(),
                     face_down_profile: None,
                     enters_modified_if: None,
+                };
+            let effect = match destination {
+                CardDestination::Battlefield { control } => change_zone(
+                    Zone::Battlefield,
+                    match control {
+                        BattlefieldEntryControl::Owner => None,
+                        // CR 110.2a: "under your control" names the player
+                        // performing the instruction.
+                        BattlefieldEntryControl::Actor => Some(ControllerRef::You),
+                    },
+                ),
+                CardDestination::Hand => change_zone(Zone::Hand, None),
+                CardDestination::Graveyard => change_zone(Zone::Graveyard, None),
+                CardDestination::Exile => change_zone(Zone::Exile, None),
+                // CR 401.4: the owner's library, on top or at the bottom.
+                CardDestination::Library { end } => Effect::PutAtLibraryPosition {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed {
+                        value: object_ids.len() as i32,
+                    },
+                    position: match end {
+                        LibraryEnd::Top => LibraryPosition::Top,
+                        LibraryEnd::Bottom => LibraryPosition::Bottom,
+                    },
                 },
+            };
+            perform_instruction(
+                state,
+                actor,
+                effect,
                 object_ids.into_iter().map(TargetRef::Object).collect(),
+                events,
+            )?;
+        }
+
+        DebugAction::GainLife { player_id, amount } => {
+            validate_player(state, player_id)?;
+            perform_instruction(
+                state,
+                actor,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed {
+                        value: instruction_amount(amount)?,
+                    },
+                    player: TargetFilter::Player,
+                },
+                vec![TargetRef::Player(player_id)],
+                events,
+            )?;
+        }
+
+        DebugAction::DealDamage {
+            object_ids,
+            player_ids,
+            amount,
+        } => {
+            if paused_manual_resolution_source(state).is_none() {
+                return Err(EngineError::InvalidAction(
+                    "Damage needs a source; it is available while a manual resolution is paused"
+                        .into(),
+                ));
+            }
+            for &object_id in &object_ids {
+                validate_object(state, object_id)?;
+                if state.objects[&object_id].zone != Zone::Battlefield {
+                    return Err(EngineError::InvalidAction(
+                        "Damage can be dealt only to permanents and players".into(),
+                    ));
+                }
+            }
+            for &player_id in &player_ids {
+                validate_player(state, player_id)?;
+            }
+            ensure_distinct(&object_ids)?;
+            ensure_distinct(&player_ids)?;
+            let targets = object_ids
+                .into_iter()
+                .map(TargetRef::Object)
+                .chain(player_ids.into_iter().map(TargetRef::Player))
+                .collect();
+            perform_instruction(
+                state,
+                actor,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed {
+                        value: instruction_amount(amount)?,
+                    },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+                targets,
                 events,
             )?;
         }
@@ -387,7 +489,7 @@ pub fn apply_debug_action(
                 actor,
                 Effect::LoseLife {
                     amount: QuantityExpr::Fixed {
-                        value: amount as i32,
+                        value: instruction_amount(amount)?,
                     },
                     target: Some(TargetFilter::Player),
                 },
@@ -421,6 +523,41 @@ pub fn apply_debug_action(
                 obj.base_toughness = Some(t);
             }
             crate::game::layers::mark_layers_full(state);
+        }
+
+        DebugAction::ModifyCounters {
+            object_id,
+            counter_type,
+            delta,
+        } if paused_manual_resolution_source(state).is_some() => {
+            validate_object(state, object_id)?;
+            // CR 122.1: put or remove counters as one of the resolving
+            // spell's instructions, so counter replacements and triggers apply.
+            let count = QuantityExpr::Fixed {
+                value: instruction_amount(delta.unsigned_abs())?,
+            };
+            let effect = match delta.signum() {
+                1 => Some(Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target: TargetFilter::Any,
+                }),
+                -1 => Some(Effect::RemoveCounter {
+                    counter_type: Some(counter_type),
+                    count,
+                    target: TargetFilter::Any,
+                }),
+                _ => None,
+            };
+            if let Some(effect) = effect {
+                perform_instruction(
+                    state,
+                    actor,
+                    effect,
+                    vec![TargetRef::Object(object_id)],
+                    events,
+                )?;
+            }
         }
 
         DebugAction::ModifyCounters {
@@ -464,6 +601,29 @@ pub fn apply_debug_action(
                 obj.class_level = Some((lore as u8).max(1));
             }
             crate::game::layers::mark_layers_full(state);
+        }
+
+        DebugAction::SetTapped { object_id, tapped }
+            if paused_manual_resolution_source(state).is_some() =>
+        {
+            validate_object(state, object_id)?;
+            // CR 701.26a-b: tap or untap as one of the resolving spell's
+            // instructions, so "becomes tapped" abilities trigger.
+            perform_instruction(
+                state,
+                actor,
+                Effect::SetTapState {
+                    target: TargetFilter::Any,
+                    scope: EffectScope::Single,
+                    state: if tapped {
+                        TapStateChange::Tap
+                    } else {
+                        TapStateChange::Untap
+                    },
+                },
+                vec![TargetRef::Object(object_id)],
+                events,
+            )?;
         }
 
         DebugAction::SetTapped { object_id, tapped } => {
@@ -1548,6 +1708,26 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
     Ok(())
 }
 
+/// An instruction amount as the resolvers' signed quantity; larger values
+/// would wrap negative and be silently clamped to nothing.
+fn instruction_amount(amount: u32) -> Result<i32, EngineError> {
+    i32::try_from(amount).map_err(|_| {
+        EngineError::InvalidAction("Instruction amount exceeds the supported range".into())
+    })
+}
+
+/// One instruction names each object or player at most once.
+fn ensure_distinct<T: Eq + std::hash::Hash>(ids: &[T]) -> Result<(), EngineError> {
+    let mut seen = HashSet::new();
+    if ids.iter().all(|id| seen.insert(id)) {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidAction(
+            "An instruction names the same object or player twice".into(),
+        ))
+    }
+}
+
 /// Runs one Sandbox instruction through the real effect resolver. Inside a
 /// paused manual resolution the instruction is one of the resolving source's
 /// own (its source is the paused spell, so "exiled with", "caused by an
@@ -1580,6 +1760,15 @@ fn perform_instruction(
                     .into(),
             ));
         }
+        // Outside a resolution the choice stays open; park the triggers of
+        // what already happened so the choice's own pipeline drains them.
+        let unclaimed = super::triggers::filter_already_collected_trigger_events_from(
+            state,
+            events,
+            event_start,
+            &state.consumed_before_priority_trigger_events,
+        );
+        super::triggers::collect_triggers_into_deferred(state, &unclaimed);
         return Ok(());
     }
     settle_instruction_triggers(state, resolving_source, event_start, events);
@@ -1590,26 +1779,39 @@ fn perform_instruction(
 /// player would next receive priority, after the resolution finishes (and
 /// CR 704.3: state-based actions are not checked mid-resolution). Outside a
 /// paused manual resolution the Sandbox settles them immediately.
+///
+/// A zone change delivered through a logical owner has already parked its own
+/// ordinary triggers and claimed its events, so ordinary collection runs once
+/// over the unclaimed events. Delayed triggers (CR 603.7) still see every
+/// event, as in the priority pipeline: owners deliberately leave them unclaimed.
 fn settle_instruction_triggers(
     state: &mut GameState,
     resolving_source: Option<ObjectId>,
     event_start: usize,
     events: &mut Vec<GameEvent>,
 ) {
-    if resolving_source.is_some() {
-        // A zone change delivered through a logical owner already parked its
-        // own triggers and claimed its events; collect only the rest once.
-        let unclaimed = super::triggers::filter_already_collected_trigger_events_from(
-            state,
-            events,
-            event_start,
-            &state.consumed_before_priority_trigger_events,
-        );
-        super::triggers::collect_triggers_into_deferred(state, &unclaimed);
-        super::triggers::collect_delayed_triggers_into_deferred(state, &unclaimed);
-    } else {
-        let new_events = events[event_start..].to_vec();
-        super::triggers::process_triggers(state, &new_events);
+    let unclaimed = super::triggers::filter_already_collected_trigger_events_from(
+        state,
+        events,
+        event_start,
+        &state.consumed_before_priority_trigger_events,
+    );
+    let delayed_events: Vec<GameEvent> = events[event_start..]
+        .iter()
+        .filter(|event| {
+            !matches!(event, GameEvent::PhaseChanged { .. })
+                && !state.deferred_entry_events.contains(event)
+        })
+        .cloned()
+        .collect();
+    super::triggers::collect_triggers_into_deferred(state, &unclaimed);
+    super::triggers::collect_delayed_triggers_into_deferred(state, &delayed_events);
+    if resolving_source.is_none() {
+        // Outside a resolution the Sandbox action is its own boundary: put
+        // the parked triggers on the stack now and check state-based actions.
+        if let Some(waiting_for) = super::triggers::drain_deferred_trigger_queue(state, events) {
+            state.waiting_for = waiting_for;
+        }
         super::sba::check_state_based_actions(state, events);
     }
 }

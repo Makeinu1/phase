@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DebugAction, GameObject, ObjectId, PlayerId } from "../../adapter/types";
@@ -34,37 +34,56 @@ export interface ManualResolutionPanelProps {
 }
 
 type Verb =
-  | "destroy" | "exile" | "toHand" | "toGraveyard" | "discard"
-  | "toBattlefield" | "toBattlefieldMine";
+  | "destroy" | "sacrifice" | "damage" | "tap" | "untap" | "addCounter" | "removeCounter"
+  | "exile" | "toHand" | "toGraveyard" | "discard" | "toBattlefield" | "toBattlefieldMine"
+  | "toLibraryTop" | "toLibraryBottom";
 
 type CardZone = "Battlefield" | "Hand" | "Graveyard" | "Exile" | "Library";
 
-/** The instructions a picked card offers from the zone it is in. */
-function verbsFor(zone: CardZone, anyNotOwned: boolean): Verb[] {
-  const mine: Verb[] = anyNotOwned ? ["toBattlefieldMine"] : [];
+/** The instructions picked cards offer from the zone they are in. */
+function verbsFor(zone: CardZone, objects: readonly GameObject[], viewerId: PlayerId): Verb[] {
+  const mine: Verb[] = objects.some((object) => object.owner !== viewerId) ? ["toBattlefieldMine"] : [];
+  const library: Verb[] = ["toLibraryTop", "toLibraryBottom"];
   switch (zone) {
-    case "Battlefield": return ["destroy", "exile", "toHand", "toGraveyard"];
-    case "Hand": return ["discard", "exile", "toBattlefield", ...mine];
-    case "Graveyard": return ["toBattlefield", ...mine, "toHand", "exile"];
-    case "Exile": return ["toBattlefield", ...mine, "toHand", "toGraveyard"];
-    case "Library": return ["toHand", "toGraveyard", "exile", "toBattlefield", ...mine];
+    case "Battlefield":
+      return [
+        "destroy", "sacrifice", "damage", objects.every((object) => object.tapped) ? "untap" : "tap",
+        "addCounter", "removeCounter", "exile", "toHand", "toGraveyard", ...library,
+      ];
+    case "Hand": return ["discard", "exile", "toBattlefield", ...mine, ...library];
+    case "Graveyard": return ["toBattlefield", ...mine, "toHand", "exile", ...library];
+    case "Exile": return ["toBattlefield", ...mine, "toHand", "toGraveyard", ...library];
+    case "Library": return ["toHand", "toGraveyard", "exile", "toBattlefield", ...mine, "toLibraryBottom"];
   }
 }
 
-function instructionsFor(verb: Verb, objects: readonly GameObject[], noRegeneration: boolean): DebugAction[] {
+/** Verbs that use the amount stepper. */
+const AMOUNT_VERBS: ReadonlySet<Verb> = new Set(["damage", "addCounter", "removeCounter"]);
+
+function instructionsFor(verb: Verb, objects: readonly GameObject[], noRegeneration: boolean, amount: number): DebugAction[] {
   const ids = objects.map((object) => object.id);
   const put = (destination: Extract<DebugAction, { type: "PutCards" }>["data"]["destination"]): DebugAction[] =>
     [{ type: "PutCards", data: { object_ids: ids, destination } }];
+  const each = (make: (object_id: ObjectId) => DebugAction) => ids.map(make);
   switch (verb) {
     case "destroy":
       return [{ type: "Destroy", data: { object_ids: ids, regeneration: noRegeneration ? "Forbidden" : "Allowed" } }];
-    case "discard":
-      return ids.map((object_id) => ({ type: "Discard", data: { object_id } }));
+    case "sacrifice": return each((object_id) => ({ type: "Sacrifice", data: { object_id } }));
+    case "damage": return [{ type: "DealDamage", data: { object_ids: ids, player_ids: [], amount } }];
+    case "tap": return each((object_id) => ({ type: "SetTapped", data: { object_id, tapped: true } }));
+    case "untap": return each((object_id) => ({ type: "SetTapped", data: { object_id, tapped: false } }));
+    case "addCounter":
+      return each((object_id) => ({ type: "ModifyCounters", data: { object_id, counter_type: "Plus1Plus1", delta: amount } }));
+    case "removeCounter":
+      return each((object_id) => ({ type: "ModifyCounters", data: { object_id, counter_type: "Plus1Plus1", delta: -amount } }));
+    case "discard": return each((object_id) => ({ type: "Discard", data: { object_id } }));
     case "exile": return put({ type: "Exile" });
     case "toHand": return put({ type: "Hand" });
     case "toGraveyard": return put({ type: "Graveyard" });
     case "toBattlefield": return put({ type: "Battlefield", data: { control: "Owner" } });
     case "toBattlefieldMine": return put({ type: "Battlefield", data: { control: "Actor" } });
+    case "toLibraryTop": return put({ type: "Library", data: { end: "Top" } });
+    case "toLibraryBottom": return put({ type: "Library", data: { end: "Bottom" } });
   }
 }
 
@@ -81,6 +100,16 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unresolvedFinish, setUnresolvedFinish] = useState<ManualResolutionRequest | null>(null);
+
+  // Esc puts down whatever is picked, like lifting your hand off the table.
+  useEffect(() => {
+    if (!operable) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") useManualPickStore.getState().clearSelection();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [operable]);
 
   const objects = gameState?.objects ?? {};
   const pickedObjects = picked.map((id) => objects[id]).filter((object): object is GameObject => Boolean(object));
@@ -193,6 +222,7 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
                     onClick={() => useManualPickStore.getState().pickObject(id)}
                     className={`block w-14 overflow-hidden rounded-md ring-2 ${picked.includes(id) ? "ring-fuchsia-300" : "ring-transparent hover:ring-white/40"}`}>
                     <CardImage cardName={objects[id]?.name ?? ""} size="small" className="w-full" />
+                    <span className="block truncate bg-slate-900 px-0.5 text-[9px] leading-tight text-slate-200">{objects[id]?.name}</span>
                   </button>
                 </li>
               ))}
@@ -219,6 +249,12 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
         ) : null}
 
         <div data-testid="manual-instructions" className="flex flex-col gap-1.5">
+          {(pickedPlayerState || pickedObjects.length > 0) && (
+            <button type="button" className="self-end text-[11px] text-slate-400 underline hover:text-slate-200"
+              onClick={() => useManualPickStore.getState().clearSelection()}>
+              {t("manualResolution.panel.clear")}
+            </button>
+          )}
           {pickedPlayerState ? (
             <>
               <p className="text-sm font-semibold">{playerName(pickedPlayerState.id)} <span className="text-slate-400">♥ {pickedPlayerState.life}</span></p>
@@ -227,6 +263,14 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
                 <button type="button" disabled={busy} className={button}
                   onClick={() => void submit([{ type: "LoseLife", data: { player_id: pickedPlayerState.id, amount } }])}>
                   {t("manualResolution.panel.loseLife")}
+                </button>
+                <button type="button" disabled={busy} className={button}
+                  onClick={() => void submit([{ type: "GainLife", data: { player_id: pickedPlayerState.id, amount } }])}>
+                  {t("manualResolution.panel.gainLife")}
+                </button>
+                <button type="button" disabled={busy} className={button}
+                  onClick={() => void submit([{ type: "DealDamage", data: { object_ids: [], player_ids: [pickedPlayerState.id], amount } }])}>
+                  {t("manualResolution.panel.damage", { count: amount })}
                 </button>
                 <button type="button" disabled={busy} className={button}
                   onClick={() => void submit([{ type: "DrawCards", data: { player_id: pickedPlayerState.id, count: amount } }])}>
@@ -243,12 +287,13 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
               <>
                 <p className="truncate text-sm font-semibold">{pickedObjects.map((object) => object.name).join(" / ")}</p>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {verbsFor(pickedZone, pickedObjects.some((object) => object.owner !== viewerId)).map((verb) => (
+                  {verbsFor(pickedZone, pickedObjects, viewerId).map((verb) => (
                     <button key={verb} type="button" disabled={busy} className={button}
-                      onClick={() => void submit(instructionsFor(verb, pickedObjects, noRegeneration))}>
-                      {t(`manualResolution.panel.${verb}`)}
+                      onClick={() => void submit(instructionsFor(verb, pickedObjects, noRegeneration, amount))}>
+                      {AMOUNT_VERBS.has(verb) ? t(`manualResolution.panel.${verb}`, { count: amount }) : t(`manualResolution.panel.${verb}`)}
                     </button>
                   ))}
+                  {pickedZone === "Battlefield" && stepper}
                   {pickedZone === "Battlefield" && (
                     <label className="flex items-center gap-1 text-xs text-slate-300">
                       <input type="checkbox" checked={noRegeneration} onChange={(event) => setNoRegeneration(event.target.checked)} />

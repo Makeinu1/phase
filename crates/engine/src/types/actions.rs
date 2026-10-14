@@ -1199,6 +1199,14 @@ pub enum CardDestination {
     Hand,
     Graveyard,
     Exile,
+    Library { end: LibraryEnd },
+}
+
+/// Which end of its owner's library a card is put on (CR 401.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LibraryEnd {
+    Top,
+    Bottom,
 }
 
 /// How a Sandbox correction takes part in a paused manual resolution.
@@ -1309,6 +1317,19 @@ pub enum DebugAction {
     /// CR 119.3: The player loses this much life through the real
     /// `Effect::LoseLife` resolver.
     LoseLife { player_id: PlayerId, amount: u32 },
+    /// CR 119.3: The player gains this much life through the real
+    /// `Effect::GainLife` resolver.
+    GainLife { player_id: PlayerId, amount: u32 },
+    /// CR 120.3: The paused spell deals this much damage to each of these
+    /// permanents and players through the real `Effect::DealDamage` resolver
+    /// (prevention, lifelink, wither/infect, and damage triggers apply).
+    /// Available only while a manual resolution is paused, because the spell
+    /// is the damage's source.
+    DealDamage {
+        object_ids: Vec<ObjectId>,
+        player_ids: Vec<PlayerId>,
+        amount: u32,
+    },
     /// Shuffle a player's library.
     ShuffleLibrary { player_id: PlayerId },
     /// Start a proliferate choice for a player using the real proliferate
@@ -1503,7 +1524,9 @@ impl DebugAction {
             | Self::GrantKeyword { object_id, .. }
             | Self::RemoveKeyword { object_id, .. }
             | Self::Discard { object_id } => push_related_object_id(ids, *object_id),
-            Self::Destroy { object_ids, .. } | Self::PutCards { object_ids, .. } => {
+            Self::Destroy { object_ids, .. }
+            | Self::PutCards { object_ids, .. }
+            | Self::DealDamage { object_ids, .. } => {
                 for object_id in object_ids {
                     push_related_object_id(ids, *object_id);
                 }
@@ -1525,6 +1548,7 @@ impl DebugAction {
             | Self::Reveal { .. }
             | Self::RevealHand { .. }
             | Self::LoseLife { .. }
+            | Self::GainLife { .. }
             | Self::ShuffleLibrary { .. }
             | Self::Proliferate { .. }
             | Self::SetLife { .. }
@@ -1561,8 +1585,6 @@ impl DebugAction {
             | Self::RevealHand { .. }
             | Self::ShuffleLibrary { .. }
             | Self::SetBasePowerToughness { .. }
-            | Self::ModifyCounters { .. }
-            | Self::SetTapped { .. }
             | Self::SetPrepared { .. }
             | Self::SetController { .. }
             | Self::SetSummoningSickness { .. }
@@ -1579,11 +1601,15 @@ impl DebugAction {
             | Self::Destroy { .. }
             | Self::PutCards { .. }
             | Self::LoseLife { .. }
+            | Self::GainLife { .. }
+            | Self::DealDamage { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::Sacrifice { .. }
             | Self::DrawCards { .. }
             | Self::Mill { .. } => Some(ManualCorrectionKind::ResolutionEvent),
             Self::CreateCard { .. }
             | Self::RemoveObject { .. }
-            | Self::Sacrifice { .. }
             | Self::Proliferate { .. }
             | Self::SetInfiniteMana { .. }
             | Self::SetPhase { .. }
@@ -1722,6 +1748,18 @@ impl DebugAction {
             }
             DebugAction::LoseLife { player_id, amount } => {
                 format!("LoseLife ({} loses {})", player_label(*player_id), amount)
+            }
+            DebugAction::GainLife { player_id, amount } => {
+                format!("GainLife ({} gains {})", player_label(*player_id), amount)
+            }
+            DebugAction::DealDamage {
+                object_ids,
+                player_ids,
+                amount,
+            } => {
+                let mut names: Vec<String> = object_ids.iter().map(|id| obj(*id)).collect();
+                names.extend(player_ids.iter().map(|id| player_label(*id)));
+                format!("DealDamage ({} to {})", amount, names.join(", "))
             }
             DebugAction::DrawCards { player_id, count } => {
                 format!("DrawCards ({} draws {})", player_label(*player_id), count)

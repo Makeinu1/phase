@@ -678,6 +678,30 @@ def scenario_go_for_the_throat(j: Journey) -> None:
     manual_journey(j, "Go for the Throat", corrections, verify, "Sol Ring", target_object="Grizzly Bears")
 
 
+def scenario_lightning_bolt(j: Journey) -> None:
+    """Real damage from the resolving spell to the player it targeted."""
+    j.ensure("Lightning Bolt", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Lightning Bolt", "Sol Ring"))
+    j.step("setup-cards", "hook(setup)", True, "Lightning Bolt in hand")
+    panel = j.strings["panel"]
+
+    def corrections(j: Journey):
+        preselected = j.wait_for("() => window.__phaseAcceptance.manualPick().selectedPlayerId === 1", 10)
+        j.step("target-preselected", "ui", preselected, "the opponent targeted at cast time is already picked")
+        j.ui_amount(3)
+        j.ui_panel_button(panel["damage"].replace("{{count}}", "3"))
+
+    def verify(j: Journey, before):
+        s = j.summary()
+        ok = "Lightning Bolt" in s["players"][0]["graveyard"] \
+            and s["players"][1]["life"] == before["players"][1]["life"] - 3 \
+            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
+        j.step("verify-after-finish", "state", ok, "3 damage to the targeted opponent")
+
+    manual_journey(j, "Lightning Bolt", corrections, verify, "Sol Ring")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
@@ -685,6 +709,7 @@ SCENARIOS = {
     "D-thoughtseize": ("Celes", scenario_thoughtseize),
     "E-wrath-of-god": ("Celes", scenario_wrath),
     "F-go-for-the-throat": ("Celes", scenario_go_for_the_throat),
+    "G-lightning-bolt": ("Celes", scenario_lightning_bolt),
 }
 
 
