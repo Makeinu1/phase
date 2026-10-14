@@ -402,12 +402,19 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         DebugAction::RemoveKeyword { keyword, .. } => {
             bound_serialized_json("Debug.RemoveKeyword.keyword", keyword)?;
         }
+        DebugAction::Destroy { object_ids, .. } => {
+            bound_serialized_json("Debug.Destroy.object_ids", object_ids)?;
+        }
+        DebugAction::PutCards { object_ids, .. } => {
+            bound_serialized_json("Debug.PutCards.object_ids", object_ids)?;
+        }
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
         | DebugAction::Sacrifice { .. }
         | DebugAction::Reveal { .. }
         | DebugAction::RevealHand { .. }
         | DebugAction::Discard { .. }
+        | DebugAction::LoseLife { .. }
         | DebugAction::DrawCards { .. }
         | DebugAction::Mill { .. }
         | DebugAction::ShuffleLibrary { .. }

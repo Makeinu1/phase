@@ -1272,28 +1272,31 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::Reveal { .. } => 6,
         DebugAction::RevealHand { .. } => 7,
         DebugAction::Discard { .. } => 8,
-        DebugAction::ShuffleLibrary { .. } => 9,
-        DebugAction::Proliferate { .. } => 10,
-        DebugAction::SetBasePowerToughness { .. } => 11,
-        DebugAction::ModifyCounters { .. } => 12,
-        DebugAction::SetTapped { .. } => 13,
-        DebugAction::SetPrepared { .. } => 14,
-        DebugAction::SetController { .. } => 15,
-        DebugAction::SetSummoningSickness { .. } => 16,
-        DebugAction::SetFaceState { .. } => 17,
-        DebugAction::Attach { .. } => 18,
-        DebugAction::Detach { .. } => 19,
-        DebugAction::GrantKeyword { .. } => 20,
-        DebugAction::RemoveKeyword { .. } => 21,
-        DebugAction::SetLife { .. } => 22,
-        DebugAction::ModifyPlayerCounters { .. } => 23,
-        DebugAction::ModifyEnergy { .. } => 24,
-        DebugAction::AddMana { .. } => 25,
-        DebugAction::SetInfiniteMana { .. } => 26,
-        DebugAction::SetPhase { .. } => 27,
-        DebugAction::RunStateBasedActions => 28,
-        DebugAction::CreateToken { .. } => 29,
-        DebugAction::CreateTokenCopy { .. } => 30,
+        DebugAction::Destroy { .. } => 9,
+        DebugAction::PutCards { .. } => 10,
+        DebugAction::LoseLife { .. } => 11,
+        DebugAction::ShuffleLibrary { .. } => 12,
+        DebugAction::Proliferate { .. } => 13,
+        DebugAction::SetBasePowerToughness { .. } => 14,
+        DebugAction::ModifyCounters { .. } => 15,
+        DebugAction::SetTapped { .. } => 16,
+        DebugAction::SetPrepared { .. } => 17,
+        DebugAction::SetController { .. } => 18,
+        DebugAction::SetSummoningSickness { .. } => 19,
+        DebugAction::SetFaceState { .. } => 20,
+        DebugAction::Attach { .. } => 21,
+        DebugAction::Detach { .. } => 22,
+        DebugAction::GrantKeyword { .. } => 23,
+        DebugAction::RemoveKeyword { .. } => 24,
+        DebugAction::SetLife { .. } => 25,
+        DebugAction::ModifyPlayerCounters { .. } => 26,
+        DebugAction::ModifyEnergy { .. } => 27,
+        DebugAction::AddMana { .. } => 28,
+        DebugAction::SetInfiniteMana { .. } => 29,
+        DebugAction::SetPhase { .. } => 30,
+        DebugAction::RunStateBasedActions => 31,
+        DebugAction::CreateToken { .. } => 32,
+        DebugAction::CreateTokenCopy { .. } => 33,
     }
 }
 
@@ -1409,6 +1412,45 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
             cmp_val(a0, b0)
+        }
+        DebugAction::Destroy {
+            object_ids: a0,
+            regeneration: a1,
+        } => {
+            let DebugAction::Destroy {
+                object_ids: b0,
+                regeneration: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::PutCards {
+            object_ids: a0,
+            destination: a1,
+        } => {
+            let DebugAction::PutCards {
+                object_ids: b0,
+                destination: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::LoseLife {
+            player_id: a0,
+            amount: a1,
+        } => {
+            let DebugAction::LoseLife {
+                player_id: b0,
+                amount: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
         }
         DebugAction::Discard { object_id: a0 } => {
             let DebugAction::Discard { object_id: b0 } = b else {

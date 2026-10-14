@@ -1,11 +1,14 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    ContinuousModification, Effect, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef,
+    ContinuousModification, ControllerRef, Effect, LibraryPosition, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::action_rejection::ActionRejection;
-use crate::types::actions::{DebugAction, DebugCardCreationKind, DebugTokenRequest, GameAction};
+use crate::types::actions::{
+    BattlefieldEntryControl, CardDestination, DebugAction, DebugCardCreationKind,
+    DebugTokenRequest, GameAction, RegenerationPermission,
+};
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -134,6 +137,26 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::DrawCards { player_id, count }
+            if paused_manual_resolution_source(state).is_some() =>
+        {
+            validate_player(state, player_id)?;
+            // CR 121.1: the player draws as one of the resolving spell's
+            // instructions; draw triggers wait for the resolution (CR 603.3).
+            perform_instruction(
+                state,
+                actor,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed {
+                        value: count as i32,
+                    },
+                    target: TargetFilter::Player,
+                },
+                vec![TargetRef::Player(player_id)],
+                events,
+            )?;
+        }
+
         DebugAction::DrawCards { player_id, count } => {
             validate_player(state, player_id)?;
             // CR 121.6b + CR 614.6 + CR 614.11 + CR 704.3: route through
@@ -159,6 +182,27 @@ pub fn apply_debug_action(
                 super::triggers::process_triggers(state, &draw_events);
                 super::sba::check_state_based_actions(state, events);
             }
+        }
+
+        DebugAction::Mill { player_id, count }
+            if paused_manual_resolution_source(state).is_some() =>
+        {
+            validate_player(state, player_id)?;
+            // CR 701.17a: a real mill as one of the resolving spell's
+            // instructions, so "put into a graveyard" abilities see it.
+            perform_instruction(
+                state,
+                actor,
+                Effect::Mill {
+                    count: QuantityExpr::Fixed {
+                        value: count as i32,
+                    },
+                    target: TargetFilter::Player,
+                    destination: Zone::Graveyard,
+                },
+                vec![TargetRef::Player(player_id)],
+                events,
+            )?;
         }
 
         DebugAction::Mill { player_id, count } => {
@@ -245,18 +289,7 @@ pub fn apply_debug_action(
                 events,
             ) {
                 super::effects::discard::DiscardOutcome::Complete => {
-                    if resolving_source.is_some() {
-                        // CR 603.3: abilities triggered while the spell is
-                        // still resolving wait until a player would next
-                        // receive priority, after the resolution finishes.
-                        super::triggers::collect_triggers_into_deferred(
-                            state,
-                            &events[event_start..],
-                        );
-                    } else {
-                        super::triggers::process_triggers(state, &events[event_start..]);
-                        super::sba::check_state_based_actions(state, events);
-                    }
+                    settle_instruction_triggers(state, resolving_source, event_start, events);
                 }
                 super::effects::discard::DiscardOutcome::NeedsReplacementChoice(player) => {
                     if resolving_source.is_some() {
@@ -272,6 +305,95 @@ pub fn apply_debug_action(
                         super::replacement::replacement_choice_waiting_for(player, state);
                 }
             }
+        }
+
+        DebugAction::Destroy {
+            object_ids,
+            regeneration,
+        } => {
+            for &object_id in &object_ids {
+                validate_object(state, object_id)?;
+                if state.objects[&object_id].zone != Zone::Battlefield {
+                    return Err(EngineError::InvalidAction(
+                        "Only permanents on the battlefield can be destroyed".into(),
+                    ));
+                }
+            }
+            perform_instruction(
+                state,
+                actor,
+                Effect::Destroy {
+                    target: TargetFilter::Any,
+                    cant_regenerate: regeneration == RegenerationPermission::Forbidden,
+                },
+                object_ids.into_iter().map(TargetRef::Object).collect(),
+                events,
+            )?;
+        }
+
+        DebugAction::PutCards {
+            object_ids,
+            destination,
+        } => {
+            for &object_id in &object_ids {
+                validate_object(state, object_id)?;
+                if state.objects[&object_id].zone == Zone::Stack {
+                    return Err(EngineError::InvalidAction(
+                        "Cards on the stack are not moved by this instruction".into(),
+                    ));
+                }
+            }
+            let (zone, enters_under) = match destination {
+                CardDestination::Battlefield { control } => (
+                    Zone::Battlefield,
+                    match control {
+                        BattlefieldEntryControl::Owner => None,
+                        // CR 110.2a: "under your control" names the player
+                        // performing the instruction.
+                        BattlefieldEntryControl::Actor => Some(ControllerRef::You),
+                    },
+                ),
+                CardDestination::Hand => (Zone::Hand, None),
+                CardDestination::Graveyard => (Zone::Graveyard, None),
+                CardDestination::Exile => (Zone::Exile, None),
+            };
+            perform_instruction(
+                state,
+                actor,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: zone,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                object_ids.into_iter().map(TargetRef::Object).collect(),
+                events,
+            )?;
+        }
+
+        DebugAction::LoseLife { player_id, amount } => {
+            validate_player(state, player_id)?;
+            perform_instruction(
+                state,
+                actor,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed {
+                        value: amount as i32,
+                    },
+                    target: Some(TargetFilter::Player),
+                },
+                vec![TargetRef::Player(player_id)],
+                events,
+            )?;
         }
 
         DebugAction::ShuffleLibrary { player_id } => {
@@ -1424,6 +1546,63 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
         )));
     }
     Ok(())
+}
+
+/// Runs one Sandbox instruction through the real effect resolver. Inside a
+/// paused manual resolution the instruction is one of the resolving source's
+/// own (its source is the paused spell, so "exiled with", "caused by an
+/// effect", and similar facts attach to it); outside one it behaves like any
+/// other Sandbox action.
+fn perform_instruction(
+    state: &mut GameState,
+    actor: PlayerId,
+    effect: Effect,
+    targets: Vec<TargetRef>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let resolving_source = paused_manual_resolution_source(state);
+    let ability = ResolvedAbility::new(
+        effect,
+        targets,
+        resolving_source.unwrap_or(ObjectId(0)),
+        actor,
+    );
+    let waiting_before = state.waiting_for.clone();
+    let event_start = events.len();
+    super::effects::resolve_ability_chain(state, &ability, events, 0)
+        .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+    if state.waiting_for != waiting_before {
+        if resolving_source.is_some() {
+            // A further choice would open a second resolution inside the
+            // human-performed one; the boundary rolls the instruction back.
+            return Err(EngineError::InvalidAction(
+                "This instruction needs a further choice; agree on the result and perform it in smaller steps"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    }
+    settle_instruction_triggers(state, resolving_source, event_start, events);
+    Ok(())
+}
+
+/// CR 603.3: abilities triggered while a spell is still resolving wait until a
+/// player would next receive priority, after the resolution finishes (and
+/// CR 704.3: state-based actions are not checked mid-resolution). Outside a
+/// paused manual resolution the Sandbox settles them immediately.
+fn settle_instruction_triggers(
+    state: &mut GameState,
+    resolving_source: Option<ObjectId>,
+    event_start: usize,
+    events: &mut Vec<GameEvent>,
+) {
+    if resolving_source.is_some() {
+        super::triggers::collect_triggers_into_deferred(state, &events[event_start..]);
+    } else {
+        let new_events = events[event_start..].to_vec();
+        super::triggers::process_triggers(state, &new_events);
+        super::sba::check_state_based_actions(state, events);
+    }
 }
 
 /// The object whose resolution the human is currently performing, if a

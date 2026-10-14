@@ -1174,6 +1174,33 @@ pub enum DebugCardCreationKind {
     Token,
 }
 
+/// Whether a destroyed permanent may be regenerated ("They can't be
+/// regenerated.").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RegenerationPermission {
+    Allowed,
+    Forbidden,
+}
+
+/// Who controls a card a Sandbox instruction puts onto the battlefield.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BattlefieldEntryControl {
+    /// CR 110.2: the card's owner.
+    Owner,
+    /// "under your control": the player performing the instruction.
+    Actor,
+}
+
+/// The zone a Sandbox instruction puts cards into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CardDestination {
+    Battlefield { control: BattlefieldEntryControl },
+    Hand,
+    Graveyard,
+    Exile,
+}
+
 /// How a Sandbox correction takes part in a paused manual resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualCorrectionKind {
@@ -1265,6 +1292,23 @@ pub enum DebugAction {
     /// CR 701.9a: The card's owner discards it from hand through the single
     /// discard authority, so replacement effects and discard triggers apply.
     Discard { object_id: ObjectId },
+    /// CR 701.8a: Destroy these permanents through the real `Effect::Destroy`
+    /// resolver, so indestructible, regeneration, and replacement effects
+    /// apply. A multi-permanent destroy is one event batch.
+    Destroy {
+        object_ids: Vec<ObjectId>,
+        regeneration: RegenerationPermission,
+    },
+    /// CR 400.6: Put these cards into a zone through the real
+    /// `Effect::ChangeZone` resolver, so replacement effects, entering
+    /// abilities, and zone-change triggers apply.
+    PutCards {
+        object_ids: Vec<ObjectId>,
+        destination: CardDestination,
+    },
+    /// CR 119.3: The player loses this much life through the real
+    /// `Effect::LoseLife` resolver.
+    LoseLife { player_id: PlayerId, amount: u32 },
     /// Shuffle a player's library.
     ShuffleLibrary { player_id: PlayerId },
     /// Start a proliferate choice for a player using the real proliferate
@@ -1459,6 +1503,11 @@ impl DebugAction {
             | Self::GrantKeyword { object_id, .. }
             | Self::RemoveKeyword { object_id, .. }
             | Self::Discard { object_id } => push_related_object_id(ids, *object_id),
+            Self::Destroy { object_ids, .. } | Self::PutCards { object_ids, .. } => {
+                for object_id in object_ids {
+                    push_related_object_id(ids, *object_id);
+                }
+            }
             Self::CreateCard { attach_to, .. } => {
                 if let Some(AttachTarget::Object(object_id)) = attach_to {
                     push_related_object_id(ids, *object_id);
@@ -1475,6 +1524,7 @@ impl DebugAction {
             | Self::Mill { .. }
             | Self::Reveal { .. }
             | Self::RevealHand { .. }
+            | Self::LoseLife { .. }
             | Self::ShuffleLibrary { .. }
             | Self::Proliferate { .. }
             | Self::SetLife { .. }
@@ -1507,8 +1557,7 @@ impl DebugAction {
     pub fn manual_correction_kind(&self) -> Option<ManualCorrectionKind> {
         match self {
             Self::MoveToZone { simulate, .. } => (!simulate).then_some(ManualCorrectionKind::Inert),
-            Self::Mill { .. }
-            | Self::Reveal { .. }
+            Self::Reveal { .. }
             | Self::RevealHand { .. }
             | Self::ShuffleLibrary { .. }
             | Self::SetBasePowerToughness { .. }
@@ -1526,11 +1575,15 @@ impl DebugAction {
             | Self::ModifyPlayerCounters { .. }
             | Self::ModifyEnergy { .. }
             | Self::AddMana { .. } => Some(ManualCorrectionKind::Inert),
-            Self::Discard { .. } => Some(ManualCorrectionKind::ResolutionEvent),
+            Self::Discard { .. }
+            | Self::Destroy { .. }
+            | Self::PutCards { .. }
+            | Self::LoseLife { .. }
+            | Self::DrawCards { .. }
+            | Self::Mill { .. } => Some(ManualCorrectionKind::ResolutionEvent),
             Self::CreateCard { .. }
             | Self::RemoveObject { .. }
             | Self::Sacrifice { .. }
-            | Self::DrawCards { .. }
             | Self::Proliferate { .. }
             | Self::SetInfiniteMana { .. }
             | Self::SetPhase { .. }
@@ -1648,6 +1701,27 @@ impl DebugAction {
             }
             DebugAction::Discard { object_id } => {
                 format!("Discard ({})", obj(*object_id))
+            }
+            DebugAction::Destroy {
+                object_ids,
+                regeneration,
+            } => {
+                let names: Vec<String> = object_ids.iter().map(|id| obj(*id)).collect();
+                format!(
+                    "Destroy ({}; regeneration {:?})",
+                    names.join(", "),
+                    regeneration
+                )
+            }
+            DebugAction::PutCards {
+                object_ids,
+                destination,
+            } => {
+                let names: Vec<String> = object_ids.iter().map(|id| obj(*id)).collect();
+                format!("PutCards ({} -> {:?})", names.join(", "), destination)
+            }
+            DebugAction::LoseLife { player_id, amount } => {
+                format!("LoseLife ({} loses {})", player_label(*player_id), amount)
             }
             DebugAction::DrawCards { player_id, count } => {
                 format!("DrawCards ({} draws {})", player_label(*player_id), count)

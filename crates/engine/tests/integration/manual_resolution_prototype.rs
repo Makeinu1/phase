@@ -2867,6 +2867,142 @@ mod enabled_baseline_tests {
         assert_eq!(runner.state().players[p0.0 as usize].life, life_before + 2);
     }
 
+    /// Board instructions performed by hand run the engine's real effects:
+    /// destroy respects indestructible, a returned card can enter under the
+    /// actor's control, an entering creature's own ability triggers, life loss
+    /// and draws are real, and every triggered ability waits until the
+    /// resolution is finished (CR 603.3).
+    #[test]
+    fn paused_actor_performs_real_board_instructions() {
+        use engine::types::actions::{
+            BattlefieldEntryControl, CardDestination, RegenerationPermission,
+        };
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(p0, &["Next Draw", "Second Draw"]);
+        let bear = scenario.add_creature(p1, "Opposing Bear", 2, 2).id();
+        let wall = scenario
+            .add_creature(p1, "Stubborn Wall", 0, 4)
+            .with_keyword(Keyword::Indestructible)
+            .id();
+        let buried = scenario
+            .add_creature_to_graveyard(p1, "Buried Giant", 5, 5)
+            .id();
+        let entering = scenario
+            .add_creature_to_hand_from_oracle(
+                p0,
+                "Hand Elf",
+                1,
+                1,
+                "When this creature enters, you gain 3 life.",
+            )
+            .id();
+        scenario.add_enchantment_from_oracle(
+            p0,
+            "Death Watcher",
+            "Whenever a creature dies, you gain 1 life.",
+        );
+        let designated = scenario
+            .add_spell_to_hand_from_oracle(p0, "Manual Board Spell", false, "You gain 3 life.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+        let stack_entry_id;
+        {
+            let mut cast = runner.cast(designated).commit();
+            stack_entry_id = cast.state().stack.back().expect("cast is on stack").id;
+            cast.act(GameAction::DesignateManualResolution { stack_entry_id })
+                .expect("controller designates the spell");
+        }
+        runner.act(GameAction::PassPriority).expect("caster passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent pass enters the manual wait");
+        let paused = runner.state().waiting_for.clone();
+        assert!(matches!(paused, WaitingFor::ManualResolution { .. }));
+        let life =
+            |runner: &GameRunner, player: PlayerId| runner.state().players[player.0 as usize].life;
+        let (p0_life, p1_life) = (life(&runner, p0), life(&runner, p1));
+        let p0_hand = runner.state().players[p0.0 as usize].hand.len();
+
+        runner
+            .act(GameAction::Debug(DebugAction::Destroy {
+                object_ids: vec![bear, wall],
+                regeneration: RegenerationPermission::Forbidden,
+            }))
+            .expect("the actor destroys the chosen creatures");
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().objects[&wall].zone,
+            Zone::Battlefield,
+            "indestructible is respected"
+        );
+
+        runner
+            .act(GameAction::Debug(DebugAction::PutCards {
+                object_ids: vec![buried],
+                destination: CardDestination::Battlefield {
+                    control: BattlefieldEntryControl::Actor,
+                },
+            }))
+            .expect("the opponent's graveyard creature returns under the actor's control");
+        assert_eq!(runner.state().objects[&buried].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&buried].controller, p0);
+
+        runner
+            .act(GameAction::Debug(DebugAction::PutCards {
+                object_ids: vec![entering],
+                destination: CardDestination::Battlefield {
+                    control: BattlefieldEntryControl::Owner,
+                },
+            }))
+            .expect("a creature card from hand is put onto the battlefield");
+        assert_eq!(runner.state().objects[&entering].zone, Zone::Battlefield);
+
+        runner
+            .act(GameAction::Debug(DebugAction::LoseLife {
+                player_id: p1,
+                amount: 3,
+            }))
+            .expect("the opponent loses life");
+        runner
+            .act(GameAction::Debug(DebugAction::DrawCards {
+                player_id: p0,
+                count: 1,
+            }))
+            .expect("the actor draws a card");
+
+        assert_eq!(runner.state().waiting_for, paused);
+        assert!(
+            runner.state().stack.is_empty(),
+            "triggers wait for the resolution"
+        );
+        assert_eq!(life(&runner, p0), p0_life, "no trigger has resolved yet");
+        assert_eq!(life(&runner, p1), p1_life - 3);
+        // The drawn card replaces the cast spell and the creature put onto the battlefield.
+        assert_eq!(runner.state().players[p0.0 as usize].hand.len(), p0_hand);
+
+        runner
+            .act(GameAction::FinishManualResolution { stack_entry_id })
+            .expect("Finish closes the resolution");
+        assert_eq!(
+            runner.state().stack.len(),
+            2,
+            "the dies trigger and the entering creature's trigger go on the stack afterwards"
+        );
+        for _ in 0..8 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass");
+        }
+        assert!(runner.state().stack.is_empty());
+        assert_eq!(life(&runner, p0), p0_life + 1 + 3);
+    }
+
     #[test]
     fn paused_resolution_refuses_unsafe_corrections_atomically() {
         let p0 = PlayerId(0);
