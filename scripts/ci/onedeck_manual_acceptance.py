@@ -93,8 +93,8 @@ class Journey:
 
     def shot(self, label: str) -> str:
         trace(f"screenshot {label}")
-        path = self.out / "screens" / f"{self.scenario}-{len(self.steps):02d}-{label}.png"
-        self.page.screenshot(path=str(path), full_page=False)
+        path = self.out / "screens" / f"{self.scenario}-{len(self.steps):02d}-{label}.jpg"
+        self.page.screenshot(path=str(path), full_page=False, type="jpeg", quality=70)
         return path.name
 
     def step(self, label: str, via: str, ok: bool, detail=None):

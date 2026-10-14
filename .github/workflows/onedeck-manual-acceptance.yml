@@ -154,7 +154,9 @@ jobs:
           cd "$RUNNER_TEMP/pub"
           git switch --orphan evidence-tmp
           mkdir -p runs/${GITHUB_RUN_ID}
-          cp "$RUNNER_TEMP/evidence.tgz.enc" "$RUNNER_TEMP/k.enc" runs/${GITHUB_RUN_ID}/
+          # GitHub refuses files over 100 MB; publish the ciphertext in parts.
+          split -b 45m -d "$RUNNER_TEMP/evidence.tgz.enc" runs/${GITHUB_RUN_ID}/evidence.tgz.enc.part
+          cp "$RUNNER_TEMP/k.enc" runs/${GITHUB_RUN_ID}/
           echo "source_sha=${GITHUB_SHA}" > runs/${GITHUB_RUN_ID}/SOURCE
           git config user.name "github-actions[bot]"
           git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
