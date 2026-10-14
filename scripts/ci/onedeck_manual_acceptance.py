@@ -312,7 +312,7 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
           .map((b) => { const r = b.getBoundingClientRect(); const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
             return { disabled: b.disabled, top: top === b || b.contains(top) ? 'self' : (top?.outerHTML ?? '').slice(0, 200) }; })""", j.strings["finish"])
         j.step("finish-button-state", "diagnostic", False, state)
-    finished = j.wait_for("() => window.__phaseAcceptance.state()?.derived?.manual_resolution == null", 15)
+    finished = j.wait_for("() => (m => m == null || m.phase === 'closed')(window.__phaseAcceptance.state()?.derived?.manual_resolution)", 15)
     notes = j.page.evaluate("() => [...document.querySelectorAll('[role=status],[role=alert]')].map((e) => e.innerText.trim()).filter(Boolean)")
     j.step("finish", "ui", ok and finished, {"button": j.strings["finish"], "panelNotes": notes})
     verify_after_finish(j, before)

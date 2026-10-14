@@ -1131,7 +1131,8 @@ function GamePageContent({
   const manualUndo = useManualUndoStore((s) => s.checkpoint);
   const [manualUndoBusy, setManualUndoBusy] = useState(false);
   const [manualUndoMessage, setManualUndoMessage] = useState<string | null>(null);
-  const manualEpisodeActive = manualView !== null;
+  // The engine keeps reporting the source after it resolves, as "closed".
+  const manualEpisodeActive = manualView !== null && manualView.phase !== "closed";
   useEffect(() => {
     useManualUndoStore.getState().observeEpisode(manualEpisodeActive);
   }, [manualEpisodeActive, manualUndo]);
