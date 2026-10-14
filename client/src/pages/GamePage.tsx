@@ -1801,7 +1801,9 @@ function GamePageContent({
             </div>
           )}
           {(!manualView || manualView.phase === "closed") && manualUndo?.episodeEnded && manualUndoControl ? (
-            <div className="absolute bottom-24 right-2 z-50 max-w-[min(30rem,calc(100vw-1rem))] rounded-lg bg-slate-950/90 p-2 text-slate-100">
+            // Middle-left stays clear of the stack panel and the prompts a
+            // follow-up trigger raises, so the Undo offer is always reachable.
+            <div className="absolute left-2 top-1/2 z-[70] max-w-[min(22rem,calc(100vw-1rem))] -translate-y-1/2 rounded-lg bg-slate-950/90 p-2 text-slate-100 shadow-xl">
               <p role="status" className="text-xs text-emerald-200">{t("manualResolution.finished")}</p>
               {manualUndoControl}
             </div>
