@@ -1082,6 +1082,7 @@ function GamePageContent({
     try {
       const publication = await dispatchInteraction(submission, getPlayerId(), source);
       const status = publication?.receipt?.status;
+      if (import.meta.env.DEV) console.warn("[manual-cast] receipt", JSON.stringify(publication?.receipt ?? null));
       const next = status === "completed" || status === "not-applied" ? null
         : { ...attempt, status: status === "pending" ? "pending" as const : "indeterminate" as const };
       manualCastAttemptRef.current = next;

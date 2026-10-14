@@ -352,13 +352,17 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       type: "localContinuation", receipt: { attempt, status: "indeterminate", result: null, rejection: null }, current: null, appliedResult: null, engineSnapshot: null,
     });
     const submit = async (attempt: LocalOriginalAttempt): Promise<LocalContinuationPublication> => {
-      if (!currentOwner()) return unknown(attempt);
+      if (!currentOwner()) {
+        if (import.meta.env.DEV) console.warn("[local-continuation] owner is not current");
+        return unknown(attempt);
+      }
       this.localUnresolved = attempt;
       try {
         let registered: LocalContinuationResult | null = null;
         try {
           registered = await owner.engine.submitLocalContinuation(0, { type: "localContinuation", operation: "register", attempt });
-        } catch {
+        } catch (error) {
+          if (import.meta.env.DEV) console.warn("[local-continuation] register failed", error);
           // Registration may have succeeded before its reply was lost. This
           // initial delivery still sends only the same original apply; native
           // custody decides whether it was registered or certifies absence.
@@ -367,7 +371,10 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         if (!currentOwner()) return unknown(attempt);
         const reply = await owner.engine.submitLocalContinuation(0, { type: "localContinuation", operation: "apply", attempt });
         return publish(reply, true, false, attempt);
-      } catch { return unknown(attempt); }
+      } catch (error) {
+        if (import.meta.env.DEV) console.warn("[local-continuation] apply failed", error);
+        return unknown(attempt);
+      }
     };
     const lookup = async (attempt: LocalOriginalAttempt): Promise<LocalContinuationPublication> => {
       if (!currentOwner()) return unknown(attempt);
