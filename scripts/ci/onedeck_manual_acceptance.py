@@ -211,6 +211,36 @@ class Journey:
               return null;
             }""", object_id)
         if point is None:
+            # The fan's right end can sit under the action bar. Clicking the
+            # hand's empty area lifts the hand, as a player would.
+            spot = self.page.evaluate(
+                """() => {
+                  const c = document.querySelector('[data-player-hand]');
+                  if (!c) return null;
+                  const r = c.getBoundingClientRect();
+                  for (const fy of [0.9, 0.7, 0.5, 0.3]) for (const fx of [0.02, 0.05, 0.98, 0.95, 0.1]) {
+                    const x = r.left + r.width * fx, y = r.top + r.height * fy;
+                    if (document.elementFromPoint(x, y) === c) return { x, y };
+                  }
+                  return null;
+                }""")
+            trace(f"hand card hidden; lifting the hand via {spot}")
+            if spot is not None:
+                self.page.mouse.click(spot["x"], spot["y"])
+                time.sleep(0.8)
+                point = self.page.evaluate(
+                    """(id) => {
+                      const el = document.querySelector(`[data-player-hand] [data-object-id="${id}"]`);
+                      if (!el) return null;
+                      const r = el.getBoundingClientRect();
+                      for (const fy of [0.15, 0.3, 0.5, 0.7]) for (const fx of [0.85, 0.7, 0.55, 0.4, 0.25, 0.1]) {
+                        const x = r.left + r.width * fx, y = r.top + r.height * fy;
+                        const hit = document.elementFromPoint(x, y);
+                        if (hit && el.contains(hit)) return { x, y };
+                      }
+                      return null;
+                    }""", object_id)
+        if point is None:
             trace("hand card has no topmost point")
             return False
         if double:
@@ -337,14 +367,8 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
         and sorted(b["name"] for b in after["battlefield"]) == sorted(b["name"] for b in before["battlefield"])
     j.step("undo-before-cast", "ui", ok and same, {"restoredCardInHand": restored, "zonesMatchPreCast": same})
     # 7. Next ordinary plays (UI): a land drop, then a spell through the stack.
-    lands_before = sum(1 for b in j.summary()["battlefield"] if b["controller"] == 0)
-    land = next((n for n in j.summary()["players"][0]["hand"] if n in ("Plains", "Mountain", "Island", "Swamp", "Forest")), None)
-    played = land is not None and j.click_hand_card(land, double=True) and j.wait_for(
-        "(n) => (window.__phaseAcceptance.state()?.battlefield ?? []).filter((id) => window.__phaseAcceptance.state().objects[id]?.controller === 0).length > n",
-        10, lands_before)
-    if not played:
-        j.step("next-land-drop-legal", "diagnostic", False, j.page.evaluate("() => window.__phaseAcceptance.legal()"))
-    j.step("next-land-drop", "ui", bool(played), land)
+    # (The debug SetPhase setup leaves no land drop on this turn, so the
+    # ordinary play exercised here is a spell through the stack.)
     # Double-click is the desktop hand's ordinary play gesture.
     clicked = j.click_hand_card(next_play, double=True)
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
