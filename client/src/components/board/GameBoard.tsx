@@ -29,6 +29,7 @@ import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
 interface GameBoardProps {
   manualPlayerAreaSelection?: ManualPlayerAreaSelection | null;
+  manualPlayerAreaChoices?: readonly ManualPlayerAreaSelection[];
   effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
@@ -43,6 +44,7 @@ interface GameBoardProps {
 
 export const GameBoard = memo(function GameBoard({
   manualPlayerAreaSelection = null,
+  manualPlayerAreaChoices,
   effectiveMultiplayerBoardLayout,
   oppHud,
   playerHud,
@@ -240,7 +242,7 @@ export const GameBoard = memo(function GameBoard({
   const is1v1 = isOneOnOne(gameState);
 
   return (
-    <BoardInteractionContext.Provider value={{ ...boardInteractionState, manualPlayerAreaSelection }}>
+    <BoardInteractionContext.Provider value={{ ...boardInteractionState, manualPlayerAreaSelection, manualPlayerAreaChoices }}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <PlanechasePanel />
         <ArchenemyPanel />

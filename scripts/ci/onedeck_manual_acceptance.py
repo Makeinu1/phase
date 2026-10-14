@@ -381,7 +381,9 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     same = restored and after["players"][0]["graveyard"] == before["players"][0]["graveyard"] \
         and after["players"][1]["graveyard"] == before["players"][1]["graveyard"] \
         and after["players"][0]["library"] == before["players"][0]["library"] \
-        and sorted(b["name"] for b in after["battlefield"]) == sorted(b["name"] for b in before["battlefield"])
+        and sorted(b["name"] for b in after["battlefield"]) == sorted(b["name"] for b in before["battlefield"]) \
+        and [p["life"] for p in after["players"]] == [p["life"] for p in before["players"]] \
+        and len(after["players"][1]["hand"]) == len(before["players"][1]["hand"])
     j.step("undo-before-cast", "ui", ok and same, {"restoredCardInHand": restored, "zonesMatchPreCast": same})
     # 7. Next ordinary plays (UI): a land drop, then a spell through the stack.
     # (The debug SetPhase setup leaves no land drop on this turn, so the
@@ -486,10 +488,63 @@ def scenario_fact_or_fiction(j: Journey) -> None:
     manual_journey(j, "Fact or Fiction", corrections, verify, "Sol Ring")
 
 
+def scenario_thoughtseize(j: Journey) -> None:
+    """Hand attack performed entirely with the board tools (no hook)."""
+    j.ensure("Thoughtseize", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.ensure("Llanowar Elves", 1, "Hand")
+    j.trim_hand(7, ("Thoughtseize", "Sol Ring"))
+    j.step("setup-cards", "hook(setup)", True, "Thoughtseize + Sol Ring to hand, a nonland card in the opponent's hand")
+    tools = j.strings["tools"]
+
+    def corrections(j: Journey):
+        panel = j.page.locator('[data-testid="manual-board-tools"]')
+        # 1. Target the opponent on the board.
+        opponent_area = j.page.locator('[data-testid="player-area-1"] button[aria-pressed]')
+        opponent_area.first.click(timeout=10000)
+        j.step("target-opponent", "ui", j.wait_for(
+            "() => document.querySelector('[data-testid=\"player-area-1\"] button[aria-pressed=\"true\"]') != null", 10),
+            "opponent selected on the board")
+        # 2. Reveal their hand.
+        panel.get_by_role("button", name=tools["revealHand"]).click(timeout=10000)
+        card = panel.get_by_role("button", name="Llanowar Elves", exact=True)
+        try:
+            card.wait_for(state="visible", timeout=15000)
+            shown = True
+        except Exception:
+            shown = False
+        j.step("reveal-hand", "ui", shown, "the opponent's hand is revealed in the tools")
+        # 3-4. Choose the nonland card and discard it.
+        card.click()
+        panel.get_by_role("button", name=tools["discard"], exact=True).click(timeout=10000)
+        discarded = j.wait_for(
+            "() => { const s = window.__phaseAcceptance.state(); return s.players[1].graveyard.some((id) => s.objects[id]?.name === 'Llanowar Elves'); }", 15)
+        j.step("discard-chosen-card", "ui", discarded, "Llanowar Elves discarded from the revealed hand")
+        # 5. "You lose 2 life": select yourself, then the life-loss operation.
+        life_before = j.summary()["players"][0]["life"]
+        j.page.locator('[data-testid="player-area-0"] button[aria-pressed]').first.click(timeout=10000)
+        j.page.get_by_role("spinbutton", name=j.strings["amount"]).fill("2")
+        j.click_text("^" + re.escape(j.strings["apply"]) + "$")
+        lost = j.wait_for("(n) => window.__phaseAcceptance.state().players[0].life === n - 2", 15, life_before)
+        j.step("lose-two-life", "ui", lost, f"{life_before} -> {life_before - 2}")
+
+    def verify(j: Journey, before):
+        s = j.summary()
+        ok = "Thoughtseize" in s["players"][0]["graveyard"] \
+            and "Llanowar Elves" in s["players"][1]["graveyard"] \
+            and s["players"][0]["life"] == before["players"][0]["life"] - 2 \
+            and len(s["players"][1]["hand"]) == len(before["players"][1]["hand"]) - 1 \
+            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
+        j.step("verify-after-finish", "state", ok, "opponent discarded the chosen card, caster lost 2 life")
+
+    manual_journey(j, "Thoughtseize", corrections, verify, "Sol Ring")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
     "C-fact-or-fiction": ("Celes", scenario_fact_or_fiction),
+    "D-thoughtseize": ("Celes", scenario_thoughtseize),
 }
 
 

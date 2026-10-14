@@ -210,11 +210,11 @@ describe("ManualResolutionSandbox", () => {
     const user = userEvent.setup();
     act(() => useGameStore.setState({ gameState: buildGameState() }));
     render(<TestHarness realPlayerAreas canFinish />);
-    const selectArea = screen.getByRole("button", { name: "Select Ari for life loss" });
+    const selectArea = screen.getByRole("button", { name: "Select Ari" });
     expect(screen.getByTestId("player-area-1").querySelector("button[aria-pressed]")).toBeNull();
     selectArea.focus();
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("button", { name: "Ari selected for life loss" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Ari selected" })).toHaveAttribute("aria-pressed", "true");
     await user.type(screen.getByRole("spinbutton", { name: "Amount" }), "2");
     expect(screen.getByText("Ari will lose 2 life.")).toBeInTheDocument();
     await user.click(finishButton());

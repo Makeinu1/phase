@@ -169,7 +169,7 @@ export function PlayerArea({
   splitOverview = false,
 }: PlayerAreaProps) {
   const { t } = useTranslation("game");
-  const { manualPlayerAreaSelection } = useBoardInteractionState();
+  const { manualPlayerAreaSelection, manualPlayerAreaChoices } = useBoardInteractionState();
   const gameState = useGameStore((s) => s.gameState);
   const isCompactHeight = useIsCompactHeight();
   // Lands↔support split (lands' share of the middle row). One global ratio,
@@ -225,8 +225,9 @@ export function PlayerArea({
   // boundary markers so the editor grabs a single, predictable divider — the
   // ratio it sets is global, so every area reflows in step.
   const isOwnArea = mode === "full";
-  const manualSelection = isOwnArea && manualPlayerAreaSelection?.playerId === playerId
-    ? manualPlayerAreaSelection : null;
+  const manualSelection = (isOwnArea && manualPlayerAreaSelection?.playerId === playerId
+    ? manualPlayerAreaSelection : null)
+    ?? manualPlayerAreaChoices?.find((choice) => choice.playerId === playerId) ?? null;
   const partitioned = battlefieldView;
 
   const creatures = creatureOverride ?? partitioned?.creatures ?? [];

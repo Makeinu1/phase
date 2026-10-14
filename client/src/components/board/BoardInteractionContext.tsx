@@ -11,6 +11,9 @@ export interface ManualPlayerAreaSelection {
 interface BoardInteractionState {
   /** Display selection only; it submits no game action. */
   manualPlayerAreaSelection?: ManualPlayerAreaSelection | null;
+  /** Other players' areas the manual-resolution actor may pick as the target
+   *  of their board tools. Display selection only. */
+  manualPlayerAreaChoices?: readonly ManualPlayerAreaSelection[];
   activatableObjectIds: Set<number>;
   /** Attackers this defender's blockers may legally block: the union of the
    *  current `DeclareBlockers` prompt's `valid_block_targets` values

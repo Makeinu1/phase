@@ -3023,6 +3023,8 @@ export type DebugAction =
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
   | { type: "Reveal"; data: { player_id: PlayerId; count: number } }
+  | { type: "RevealHand"; data: { player_id: PlayerId } }
+  | { type: "Discard"; data: { object_id: ObjectId } }
   | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
   | { type: "Proliferate"; data: { player_id: PlayerId } }
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }

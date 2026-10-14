@@ -62,6 +62,7 @@ import { AttackRequirementBadges } from "../components/combat/AttackRequirementB
 import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { ManualResolutionSandbox, type ManualResolutionSandboxTarget } from "../components/sandbox/ManualResolutionSandbox.tsx";
+import { ManualBoardTools, type ManualBoardToolsPlayer } from "../components/sandbox/ManualBoardTools.tsx";
 import { useManualUndoStore } from "../stores/manualUndoStore.ts";
 import { useEngineCardData } from "../hooks/useEngineCardData.ts";
 import { CardImage } from "../components/card/CardImage.tsx";
@@ -1189,6 +1190,11 @@ function GamePageContent({
       minimum: lastManualBinding.current.minimum, maximum: lastManualBinding.current.maximum,
     } : null;
   const manualOwnedView = manualView?.source.actor === playerId && perspectivePlayerId === playerId;
+  const manualToolsOpen = manualOwnedView && manualView?.phase === "open";
+  const manualPlayers: ManualBoardToolsPlayer[] = (gameState?.players ?? []).map((player) => ({
+    id: player.id, name: getPlayerDisplayName(player.id),
+  }));
+  const focusManualPlayer = (player: ManualBoardToolsPlayer) => setManualTarget({ playerId: player.id, name: player.name });
   const manualStackEntryId = manualView?.source.stackEntryId;
   const manualSourceObjectId = manualView?.source.sourceId;
   const localAdapterGeneration = localContext?.adapterGeneration;
@@ -1750,13 +1756,22 @@ function GamePageContent({
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
           <GameBoard
-            manualPlayerAreaSelection={manualOwnedView && manualView && manualPort ? {
+            manualPlayerAreaSelection={manualToolsOpen && manualPort ? {
               playerId,
               playerName: getPlayerDisplayName(playerId),
               selected: manualTarget?.playerId === playerId,
-              onSelect: () => { if (manualView.phase === "open") setManualTarget({ playerId, name: getPlayerDisplayName(playerId) }); },
+              onSelect: () => setManualTarget({ playerId, name: getPlayerDisplayName(playerId) }),
               returnFocusRef: manualReturnFocusRef,
             } : null}
+            manualPlayerAreaChoices={manualToolsOpen && manualPort ? manualPlayers
+              .filter((player) => player.id !== playerId)
+              .map((player) => ({
+                playerId: player.id,
+                playerName: player.name,
+                selected: manualTarget?.playerId === player.id,
+                onSelect: () => focusManualPlayer(player),
+                returnFocusRef: manualReturnFocusRef,
+              })) : undefined}
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
@@ -1773,7 +1788,7 @@ function GamePageContent({
                   sourceObjectId: manualView.source.sourceId as ObjectId, cardName: manualView.source.name,
                   oracleText: manualCard?.oracle_text ?? "" }}
                 viewerPlayerId={manualOwnedView ? playerId : null}
-                selectedTarget={manualTarget}
+                selectedTarget={manualTarget?.playerId === playerId ? manualTarget : null}
                 onSelectedTargetChange={setManualTarget}
                 amountText={manualAmount}
                 onAmountTextChange={setManualAmount}
@@ -1791,8 +1806,10 @@ function GamePageContent({
                 <button type="button" onClick={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}>{t("manualResolution.readSource")}</button>
                 <p>{t(manualView.phase === "armed" ? "manualResolution.armed" : "manualResolution.displayOnly")}</p>
               </section>}
-              {manualView.phase === "open" && manualOwnedView
-                ? <p className="mt-2 rounded-md bg-slate-950/90 p-2 text-xs text-slate-200">{t("manualResolution.sandboxHint")}</p> : null}
+              {manualToolsOpen ? (
+                <ManualBoardTools viewerId={playerId} players={manualPlayers}
+                  focusedPlayerId={manualTarget?.playerId ?? null} onFocusPlayer={focusManualPlayer} />
+              ) : null}
               {manualUndoControl}
             </div>
           )}
