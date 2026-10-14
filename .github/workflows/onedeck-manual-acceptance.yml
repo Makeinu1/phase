@@ -110,7 +110,7 @@ jobs:
         working-directory: client
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec vitest run --coverage.enabled=false src/stores/__tests__/manualUndoStore.test.ts src/i18n/__tests__/localeParity.test.ts src/components/sandbox
+          pnpm exec vitest run --coverage.enabled=false src/stores/__tests__/manualUndoStore.test.ts src/components/modal/__tests__/DialogHost.test.tsx src/i18n/__tests__/localeParity.test.ts src/components/sandbox
       - name: Start dev server
         working-directory: client
         run: |

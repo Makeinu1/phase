@@ -31,6 +31,11 @@ const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<Wa
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",
   "GameOver",
+  // The paused manual resolution is operated on the board itself (Sandbox
+  // corrections, then Finish in GamePage's manual panel), not in a modal.
+  // Anchoring the host here would cover the panel and the board with an
+  // empty `fixed inset-0 z-40` layer that swallows every click.
+  "ManualResolution",
 ]);
 
 // `WaitingFor` variants whose UI deliberately uses `pointer-events: none` so

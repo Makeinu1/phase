@@ -99,6 +99,17 @@ describe("DialogHost", () => {
     expect(screen.queryByLabelText("Restore dialog")).not.toBeInTheDocument();
   });
 
+  it("leaves a paused manual resolution's board and panel clickable", () => {
+    setWaitingFor({ type: "ManualResolution", data: { player: 0, stack_entry_id: 7 } } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").not.toMatch(/fixed/);
+  });
+
   it("does not establish a viewport-blocking wrapper when the opponent is the waiting player (regression)", () => {
     // Opponent (player 1) is searching their library; local player is 0.
     // The host MUST NOT wrap children in `fixed inset-0 z-40`, otherwise
