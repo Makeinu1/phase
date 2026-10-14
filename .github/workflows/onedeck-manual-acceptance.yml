@@ -1,0 +1,107 @@
+name: OneDeck manual play acceptance
+on:
+  push:
+    branches: [work/manual-sandbox-undo]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: onedeck-manual-acceptance
+  cancel-in-progress: true
+env:
+  CARGO_INCREMENTAL: '0'
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: onedeck-engine-tests
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Manual resolution native tests (feature on)
+        run: cargo test -p phase-engine --features manual_resolution_prototype --test manual_resolution_prototype
+      - name: Manual resolution native tests (feature off)
+        run: cargo test -p phase-engine --test manual_resolution_prototype
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: onedeck-manual-wasm
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Card data (MTGJSON -> card-data.json)
+        run: |
+          mkdir -p data/mtgjson
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+          cp data/card-data.json client/public/card-data.json
+      - name: Engine WASM with manual resolution admitted
+        run: |
+          mkdir -p client/src/wasm
+          cargo build --package engine-wasm --target wasm32-unknown-unknown --profile wasm-dev --features manual_resolution_local_bootstrap
+          wasm-bindgen --target web --out-dir client/src/wasm --out-name engine_wasm target/wasm32-unknown-unknown/wasm-dev/engine_wasm.wasm
+          cargo build --package draft-wasm --target wasm32-unknown-unknown --profile wasm-dev
+          wasm-bindgen --target web --out-dir client/src/wasm --out-name draft_wasm target/wasm32-unknown-unknown/wasm-dev/draft_wasm.wasm
+      - name: Client install and focused tests
+        working-directory: client
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vitest run --coverage.enabled=false src/stores/__tests__/manualUndoStore.test.ts src/i18n/__tests__/localeParity.test.ts src/components/sandbox
+      - name: Start dev server
+        working-directory: client
+        run: |
+          nohup pnpm exec vite --port 5173 --strictPort > "$RUNNER_TEMP/vite.log" 2>&1 &
+          for i in $(seq 1 90); do curl -sf http://localhost:5173/ >/dev/null && break; sleep 2; done
+          curl -sf http://localhost:5173/ >/dev/null
+      - name: Browser acceptance on real decks
+        env:
+          ONEDECK_DECKS: ${{ secrets.ONEDECK_DECKS }}
+        run: |
+          test -n "$ONEDECK_DECKS" || { echo "ONEDECK_DECKS secret is not set"; exit 1; }
+          pip install playwright==1.55.0
+          python -m playwright install --with-deps chromium
+          python scripts/ci/onedeck_manual_acceptance.py --base-url http://localhost:5173 \
+            --out "$RUNNER_TEMP/evidence" --locale client/src/i18n/locales/ja/game.json
+      - name: Encrypt and publish evidence to the evidence branch
+        if: always()
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/evidence"
+          cp "$RUNNER_TEMP/vite.log" "$RUNNER_TEMP/evidence/" 2>/dev/null || true
+          tar -czf "$RUNNER_TEMP/evidence.tgz" -C "$RUNNER_TEMP" evidence
+          openssl rand -hex 32 > "$RUNNER_TEMP/k"
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in "$RUNNER_TEMP/evidence.tgz" -out "$RUNNER_TEMP/evidence.tgz.enc" -pass file:"$RUNNER_TEMP/k"
+          openssl pkeyutl -encrypt -pubin -inkey .github/onedeck/evidence.pub -pkeyopt rsa_padding_mode:oaep -in "$RUNNER_TEMP/k" -out "$RUNNER_TEMP/k.enc"
+          git fetch origin ci/onedeck-manual-evidence || true
+          git switch --orphan evidence-tmp
+          git rm -rf --quiet . || true
+          mkdir -p runs/${GITHUB_RUN_ID}
+          cp "$RUNNER_TEMP/evidence.tgz.enc" "$RUNNER_TEMP/k.enc" runs/${GITHUB_RUN_ID}/
+          echo "source_sha=${GITHUB_SHA}" > runs/${GITHUB_RUN_ID}/SOURCE
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git add runs
+          git commit -q -m "evidence: manual acceptance run ${GITHUB_RUN_ID} for ${GITHUB_SHA::12}"
+          git push -f origin HEAD:refs/heads/ci/onedeck-manual-evidence-${GITHUB_RUN_ID}
