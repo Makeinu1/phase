@@ -336,6 +336,15 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     j.step("select-hand-card", "ui", clicked, card)
     ok = j.choose_card_option(card, j.strings["castManually"])
     j.step("cast-manually", "ui", ok, j.strings["castManually"])
+    # Targets are chosen while casting (CR 601.2c), manual or not: pick the opponent.
+    if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'TargetSelection'", 4):
+        target = j.page.get_by_role("button", name=re.compile(r"^(?!あなた).+を選択$"))
+        try:
+            target.first.click(timeout=8000)
+            chose = True
+        except Exception:
+            chose = False
+        j.step("choose-target", "ui", chose, "the opponent is the spell's target")
     # 2. Payment (UI if a payment prompt appears).
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
         j.click_text(r"^(支払う|Pay)$")
