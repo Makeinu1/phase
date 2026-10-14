@@ -2,7 +2,7 @@ name: OneDeck spell coverage snapshot
 on:
   push:
     branches: [ci/onedeck-deck-coverage]
-    paths: [.github/workflows/onedeck-spell-coverage.yml, .github/onedeck/spell_coverage.py]
+    paths: [.github/workflows/onedeck-spell-coverage.yml, .github/onedeck/spell_coverage.py, .github/onedeck/card_lookup.py, .github/onedeck/lookup.txt]
 permissions:
   contents: write
 concurrency:
@@ -28,6 +28,7 @@ jobs:
         run: |
           mkdir -p onedeck-coverage
           python3 .github/onedeck/spell_coverage.py data/mtgjson/AtomicCards.json data/coverage-data.json onedeck-coverage/spells.json
+          python3 .github/onedeck/card_lookup.py .github/onedeck/lookup.txt data/coverage-data.json onedeck-coverage/lookup.json
           echo "source_sha=${GITHUB_SHA}" > onedeck-coverage/SOURCE
       - name: Commit snapshot to this CI branch
         run: |
