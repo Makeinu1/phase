@@ -492,7 +492,16 @@ def scenario_thoughtseize(j: Journey) -> None:
     """Hand attack performed entirely with the board tools (no hook)."""
     j.ensure("Thoughtseize", 0, "Hand")
     j.ensure("Sol Ring", 0, "Hand")
-    j.ensure("Llanowar Elves", 1, "Hand")
+    # The opponent's hand is hidden from this viewer, so the placement is
+    # verified by the hand size rather than by name.
+    for _ in range(3):
+        size = len(j.summary()["players"][1]["hand"])
+        j.settle(1.0)
+        j.debug("CreateCard", {"card_name": "Llanowar Elves", "owner": 1, "zone": "Hand", "count": 1})
+        if j.wait_for("(n) => window.__phaseAcceptance.state().players[1].hand.length > n", 6, size):
+            break
+    else:
+        raise AssertionError("could not place Llanowar Elves in the opponent's hand")
     j.trim_hand(7, ("Thoughtseize", "Sol Ring"))
     j.step("setup-cards", "hook(setup)", True, "Thoughtseize + Sol Ring to hand, a nonland card in the opponent's hand")
     tools = j.strings["tools"]
