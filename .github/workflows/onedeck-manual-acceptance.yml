@@ -27,7 +27,7 @@ jobs:
       - name: Verify the CR numbers cited by the manual-correction changes
         run: |
           ./scripts/fetch-comp-rules.sh
-          for rule in 701.9a 701.20a 701.20b 603.3 608.2c; do
+          for rule in 701.9a 701.20a 701.20b 603.3; do
             line=$(grep -m1 "^${rule}[ .]" docs/MagicCompRules.txt || true)
             test -n "$line" || { echo "::error::CR $rule not found"; exit 1; }
             echo "::notice::CR ${line:0:240}"
@@ -35,9 +35,15 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Manual resolution native tests (feature on)
-        run: cargo test -p phase-engine --features manual_resolution_prototype --test manual_resolution_prototype
+        run: |
+          set -o pipefail
+          cargo test -p phase-engine --features manual_resolution_prototype --test manual_resolution_prototype 2>&1 | tee "$RUNNER_TEMP/on.log" || {
+            grep -E "^test .* FAILED|panicked at|^  left|^ right|assertion|^thread" "$RUNNER_TEMP/on.log" | head -40 | sed 's/^/::error::/'; exit 1; }
       - name: Manual resolution native tests (feature off)
-        run: cargo test -p phase-engine --test manual_resolution_prototype
+        run: |
+          set -o pipefail
+          cargo test -p phase-engine --test manual_resolution_prototype 2>&1 | tee "$RUNNER_TEMP/off.log" || {
+            grep -E "^test .* FAILED|panicked at|^  left|^ right|assertion|^thread|^error" "$RUNNER_TEMP/off.log" | head -40 | sed 's/^/::error::/'; exit 1; }
 
   browser:
     runs-on: ubuntu-latest

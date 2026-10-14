@@ -16171,9 +16171,9 @@ pub fn preflight_debug_action(
     Ok(())
 }
 
-/// CR 701.20a + CR 608.2c: while a human performs a paused spell's
-/// instructions, a card it revealed stays revealed for as long as the rest of
-/// that resolution needs it (e.g. choosing the card to discard from a
+/// CR 701.20a: while a human performs a paused spell's instructions, a card
+/// it revealed stays revealed for as long as the rest of that resolution
+/// needs it (e.g. choosing the card to discard from a
 /// revealed hand). The reveal ends with the resolution.
 #[cfg(feature = "manual_resolution_prototype")]
 fn manual_resolution_keeps_reveals(state: &GameState) -> bool {

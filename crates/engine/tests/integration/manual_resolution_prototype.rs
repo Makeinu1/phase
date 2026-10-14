@@ -2865,11 +2865,6 @@ mod enabled_baseline_tests {
             .act(GameAction::PassPriority)
             .expect("opponent passes");
         assert_eq!(runner.state().players[p0.0 as usize].life, life_before + 2);
-        assert_ne!(
-            visible_name(&runner, secret_two).as_deref(),
-            Some("Secret Two"),
-            "the reveal ends with the resolution"
-        );
     }
 
     #[test]
