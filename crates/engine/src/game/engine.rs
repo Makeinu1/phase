@@ -16130,6 +16130,9 @@ pub fn preflight_debug_action(
     action
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
+    action
+        .validate_instruction_payload()
+        .map_err(EngineError::InvalidAction)?;
 
     if let DebugAction::CreateCard {
         owner,

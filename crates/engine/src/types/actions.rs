@@ -1636,6 +1636,43 @@ impl DebugAction {
         Ok(())
     }
 
+    /// Validates an instruction's payload shape before any state is touched:
+    /// each object or player is named at most once, and an amount fits the
+    /// engine's signed quantity range.
+    pub fn validate_instruction_payload(&self) -> Result<(), String> {
+        fn distinct<T: Eq + std::hash::Hash>(ids: &[T]) -> Result<(), String> {
+            let mut seen = std::collections::HashSet::new();
+            if ids.iter().all(|id| seen.insert(id)) {
+                Ok(())
+            } else {
+                Err("An instruction names the same object or player twice".into())
+            }
+        }
+        fn amount(value: u32) -> Result<(), String> {
+            i32::try_from(value)
+                .map(|_| ())
+                .map_err(|_| "Instruction amount exceeds the supported range".into())
+        }
+        match self {
+            Self::Destroy { object_ids, .. } | Self::PutCards { object_ids, .. } => {
+                distinct(object_ids)
+            }
+            Self::LoseLife { amount: value, .. } | Self::GainLife { amount: value, .. } => {
+                amount(*value)
+            }
+            Self::DealDamage {
+                object_ids,
+                player_ids,
+                amount: value,
+            } => {
+                distinct(object_ids)?;
+                distinct(player_ids)?;
+                amount(*value)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Human-readable description of this debug action, used by the sandbox
     /// audit log so all players see what an authorized debugger did. Engine
     /// owns the wording so the FE remains a pure display layer.

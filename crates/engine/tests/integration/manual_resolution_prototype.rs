@@ -1112,7 +1112,7 @@ mod enabled_baseline_tests {
         FilterProp, ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter,
         TypedFilter,
     };
-    use engine::types::game_state::{PersistedRestoreError, StackEntryKind};
+    use engine::types::game_state::StackEntryKind;
     use engine::types::replacements::ReplacementEvent;
     use engine::types::zones::EtbTapState;
 
@@ -3110,6 +3110,27 @@ mod enabled_baseline_tests {
             |runner: &GameRunner, player: PlayerId| runner.state().players[player.0 as usize].life;
         let (p0_life, p1_life) = (life(&runner, p0), life(&runner, p1));
 
+        // One instruction names each object once, and amounts stay in range.
+        // Checked at the fresh pause: a library move leaves an action-scoped
+        // knowledge sidecar that the next outer action clears even when refused.
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::DealDamage {
+                object_ids: vec![elf, elf],
+                player_ids: vec![],
+                amount: 1,
+            },
+        );
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::LoseLife {
+                player_id: p1,
+                amount: u32::MAX,
+            },
+        );
+
         runner
             .act(GameAction::Debug(DebugAction::DealDamage {
                 object_ids: vec![bear],
@@ -3167,25 +3188,6 @@ mod enabled_baseline_tests {
         assert_eq!(
             runner.state().players[p1.0 as usize].library.back(),
             Some(&buried)
-        );
-
-        // One instruction names each object once, and amounts stay in range.
-        assert_rejected_unchanged(
-            &mut runner,
-            p0,
-            DebugAction::DealDamage {
-                object_ids: vec![elf, elf],
-                player_ids: vec![],
-                amount: 1,
-            },
-        );
-        assert_rejected_unchanged(
-            &mut runner,
-            p0,
-            DebugAction::LoseLife {
-                player_id: p1,
-                amount: u32::MAX,
-            },
         );
 
         runner
