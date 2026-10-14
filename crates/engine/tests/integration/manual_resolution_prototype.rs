@@ -2741,7 +2741,7 @@ mod enabled_baseline_tests {
             20,
             "the suppressed instruction does not run"
         );
-        assert!(runner.state().manual_resolution_state.is_none());
+        assert!(runner.state().manual_resolution_binding().is_none());
         assert!(
             runner
                 .act(GameAction::Debug(DebugAction::Mill {
