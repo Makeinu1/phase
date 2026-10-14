@@ -1,0 +1,38 @@
+name: OneDeck spell coverage snapshot
+on:
+  push:
+    branches: [ci/onedeck-deck-coverage]
+    paths: [.github/workflows/onedeck-spell-coverage.yml, .github/onedeck/spell_coverage.py]
+permissions:
+  contents: write
+concurrency:
+  group: onedeck-spell-coverage
+  cancel-in-progress: true
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Download MTGJSON AtomicCards
+        run: |
+          mkdir -p data/mtgjson
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+      - name: Generate card data and coverage
+        run: |
+          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+          cargo run --profile tool --features cli --bin coverage-report -- data/ --all > data/coverage-data.json
+      - name: Summarize instants and sorceries
+        run: |
+          mkdir -p onedeck-coverage
+          python3 .github/onedeck/spell_coverage.py data/mtgjson/AtomicCards.json data/coverage-data.json onedeck-coverage/spells.json
+          echo "source_sha=${GITHUB_SHA}" > onedeck-coverage/SOURCE
+      - name: Commit snapshot to this CI branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git add onedeck-coverage
+          git commit -m "ci(onedeck): spell coverage snapshot for ${GITHUB_SHA::12}"
+          git push origin HEAD:ci/onedeck-deck-coverage
