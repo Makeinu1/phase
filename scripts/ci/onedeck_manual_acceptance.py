@@ -73,6 +73,7 @@ class Journey:
         self.scenario = scenario
         self.strings = strings
         self.steps: list[dict] = []
+        self.hook_log: list[dict] = []
         (out / "screens").mkdir(parents=True, exist_ok=True)
 
     # ---- observation -------------------------------------------------
@@ -110,8 +111,15 @@ class Journey:
 
     # ---- hook setup (never used for the journey itself) ---------------
     def dispatch(self, action: dict, actor: int = 0):
-        self.page.evaluate("([a, p]) => window.__phaseAcceptance.dispatch(a, p)", [action, actor])
+        outcome = self.page.evaluate(
+            """([a, p]) => Promise.race([
+                 window.__phaseAcceptance.dispatch(a, p).then(() => 'done', (e) => 'error: ' + (e?.message ?? e)),
+                 new Promise((r) => setTimeout(() => r('timeout'), 15000)),
+               ])""",
+            [action, actor])
+        self.hook_log.append({"action": action, "actor": actor, "outcome": outcome})
         time.sleep(0.8)
+        return outcome
 
     def debug(self, kind: str, data: dict | None = None):
         inner = {"type": kind} if data is None else {"type": kind, "data": data}
@@ -396,7 +404,8 @@ def main() -> int:
                     journey.steps.append({"step": "failure", "state": journey.summary(), "screen": journey.shot("failure")})
                 except Exception:
                     pass
-            results[name] = {"status": status, "deck": "synthetic" if synthetic else "real", "error": error, "steps": journey.steps,
+            results[name] = {"status": status, "deck": "synthetic" if synthetic else "real", "error": error,
+                             "hook": journey.hook_log, "steps": journey.steps,
                              "console": [c for c in console if "error" in c.lower()][-40:]}
             context.close()
         browser.close()
