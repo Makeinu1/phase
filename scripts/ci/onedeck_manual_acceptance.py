@@ -305,7 +305,8 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     # 5. Finish (UI).
     ok = j.click_text(re.escape(j.strings["finish"]))
     finished = j.wait_for("() => window.__phaseAcceptance.state()?.derived?.manual_resolution == null", 15)
-    j.step("finish", "ui", ok and finished, j.strings["finish"])
+    notes = j.page.evaluate("() => [...document.querySelectorAll('[role=status],[role=alert]')].map((e) => e.innerText.trim()).filter(Boolean)")
+    j.step("finish", "ui", ok and finished, {"button": j.strings["finish"], "panelNotes": notes})
     verify_after_finish(j, before)
     # 6. Undo to before casting (UI).
     undo = j.page.locator('[data-testid="manual-undo"] button')

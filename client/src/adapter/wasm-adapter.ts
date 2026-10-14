@@ -411,6 +411,15 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       submitCaptured: async (request) => {
         let attempt = this.localAttempts.get(request);
         if (!attempt) {
+          // Ordinary actions (e.g. Sandbox board corrections during the
+          // episode) advance the engine without a continuation publication,
+          // so the last published frame can predate this binding. Re-read the
+          // authenticated current frame before capturing against it.
+          const offered = (publication: LocalContinuationPublication | null) => publication?.current?.snapshot.viewerInteraction
+            ?.opportunities.some((candidate) => candidate.interactionId === request.binding.interactionId) ?? false;
+          if (!offered(this.localLatest) && currentOwner() && !this.localUnresolved) {
+            try { await publish(await owner.engine.readLocalCurrent(), false); } catch { /* fall through to rejection */ }
+          }
           const frame = this.localLatest?.current;
           const source = frame?.snapshot.state.derived?.manual_resolution?.source;
           const opportunity = frame?.snapshot.viewerInteraction?.opportunities.find((candidate) => candidate.interactionId === request.binding.interactionId);
