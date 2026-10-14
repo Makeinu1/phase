@@ -333,7 +333,13 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
         and after["players"][0]["library"] == before["players"][0]["library"] \
         and sorted(b["name"] for b in after["battlefield"]) == sorted(b["name"] for b in before["battlefield"])
     j.step("undo-before-cast", "ui", ok and same, {"restoredCardInHand": restored, "zonesMatchPreCast": same})
-    # 7. Next ordinary play (UI): cast normally and let it resolve automatically.
+    # 7. Next ordinary plays (UI): a land drop, then a spell through the stack.
+    lands_before = sum(1 for b in j.summary()["battlefield"] if b["controller"] == 0)
+    land = next((n for n in j.summary()["players"][0]["hand"] if n in ("Plains", "Mountain", "Island", "Swamp", "Forest")), None)
+    played = land is not None and j.click_hand_card(land) and j.wait_for(
+        "(n) => (window.__phaseAcceptance.state()?.battlefield ?? []).filter((id) => window.__phaseAcceptance.state().objects[id]?.controller === 0).length > n",
+        10, lands_before)
+    j.step("next-land-drop", "ui", bool(played), land)
     clicked = j.click_hand_card(next_play)
     # Permanents have no manual offer; a resolution menu appears only for
     # supported spells, where "cast normally" is the ordinary path.
@@ -341,11 +347,11 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
         j.click_text(r"^(支払う|Pay)$")
     for _ in range(6):
-        if any(b["name"] == next_play for b in j.summary()["battlefield"]):
+        if any(b["name"] == next_play and b["controller"] == 0 for b in j.summary()["battlefield"]):
             break
         j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
         time.sleep(1.5)
-    resolved = any(b["name"] == next_play for b in j.summary()["battlefield"])
+    resolved = any(b["name"] == next_play and b["controller"] == 0 for b in j.summary()["battlefield"])
     j.step("next-normal-play", "ui", clicked and resolved, next_play)
 
 
