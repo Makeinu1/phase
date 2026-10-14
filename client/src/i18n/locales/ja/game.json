@@ -62,7 +62,10 @@
     "startupFixtureUnavailable": "選択した手動解決 fixture を利用できません。",
     "startupInvalidFixture": "手動解決 fixture の形式が正しくありません。",
     "startupAdmissionUnavailable": "認証済みの Local 継続を利用できません。",
-    "displayOnly": "発生源を閲覧しています。手動操作は、この Local 解決の担当者だけが行えます。"
+    "displayOnly": "発生源を閲覧しています。手動操作は、この Local 解決の担当者だけが行えます。",
+    "undoBeforeCast": "《{{card}}》を唱える前に戻す",
+    "undoFailed": "手動プレイを取り消せませんでした。",
+    "sandboxHint": "カードやプレイヤーを右クリック（長押し）するか、サンドボックスツールで本文どおりに盤面を操作し、最後に完了してください。"
   },
   "playerLatency": {
     "host": "ホスト",

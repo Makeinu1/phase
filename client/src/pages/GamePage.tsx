@@ -62,6 +62,7 @@ import { AttackRequirementBadges } from "../components/combat/AttackRequirementB
 import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { ManualResolutionSandbox, type ManualResolutionSandboxTarget } from "../components/sandbox/ManualResolutionSandbox.tsx";
+import { useManualUndoStore } from "../stores/manualUndoStore.ts";
 import { useEngineCardData } from "../hooks/useEngineCardData.ts";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
@@ -281,8 +282,12 @@ export function GamePage() {
   const firstParam = searchParams.get("first");
   const roomNameParam = searchParams.get("roomName");
   const sourceParam = searchParams.get("source") ?? undefined;
-  const manualFixture = searchParams.get("manual") === "1"
+  const manualRequested = searchParams.get("manual") === "1";
+  // `?manual=1&p1Fixture=<case>` admits a finite fixture board; `?manual=1`
+  // alone admits an ordinary local deck game with manual resolution enabled.
+  const manualFixture = manualRequested && searchParams.has("p1Fixture")
     ? searchParams.get("p1Fixture") : searchParams.has("p1Fixture") ? null : undefined;
+  const manualPlay = manualRequested && !searchParams.has("p1Fixture");
   const draftIdParam = searchParams.get("draftId") ?? undefined;
   // The lobby authority this join/spectate was launched from. Produced by
   // our own navigation from a canonical `LobbySource.url`; a hand-edited
@@ -786,6 +791,7 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       manualFixture={manualFixture}
+      manualPlay={manualPlay}
       draftId={draftIdParam}
       serverUrl={serverParam}
       onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
@@ -1066,6 +1072,9 @@ function GamePageContent({
     const submission: InteractionSubmission = { interactionId: offer.interactionId,
       response: { type: "choose", data: { choiceId } } };
     const attempt = { objectId: source.sourceId, cardName: source.name, status: "submitting" as const };
+    // The table-agreed undo point is the settled board immediately before the
+    // manual cast. The engine exports it; the UI never synthesizes a state.
+    const undoCheckpoint = await adapter?.exportPersistenceState?.().catch(() => null) ?? null;
     manualCastOriginalRef.current = { submission, continuation };
     manualCastAttemptRef.current = attempt;
     setManualCastAttempt(attempt);
@@ -1079,6 +1088,7 @@ function GamePageContent({
       if (!next) manualCastOriginalRef.current = null;
       setManualCastAttempt(next);
       if (status === "not-applied") setManualCastMessage(t("manualResolution.notAppliedRetry"));
+      if (status === "completed" && undoCheckpoint) useManualUndoStore.getState().capture(undoCheckpoint, source.name);
     } catch (error) {
       // Missing terminal evidence keeps the adapter's captured original intact.
       const next = { ...attempt, status: "indeterminate" as const };
@@ -1117,6 +1127,41 @@ function GamePageContent({
     lookupBusy: manualLookupBusy,
     checkStatus: checkManualCast,
   } : null;
+  const manualUndo = useManualUndoStore((s) => s.checkpoint);
+  const [manualUndoBusy, setManualUndoBusy] = useState(false);
+  const [manualUndoMessage, setManualUndoMessage] = useState<string | null>(null);
+  const manualEpisodeActive = manualView !== null;
+  useEffect(() => {
+    useManualUndoStore.getState().observeEpisode(manualEpisodeActive);
+  }, [manualEpisodeActive, manualUndo]);
+  useEffect(() => () => useManualUndoStore.getState().clear(), []);
+  const undoManualPlay = async () => {
+    const held = useManualUndoStore.getState().checkpoint;
+    if (!held || !continuation || manualUndoBusy) return;
+    setManualUndoBusy(true);
+    setManualUndoMessage(null);
+    try {
+      await continuation.restore(held.checkpoint);
+      useManualUndoStore.getState().clear();
+      manualCastAttemptRef.current = null;
+      manualCastOriginalRef.current = null;
+      setManualCastAttempt(null);
+      setManualCastMessage(null);
+    } catch (error) {
+      setManualUndoMessage(error instanceof Error ? error.message : t("manualResolution.undoFailed"));
+    } finally {
+      setManualUndoBusy(false);
+    }
+  };
+  const manualUndoControl = manualUndo && continuation ? (
+    <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="manual-undo">
+      <button type="button" disabled={manualUndoBusy} onClick={() => void undoManualPlay()}
+        className="rounded-md border border-amber-400/60 bg-slate-900/90 px-3 py-1.5 text-sm text-amber-100 hover:bg-slate-800">
+        {t("manualResolution.undoBeforeCast", { card: manualUndo.cardName })}
+      </button>
+      {manualUndoMessage ? <span role="alert" className="text-xs text-rose-300">{manualUndoMessage}</span> : null}
+    </div>
+  ) : null;
   const [manualTarget, setManualTarget] = useState<ManualResolutionSandboxTarget | null>(null);
   const [manualAmount, setManualAmount] = useState("");
   const manualReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -1355,6 +1400,7 @@ function GamePageContent({
   useEffect(() => {
     if (import.meta.env.DEV) {
       import("../dev/devTools.ts");
+      import("../dev/acceptanceHook.ts");
     }
   }, []);
 
@@ -1741,8 +1787,14 @@ function GamePageContent({
                 <button type="button" onClick={() => useUiStore.getState().inspectObjectSticky(manualView.source.sourceId as ObjectId, 0, "side", manualView.source.name)}>{t("manualResolution.readSource")}</button>
                 <p>{t(manualView.phase === "armed" ? "manualResolution.armed" : "manualResolution.displayOnly")}</p>
               </section>}
+              {manualView.phase === "open" && manualOwnedView
+                ? <p className="mt-2 rounded-md bg-slate-950/90 p-2 text-xs text-slate-200">{t("manualResolution.sandboxHint")}</p> : null}
+              {manualUndoControl}
             </div>
           )}
+          {!manualView && manualUndo?.episodeEnded && manualUndoControl ? (
+            <div className="absolute bottom-2 right-2 z-50">{manualUndoControl}</div>
+          ) : null}
         </div>
 
         {/* Row 3: Player hand + zones. The hand is top-anchored in this row, so

@@ -27,6 +27,7 @@ import {
   saveCheckpoints,
 } from "../stores/gameStore";
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
+import { useManualUndoStore } from "../stores/manualUndoStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
 import { pressureMultiplier } from "../utils/stackPressure";
@@ -768,6 +769,8 @@ async function dispatchActionInternal(
   if (gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
     return;
   }
+  // A finished manual play stays undoable only until the next submitted action.
+  useManualUndoStore.getState().releaseAfterEpisode();
 
   const submittedAction = actor === getPlayerId() ? applySpellPaymentPreference(action) : action;
   // Snapshot the prompt object that caused this action. The same action from
@@ -868,6 +871,7 @@ export async function dispatchInteraction(
 ): Promise<LocalContinuationPublication | void> {
   const { adapter, gameState, gameMode } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) return;
+  useManualUndoStore.getState().releaseAfterEpisode();
 
   try {
     if (manualSource) {

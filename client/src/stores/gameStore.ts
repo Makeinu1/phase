@@ -335,7 +335,7 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
     initialSave?: "best-effort" | "strict",
-    startup?: { kind: "experimentalLocal"; checkpoint: string },
+    startup?: { kind: "experimentalLocal"; checkpoint?: string },
   ) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
@@ -573,7 +573,7 @@ export const useGameStore = create<GameStore>()(
           }
           initResult = await adapter.initializeExperimentalLocalGame({
             deckData, formatConfig, playerCount, matchConfig, firstPlayer,
-            trustedCheckpoint: startup.checkpoint,
+            ...(startup.checkpoint !== undefined ? { trustedCheckpoint: startup.checkpoint } : {}),
           });
           if (await adapter.experimentalLocalActor() !== 0) {
             throw new Error(i18n.t("game:manualResolution.startupAdmissionUnavailable"));

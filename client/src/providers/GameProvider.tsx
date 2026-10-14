@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import {
+  type EngineAdapter,
   type FormatConfig,
   type GameAction,
   type MatchConfig,
@@ -649,6 +650,8 @@ export interface GameProviderProps {
   source?: string;
   /** Finite production-board admission; absent on ordinary game routes. */
   manualFixture?: string | null;
+  /** Ordinary two-seat local deck game admitted with manual resolution. */
+  manualPlay?: boolean;
   draftId?: string;
   /**
    * The lobby authority this join or spectate was launched from, carried by
@@ -683,6 +686,7 @@ export function GameProvider({
   roomName,
   source,
   manualFixture,
+  manualPlay = false,
   draftId,
   serverUrl: originUrl,
   onWsEvent,
@@ -825,7 +829,8 @@ export function GameProvider({
       && nativeEngineKey !== null;
     setGameMode(mode);
     setEngineMode(mode === "ai" ? (shouldUseNativeAi ? null : "wasm") : null);
-    if (manualFixture !== undefined && mode !== "local") {
+    if ((manualFixture !== undefined && mode !== "local")
+      || (manualPlay && ((mode !== "local" && mode !== "ai") || (playerCount ?? 2) !== 2))) {
       onNoDeckRef.current?.(tRef.current("manualResolution.startupLocalOnly"));
       return;
     }
@@ -1235,6 +1240,13 @@ export function GameProvider({
 
     let cancelled = false;
     let unsubscribeLocalContinuation: (() => void) | null = null;
+    // A manual-play game commits every authenticated Local continuation
+    // publication (manual cast, operations, Finish, restore) to the store.
+    const subscribeManualPlay = (adapter: EngineAdapter) => {
+      const continuation = adapter.localContinuation?.();
+      if (!continuation) throw new Error(tRef.current("manualResolution.startupAdmissionUnavailable"));
+      return continuation.subscribe(createLocalContinuationPublisher(adapter));
+    };
 
     if (isOnline || isReconnect) {
       const parsedDeck = isSpectate ? null : loadActiveDeck();
@@ -1796,8 +1808,10 @@ export function GameProvider({
             return;
           }
           try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer,
+              "best-effort", manualPlay ? { kind: "experimentalLocal" } : undefined);
             if (cancelled) return;
+            if (manualPlay) unsubscribeLocalContinuation = subscribeManualPlay(adapter);
             if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
             }
@@ -1873,8 +1887,11 @@ export function GameProvider({
           playerCount,
           matchConfig,
           firstPlayer,
+          "best-effort",
+          manualPlay ? { kind: "experimentalLocal" } : undefined,
         );
         if (cancelled) return;
+        if (manualPlay) unsubscribeLocalContinuation = subscribeManualPlay(adapter);
         if (!adapter.cardDbLoaded) {
           onCardDataMissingRef.current?.();
         }
@@ -2199,7 +2216,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, manualFixture, draftId, originUrl]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, manualFixture, manualPlay, draftId, originUrl]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>
