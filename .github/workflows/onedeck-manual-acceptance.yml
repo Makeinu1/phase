@@ -37,8 +37,8 @@ jobs:
       - name: Manual resolution native tests (feature on)
         run: |
           set -o pipefail
-          cargo test -p phase-engine --features manual_resolution_prototype --test manual_resolution_prototype 2>&1 | tee "$RUNNER_TEMP/on.log" || {
-            grep -E "^test .* FAILED|panicked at|^  left|^ right|assertion|^thread" "$RUNNER_TEMP/on.log" | head -40 | sed 's/^/::error::/'; exit 1; }
+          cargo test -p phase-engine --features manual_resolution_prototype --test manual_resolution_prototype -- --nocapture 2>&1 | tee "$RUNNER_TEMP/on.log" || {
+            grep -E "^test .* FAILED|panicked at|^  left|^ right|assertion|^thread|^DIAG" "$RUNNER_TEMP/on.log" | head -40 | sed 's/^/::error::/'; exit 1; }
       - name: Manual resolution native tests (feature off)
         run: |
           set -o pipefail

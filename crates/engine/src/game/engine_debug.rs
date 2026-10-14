@@ -1598,6 +1598,7 @@ fn settle_instruction_triggers(
 ) {
     if resolving_source.is_some() {
         super::triggers::collect_triggers_into_deferred(state, &events[event_start..]);
+        super::triggers::collect_delayed_triggers_into_deferred(state, &events[event_start..]);
     } else {
         let new_events = events[event_start..].to_vec();
         super::triggers::process_triggers(state, &new_events);

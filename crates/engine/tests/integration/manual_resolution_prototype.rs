@@ -2899,8 +2899,10 @@ mod enabled_baseline_tests {
                 "When this creature enters, you gain 3 life.",
             )
             .id();
+        // Controlled by the opponent so the two deferred triggers have
+        // different controllers (APNAP order, CR 603.3b) and need no ordering prompt.
         scenario.add_enchantment_from_oracle(
-            p0,
+            p1,
             "Death Watcher",
             "Whenever a creature dies, you gain 1 life.",
         );
@@ -2934,6 +2936,12 @@ mod enabled_baseline_tests {
                 regeneration: RegenerationPermission::Forbidden,
             }))
             .expect("the actor destroys the chosen creatures");
+        eprintln!(
+            "DIAG after destroy: deferred={} stack={} waiting={:?}",
+            runner.state().deferred_triggers.len(),
+            runner.state().stack.len(),
+            runner.state().waiting_for
+        );
         assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
         assert_eq!(
             runner.state().objects[&wall].zone,
@@ -2961,6 +2969,11 @@ mod enabled_baseline_tests {
             }))
             .expect("a creature card from hand is put onto the battlefield");
         assert_eq!(runner.state().objects[&entering].zone, Zone::Battlefield);
+        eprintln!(
+            "DIAG after entering: deferred={} stack={}",
+            runner.state().deferred_triggers.len(),
+            runner.state().stack.len()
+        );
 
         runner
             .act(GameAction::Debug(DebugAction::LoseLife {
@@ -2985,9 +2998,22 @@ mod enabled_baseline_tests {
         // The drawn card replaces the cast spell and the creature put onto the battlefield.
         assert_eq!(runner.state().players[p0.0 as usize].hand.len(), p0_hand);
 
+        eprintln!(
+            "DIAG before finish: deferred={} stack={}",
+            runner.state().deferred_triggers.len(),
+            runner.state().stack.len()
+        );
         runner
             .act(GameAction::FinishManualResolution { stack_entry_id })
             .expect("Finish closes the resolution");
+        eprintln!(
+            "DIAG after finish: deferred={} stack={} waiting={:?} life0={} life1={}",
+            runner.state().deferred_triggers.len(),
+            runner.state().stack.len(),
+            runner.state().waiting_for,
+            life(&runner, p0),
+            life(&runner, p1)
+        );
         assert_eq!(
             runner.state().stack.len(),
             2,
@@ -3000,7 +3026,8 @@ mod enabled_baseline_tests {
             runner.act(GameAction::PassPriority).expect("pass");
         }
         assert!(runner.state().stack.is_empty());
-        assert_eq!(life(&runner, p0), p0_life + 1 + 3);
+        assert_eq!(life(&runner, p0), p0_life + 3);
+        assert_eq!(life(&runner, p1), p1_life - 3 + 1);
     }
 
     #[test]
@@ -3012,14 +3039,7 @@ mod enabled_baseline_tests {
 
         // Trigger-, SBA-, or replacement-running corrections could hand
         // control to a second resolution while this one is paused.
-        assert_rejected_unchanged(
-            &mut runner,
-            p0,
-            DebugAction::DrawCards {
-                player_id: p0,
-                count: 1,
-            },
-        );
+        assert_rejected_unchanged(&mut runner, p0, DebugAction::Proliferate { player_id: p0 });
         assert_rejected_unchanged(
             &mut runner,
             p0,

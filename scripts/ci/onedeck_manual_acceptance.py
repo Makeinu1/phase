@@ -269,7 +269,7 @@ class Journey:
 
     def ui_pick_player(self, player_id: int) -> None:
         trace(f"pick player {player_id}")
-        self.page.locator(f'[data-player-hud="{player_id}"] button').first.click(timeout=10000)
+        self.page.locator(f'[data-player-hud="{player_id}"] [data-hud-plate]').first.click(timeout=10000)
         time.sleep(0.5)
 
     def ui_open_zone(self, player_id: int, zone: str) -> None:
