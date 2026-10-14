@@ -1480,6 +1480,45 @@ impl DebugAction {
         )
     }
 
+    /// An inert correction edits board facts in place: it never runs triggers,
+    /// state-based actions, ETB delivery, or a replacement consult that could
+    /// pause for a choice, and it never rewrites turn structure or the stack.
+    /// A paused manual resolution admits only these, so the human performing
+    /// the effect cannot accidentally hand control to a second resolution.
+    pub fn is_inert_correction(&self) -> bool {
+        match self {
+            Self::MoveToZone { simulate, .. } => !simulate,
+            Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::SetBasePowerToughness { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::SetPrepared { .. }
+            | Self::SetController { .. }
+            | Self::SetSummoningSickness { .. }
+            | Self::SetFaceState { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. }
+            | Self::GrantKeyword { .. }
+            | Self::RemoveKeyword { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. } => true,
+            Self::CreateCard { .. }
+            | Self::RemoveObject { .. }
+            | Self::Sacrifice { .. }
+            | Self::DrawCards { .. }
+            | Self::Proliferate { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => false,
+        }
+    }
+
     /// Rejects hostile or accidental debug spawn batches before they allocate
     /// objects. Zero is legal and is handled as a no-op by the action boundary.
     pub fn validate_create_count(&self) -> Result<(), String> {

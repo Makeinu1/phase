@@ -2636,6 +2636,198 @@ mod enabled_baseline_tests {
         ));
         assert_eq!(trusted_resolution_version(runner.state()), 4);
     }
+
+    fn manual_correction_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(p0, &["Top One", "Top Two", "Top Three", "Kept Below"]);
+        let stolen = scenario
+            .add_creature_to_graveyard(p1, "Opponent Graveyard Creature", 3, 3)
+            .id();
+        let designated = scenario
+            .add_spell_to_hand_from_oracle(
+                p0,
+                "Manual Correction Source",
+                false,
+                "You gain 3 life.",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let next_spell = scenario
+            .add_spell_to_hand_from_oracle(p0, "Next Play", true, "You gain 3 life.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+        runner.state_mut().debug_permitted.insert(p1);
+        let stack_entry_id;
+        {
+            let mut cast = runner.cast(designated).commit();
+            stack_entry_id = cast.state().stack.back().expect("cast is on stack").id;
+            cast.act(GameAction::DesignateManualResolution { stack_entry_id })
+                .expect("controller designates the ordinary spell");
+        }
+        runner.act(GameAction::PassPriority).expect("caster passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent pass enters the manual wait");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManualResolution { player, stack_entry_id: id }
+                if player == p0 && id == stack_entry_id
+        ));
+        (runner, designated, stack_entry_id, stolen, next_spell)
+    }
+
+    fn assert_rejected_unchanged(runner: &mut GameRunner, actor: PlayerId, action: DebugAction) {
+        let before = runner.state().clone();
+        assert!(
+            apply(runner.state_mut(), actor, GameAction::Debug(action.clone())).is_err(),
+            "{action:?} must be refused during the paused manual resolution"
+        );
+        assert_eq!(
+            runner.state(),
+            &before,
+            "refusal leaves all state unchanged"
+        );
+    }
+
+    #[test]
+    fn paused_actor_performs_cross_zone_corrections_then_finishes_once() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let (mut runner, designated, stack_entry_id, stolen, next_spell) =
+            manual_correction_board();
+        let paused = runner.state().waiting_for.clone();
+
+        runner
+            .act(GameAction::Debug(DebugAction::Mill {
+                player_id: p0,
+                count: 3,
+            }))
+            .expect("the paused actor mills as an inert correction");
+        assert_eq!(runner.state().waiting_for, paused);
+        assert_eq!(runner.state().players[p0.0 as usize].graveyard.len(), 3);
+        assert_eq!(runner.state().players[p0.0 as usize].library.len(), 1);
+
+        runner
+            .act(GameAction::Debug(DebugAction::MoveToZone {
+                object_id: stolen,
+                to_zone: Zone::Battlefield,
+                library_position: None,
+                simulate: false,
+            }))
+            .expect("an opponent's graveyard card can be returned to the battlefield");
+        runner
+            .act(GameAction::Debug(DebugAction::SetController {
+                object_id: stolen,
+                controller: p0,
+            }))
+            .expect("the returned card can be placed under the actor's control");
+        assert_eq!(runner.state().waiting_for, paused);
+        assert_eq!(runner.state().objects[&stolen].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&stolen].controller, p0);
+        assert_manual_state_checked_roundtrips(&runner, stack_entry_id);
+
+        let finish = runner
+            .act(GameAction::FinishManualResolution { stack_entry_id })
+            .expect("Finish takes the terminal path after corrections");
+        assert_eq!(stack_resolved_count(&finish.events, stack_entry_id), 1);
+        assert_eq!(runner.state().objects[&designated].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().players[p0.0 as usize].life,
+            20,
+            "the suppressed instruction does not run"
+        );
+        assert!(runner.state().manual_resolution_state.is_none());
+        assert!(
+            runner
+                .act(GameAction::Debug(DebugAction::Mill {
+                    player_id: p1,
+                    count: 1,
+                }))
+                .is_ok(),
+            "ordinary sandbox corrections resume once the designation retires"
+        );
+
+        runner.cast(next_spell).commit();
+        let next_entry = runner.state().stack.back().expect("next play").id;
+        runner.act(GameAction::PassPriority).expect("caster passes");
+        let next = runner
+            .act(GameAction::PassPriority)
+            .expect("next play resolves automatically");
+        assert_eq!(stack_resolved_count(&next.events, next_entry), 1);
+        assert_eq!(runner.state().players[p0.0 as usize].life, 23);
+    }
+
+    #[test]
+    fn paused_resolution_refuses_unsafe_corrections_atomically() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let (mut runner, designated, stack_entry_id, stolen, _next_spell) =
+            manual_correction_board();
+
+        // Trigger-, SBA-, or replacement-running corrections could hand
+        // control to a second resolution while this one is paused.
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::DrawCards {
+                player_id: p0,
+                count: 1,
+            },
+        );
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::MoveToZone {
+                object_id: stolen,
+                to_zone: Zone::Battlefield,
+                library_position: None,
+                simulate: true,
+            },
+        );
+        assert_rejected_unchanged(&mut runner, p0, DebugAction::RunStateBasedActions);
+        // Only the paused actor performs the effect.
+        assert_rejected_unchanged(
+            &mut runner,
+            p1,
+            DebugAction::Mill {
+                player_id: p1,
+                count: 1,
+            },
+        );
+        // The paused source and the stack stay owned by the resolution.
+        for object_id in [designated, stack_entry_id] {
+            assert_rejected_unchanged(
+                &mut runner,
+                p0,
+                DebugAction::MoveToZone {
+                    object_id,
+                    to_zone: Zone::Graveyard,
+                    library_position: None,
+                    simulate: false,
+                },
+            );
+        }
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::MoveToZone {
+                object_id: stolen,
+                to_zone: Zone::Stack,
+                library_position: None,
+                simulate: false,
+            },
+        );
+
+        runner
+            .act(GameAction::FinishManualResolution { stack_entry_id })
+            .expect("refusals leave the resolution finishable");
+        assert_eq!(runner.state().objects[&designated].zone, Zone::Graveyard);
+    }
 }
 
 #[cfg(not(feature = "manual_resolution_prototype"))]

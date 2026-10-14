@@ -16120,9 +16120,7 @@ pub fn preflight_debug_action(
 
     #[cfg(feature = "manual_resolution_prototype")]
     if state.manual_resolution_state.is_some() {
-        return Err(EngineError::InvalidAction(
-            "Debug actions are unavailable while a manual-resolution designation is active".into(),
-        ));
+        admit_manual_resolution_correction(state, actor, action)?;
     }
 
     action
@@ -16175,6 +16173,64 @@ pub fn preflight_debug_action(
 /// Sandbox capability check shared by every debug-action preflight. Keeping it
 /// at the engine boundary means transports cannot use a no-op payload to probe
 /// or bypass debug authorization.
+/// While a designated spell is paused for manual resolution, its actor carries
+/// out the spell's instructions with inert board corrections. Every other
+/// designation phase, actor, and correction stays closed: a correction may not
+/// touch any object on the stack (including the paused source), move an object
+/// onto the stack, or run triggers, state-based actions, or a pausing
+/// replacement consult that would hand control to a second resolution.
+#[cfg(feature = "manual_resolution_prototype")]
+fn admit_manual_resolution_correction(
+    state: &GameState,
+    actor: PlayerId,
+    action: &DebugAction,
+) -> Result<(), EngineError> {
+    let Some(binding) = state.manual_resolution_open_binding() else {
+        return Err(EngineError::InvalidAction(
+            "Debug actions are unavailable while a manual-resolution designation is active".into(),
+        ));
+    };
+    if binding.actor != actor {
+        return Err(EngineError::InvalidAction(
+            "Only the manual-resolution actor may correct the board while it is paused".into(),
+        ));
+    }
+    if !action.is_inert_correction() {
+        return Err(EngineError::InvalidAction(
+            "Only inert board corrections are available during manual resolution".into(),
+        ));
+    }
+    if matches!(
+        action,
+        DebugAction::MoveToZone {
+            to_zone: Zone::Stack,
+            ..
+        }
+    ) {
+        return Err(EngineError::InvalidAction(
+            "Manual resolution cannot move an object onto the stack".into(),
+        ));
+    }
+    let touches_stack = GameAction::Debug(action.clone())
+        .related_object_ids()
+        .into_iter()
+        .any(|id| {
+            id == binding.stack_entry_id
+                || id == binding.source.object_id
+                || state.stack.iter().any(|entry| entry.id == id)
+                || state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|object| object.zone == Zone::Stack)
+        });
+    if touches_stack {
+        return Err(EngineError::InvalidAction(
+            "Manual resolution cannot correct an object on the stack".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), EngineError> {
     if !state.debug_mode {
         return Err(EngineError::InvalidAction(
