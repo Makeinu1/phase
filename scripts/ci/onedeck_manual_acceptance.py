@@ -379,8 +379,14 @@ def main() -> int:
             context.close()
         browser.close()
     (out / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    for name, result in results.items():
+        last = result["steps"][-2]["step"] if len(result["steps"]) >= 2 else "boot"
+        level = "notice" if result["status"] == "pass" else "error"
+        # Card names of the scenario sources are public; deck contents are never printed.
+        reason = (result["error"] or "").splitlines()[0][:300] if result["error"] else "all steps passed"
+        print(f"::{level}::{name}: {result['status']} (last step {last}) {reason}")
     print(json.dumps({k: v["status"] for k, v in results.items()}))
-    return 0
+    return 0 if all(v["status"] == "pass" for v in results.values()) else 1
 
 
 if __name__ == "__main__":

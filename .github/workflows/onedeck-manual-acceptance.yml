@@ -23,6 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: onedeck-engine-tests
+          cache-on-failure: true
       - name: Format
         run: cargo fmt --all -- --check
       - name: Manual resolution native tests (feature on)
@@ -43,6 +44,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: onedeck-manual-wasm
+          cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen-cli@0.2.121
@@ -52,11 +54,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Week key
+        id: week
+        run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: data/mtgjson/AtomicCards.json
+          key: onedeck-mtgjson-atomic-${{ steps.week.outputs.week }}
       - name: Card data (MTGJSON -> card-data.json)
         run: |
           mkdir -p data/mtgjson
-          source scripts/lib/mtgjson-fetch.sh
-          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          if [ ! -f data/mtgjson/AtomicCards.json ]; then
+            source scripts/lib/mtgjson-fetch.sh
+            mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+          fi
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
           cp data/card-data.json client/public/card-data.json
       - name: Engine WASM with manual resolution admitted
@@ -81,7 +92,7 @@ jobs:
         env:
           ONEDECK_DECKS: ${{ secrets.ONEDECK_DECKS }}
         run: |
-          test -n "$ONEDECK_DECKS" || { echo "ONEDECK_DECKS secret is not set"; exit 1; }
+          test -n "$ONEDECK_DECKS" || { echo "::error::ONEDECK_DECKS secret is not set"; exit 1; }
           pip install playwright==1.55.0
           python -m playwright install --with-deps chromium
           python scripts/ci/onedeck_manual_acceptance.py --base-url http://localhost:5173 \
@@ -96,9 +107,9 @@ jobs:
           openssl rand -hex 32 > "$RUNNER_TEMP/k"
           openssl enc -aes-256-cbc -pbkdf2 -salt -in "$RUNNER_TEMP/evidence.tgz" -out "$RUNNER_TEMP/evidence.tgz.enc" -pass file:"$RUNNER_TEMP/k"
           openssl pkeyutl -encrypt -pubin -inkey .github/onedeck/evidence.pub -pkeyopt rsa_padding_mode:oaep -in "$RUNNER_TEMP/k" -out "$RUNNER_TEMP/k.enc"
-          git fetch origin ci/onedeck-manual-evidence || true
+          git worktree add --detach "$RUNNER_TEMP/pub"
+          cd "$RUNNER_TEMP/pub"
           git switch --orphan evidence-tmp
-          git rm -rf --quiet . || true
           mkdir -p runs/${GITHUB_RUN_ID}
           cp "$RUNNER_TEMP/evidence.tgz.enc" "$RUNNER_TEMP/k.enc" runs/${GITHUB_RUN_ID}/
           echo "source_sha=${GITHUB_SHA}" > runs/${GITHUB_RUN_ID}/SOURCE
