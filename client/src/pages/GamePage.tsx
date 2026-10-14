@@ -1764,7 +1764,9 @@ function GamePageContent({
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
-          {manualView && localContext && manualStackEntryId != null && (
+          {/* A closed view only records the last source; the board shows the
+              result, so the panel gives way and only the Undo offer stays. */}
+          {manualView && manualView.phase !== "closed" && localContext && manualStackEntryId != null && (
             <div className="absolute bottom-2 right-2 z-50 max-h-[70vh] w-[min(30rem,calc(100vw-1rem))] overflow-auto">
               {manualInteractionId && manualAmountBounds ? <ManualResolutionSandbox
                 source={{ episodeId: manualIdentity!, stackEntryId: manualStackEntryId as ObjectId,
@@ -1794,8 +1796,11 @@ function GamePageContent({
               {manualUndoControl}
             </div>
           )}
-          {!manualView && manualUndo?.episodeEnded && manualUndoControl ? (
-            <div className="absolute bottom-2 right-2 z-50">{manualUndoControl}</div>
+          {(!manualView || manualView.phase === "closed") && manualUndo?.episodeEnded && manualUndoControl ? (
+            <div className="absolute bottom-24 right-2 z-50 max-w-[min(30rem,calc(100vw-1rem))] rounded-lg bg-slate-950/90 p-2 text-slate-100">
+              <p role="status" className="text-xs text-emerald-200">{t("manualResolution.finished")}</p>
+              {manualUndoControl}
+            </div>
           ) : null}
         </div>
 

@@ -289,6 +289,9 @@ def boot(page: Page, base_url: str, game_id: str, decks: dict, deck_name: str) -
 def reach_main_phase(j: Journey) -> None:
     ready = j.wait_for("() => window.__phaseAcceptance?.state() != null", 240)
     j.step("game-started", "ui", ready, "local manual-play game booted")
+    # Close the game log as a player on a laptop screen would; it narrows the
+    # board so far that the hand fan's right end sits under the action bar.
+    j.click_text(re.escape(j.strings.get("closeLog", "対戦ログを閉じる")))
     for _ in range(40):
         s = j.summary()
         wf = s and s.get("waitingFor")
