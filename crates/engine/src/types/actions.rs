@@ -1174,6 +1174,18 @@ pub enum DebugCardCreationKind {
     Token,
 }
 
+/// How a Sandbox correction takes part in a paused manual resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualCorrectionKind {
+    /// Edits board facts in place: it never runs triggers, state-based
+    /// actions, ETB delivery, or a replacement consult that could pause.
+    Inert,
+    /// A real game event the human performs as one of the resolving spell's
+    /// own instructions. CR 603.3: abilities it triggers wait until a player
+    /// would next receive priority, i.e. after the resolution is finished.
+    ResolutionEvent,
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -1247,6 +1259,12 @@ pub enum DebugAction {
     /// `Effect::RevealTop` resolver — marks them revealed and emits
     /// `CardsRevealed` without moving the cards (CR 701.20b).
     Reveal { player_id: PlayerId, count: u32 },
+    /// CR 701.20a: The player reveals their whole hand through the real
+    /// `Effect::RevealHand` resolver; CR 701.20b: the cards stay in hand.
+    RevealHand { player_id: PlayerId },
+    /// CR 701.9a: The card's owner discards it from hand through the single
+    /// discard authority, so replacement effects and discard triggers apply.
+    Discard { object_id: ObjectId },
     /// Shuffle a player's library.
     ShuffleLibrary { player_id: PlayerId },
     /// Start a proliferate choice for a player using the real proliferate
@@ -1439,7 +1457,8 @@ impl DebugAction {
             | Self::SetFaceState { object_id, .. }
             | Self::Detach { object_id }
             | Self::GrantKeyword { object_id, .. }
-            | Self::RemoveKeyword { object_id, .. } => push_related_object_id(ids, *object_id),
+            | Self::RemoveKeyword { object_id, .. }
+            | Self::Discard { object_id } => push_related_object_id(ids, *object_id),
             Self::CreateCard { attach_to, .. } => {
                 if let Some(AttachTarget::Object(object_id)) = attach_to {
                     push_related_object_id(ids, *object_id);
@@ -1455,6 +1474,7 @@ impl DebugAction {
             Self::DrawCards { .. }
             | Self::Mill { .. }
             | Self::Reveal { .. }
+            | Self::RevealHand { .. }
             | Self::ShuffleLibrary { .. }
             | Self::Proliferate { .. }
             | Self::SetLife { .. }
@@ -1480,16 +1500,16 @@ impl DebugAction {
         )
     }
 
-    /// An inert correction edits board facts in place: it never runs triggers,
-    /// state-based actions, ETB delivery, or a replacement consult that could
-    /// pause for a choice, and it never rewrites turn structure or the stack.
-    /// A paused manual resolution admits only these, so the human performing
-    /// the effect cannot accidentally hand control to a second resolution.
-    pub fn is_inert_correction(&self) -> bool {
+    /// How this Sandbox correction may take part in a paused manual
+    /// resolution, or `None` when it must wait until the resolution is over
+    /// (it would create objects, rewrite turn structure, or pause for a
+    /// second resolution the human performing the effect did not ask for).
+    pub fn manual_correction_kind(&self) -> Option<ManualCorrectionKind> {
         match self {
-            Self::MoveToZone { simulate, .. } => !simulate,
+            Self::MoveToZone { simulate, .. } => (!simulate).then_some(ManualCorrectionKind::Inert),
             Self::Mill { .. }
             | Self::Reveal { .. }
+            | Self::RevealHand { .. }
             | Self::ShuffleLibrary { .. }
             | Self::SetBasePowerToughness { .. }
             | Self::ModifyCounters { .. }
@@ -1505,7 +1525,8 @@ impl DebugAction {
             | Self::SetLife { .. }
             | Self::ModifyPlayerCounters { .. }
             | Self::ModifyEnergy { .. }
-            | Self::AddMana { .. } => true,
+            | Self::AddMana { .. } => Some(ManualCorrectionKind::Inert),
+            Self::Discard { .. } => Some(ManualCorrectionKind::ResolutionEvent),
             Self::CreateCard { .. }
             | Self::RemoveObject { .. }
             | Self::Sacrifice { .. }
@@ -1515,7 +1536,7 @@ impl DebugAction {
             | Self::SetPhase { .. }
             | Self::RunStateBasedActions
             | Self::CreateToken { .. }
-            | Self::CreateTokenCopy { .. } => false,
+            | Self::CreateTokenCopy { .. } => None,
         }
     }
 
@@ -1621,6 +1642,12 @@ impl DebugAction {
             }
             DebugAction::Reveal { player_id, count } => {
                 format!("Reveal (top {} of {})", count, player_label(*player_id))
+            }
+            DebugAction::RevealHand { player_id } => {
+                format!("RevealHand ({})", player_label(*player_id))
+            }
+            DebugAction::Discard { object_id } => {
+                format!("Discard ({})", obj(*object_id))
             }
             DebugAction::DrawCards { player_id, count } => {
                 format!("DrawCards ({} draws {})", player_label(*player_id), count)

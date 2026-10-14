@@ -406,6 +406,8 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::RemoveObject { .. }
         | DebugAction::Sacrifice { .. }
         | DebugAction::Reveal { .. }
+        | DebugAction::RevealHand { .. }
+        | DebugAction::Discard { .. }
         | DebugAction::DrawCards { .. }
         | DebugAction::Mill { .. }
         | DebugAction::ShuffleLibrary { .. }

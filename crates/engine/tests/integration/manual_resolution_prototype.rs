@@ -2766,6 +2766,112 @@ mod enabled_baseline_tests {
         assert_eq!(runner.state().players[p0.0 as usize].life, 23);
     }
 
+    /// A hand-attack spell performed by hand: the actor reveals the
+    /// opponent's hand, discards a card from it, and finishes. The reveal
+    /// stays public for the rest of the paused resolution, and the discard
+    /// trigger waits until the resolution is finished (CR 603.3).
+    #[test]
+    fn paused_actor_reveals_a_hand_and_discards_with_deferred_triggers() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let secret_one = scenario.add_card_to_hand(p1, "Secret One");
+        let secret_two = scenario.add_card_to_hand(p1, "Secret Two");
+        let watcher = scenario
+            .add_enchantment_from_oracle(
+                p0,
+                "Discard Watcher",
+                "Whenever an opponent discards a card, you gain 2 life.",
+            )
+            .id();
+        let designated = scenario
+            .add_spell_to_hand_from_oracle(p0, "Manual Hand Attack", false, "You gain 3 life.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+        let stack_entry_id;
+        {
+            let mut cast = runner.cast(designated).commit();
+            stack_entry_id = cast.state().stack.back().expect("cast is on stack").id;
+            cast.act(GameAction::DesignateManualResolution { stack_entry_id })
+                .expect("controller designates the spell");
+        }
+        runner.act(GameAction::PassPriority).expect("caster passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent pass enters the manual wait");
+        let paused = runner.state().waiting_for.clone();
+        assert!(matches!(paused, WaitingFor::ManualResolution { .. }));
+        let life_before = runner.state().players[p0.0 as usize].life;
+        let visible_name = |runner: &GameRunner, id: ObjectId| {
+            engine::game::visibility::filter_state_for_viewer(runner.state(), p0)
+                .objects
+                .get(&id)
+                .map(|object| object.name.clone())
+        };
+        assert_ne!(
+            visible_name(&runner, secret_one).as_deref(),
+            Some("Secret One")
+        );
+
+        runner
+            .act(GameAction::Debug(DebugAction::RevealHand { player_id: p1 }))
+            .expect("the paused actor reveals the opponent's hand");
+        assert_eq!(runner.state().waiting_for, paused);
+        assert_eq!(
+            visible_name(&runner, secret_one).as_deref(),
+            Some("Secret One")
+        );
+        assert_eq!(
+            visible_name(&runner, secret_two).as_deref(),
+            Some("Secret Two")
+        );
+
+        // A discard is a real event: only a card in hand qualifies, and a
+        // refused attempt leaves everything (including the reveal) intact.
+        assert_rejected_unchanged(&mut runner, p0, DebugAction::Discard { object_id: watcher });
+
+        runner
+            .act(GameAction::Debug(DebugAction::Discard {
+                object_id: secret_one,
+            }))
+            .expect("the paused actor makes the opponent discard the chosen card");
+        assert_eq!(runner.state().waiting_for, paused);
+        assert_eq!(runner.state().objects[&secret_one].zone, Zone::Graveyard);
+        assert!(
+            runner.state().stack.is_empty(),
+            "the discard trigger waits while the spell is still resolving"
+        );
+        assert_eq!(runner.state().players[p0.0 as usize].life, life_before);
+        // The revealed remainder stays public across the next correction.
+        assert_eq!(
+            visible_name(&runner, secret_two).as_deref(),
+            Some("Secret Two")
+        );
+
+        runner
+            .act(GameAction::FinishManualResolution { stack_entry_id })
+            .expect("Finish closes the resolution");
+        assert_eq!(runner.state().objects[&designated].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "the deferred discard trigger goes on the stack after the resolution"
+        );
+        runner.act(GameAction::PassPriority).expect("caster passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent passes");
+        assert_eq!(runner.state().players[p0.0 as usize].life, life_before + 2);
+        assert_ne!(
+            visible_name(&runner, secret_two).as_deref(),
+            Some("Secret Two"),
+            "the reveal ends with the resolution"
+        );
+    }
+
     #[test]
     fn paused_resolution_refuses_unsafe_corrections_atomically() {
         let p0 = PlayerId(0);

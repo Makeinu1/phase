@@ -10585,7 +10585,8 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
-    ) {
+    ) && !manual_resolution_keeps_reveals(state)
+    {
         state.revealed_cards.clear();
     }
 
@@ -16170,15 +16171,27 @@ pub fn preflight_debug_action(
     Ok(())
 }
 
-/// Sandbox capability check shared by every debug-action preflight. Keeping it
-/// at the engine boundary means transports cannot use a no-op payload to probe
-/// or bypass debug authorization.
+/// CR 701.20a + CR 608.2c: while a human performs a paused spell's
+/// instructions, a card it revealed stays revealed for as long as the rest of
+/// that resolution needs it (e.g. choosing the card to discard from a
+/// revealed hand). The reveal ends with the resolution.
+#[cfg(feature = "manual_resolution_prototype")]
+fn manual_resolution_keeps_reveals(state: &GameState) -> bool {
+    matches!(state.waiting_for, WaitingFor::ManualResolution { .. })
+}
+
+#[cfg(not(feature = "manual_resolution_prototype"))]
+fn manual_resolution_keeps_reveals(_state: &GameState) -> bool {
+    false
+}
+
 /// While a designated spell is paused for manual resolution, its actor carries
-/// out the spell's instructions with inert board corrections. Every other
+/// out the spell's instructions with Sandbox corrections. Every other
 /// designation phase, actor, and correction stays closed: a correction may not
 /// touch any object on the stack (including the paused source), move an object
-/// onto the stack, or run triggers, state-based actions, or a pausing
-/// replacement consult that would hand control to a second resolution.
+/// onto the stack, or create objects, rewrite turn structure, or open a second
+/// resolution. A correction that is a real game event (a discard) defers the
+/// abilities it triggers until the resolution is finished (CR 603.3).
 #[cfg(feature = "manual_resolution_prototype")]
 fn admit_manual_resolution_correction(
     state: &GameState,
@@ -16195,9 +16208,9 @@ fn admit_manual_resolution_correction(
             "Only the manual-resolution actor may correct the board while it is paused".into(),
         ));
     }
-    if !action.is_inert_correction() {
+    if action.manual_correction_kind().is_none() {
         return Err(EngineError::InvalidAction(
-            "Only inert board corrections are available during manual resolution".into(),
+            "This board correction is unavailable until the manual resolution is finished".into(),
         ));
     }
     if matches!(
@@ -16231,6 +16244,9 @@ fn admit_manual_resolution_correction(
     Ok(())
 }
 
+/// Sandbox capability check shared by every debug-action preflight. Keeping it
+/// at the engine boundary means transports cannot use a no-op payload to probe
+/// or bypass debug authorization.
 fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), EngineError> {
     if !state.debug_mode {
         return Err(EngineError::InvalidAction(

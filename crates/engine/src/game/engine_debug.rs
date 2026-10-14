@@ -35,7 +35,7 @@ use crate::game::token_presets::TokenPtProvenance;
 
 pub fn apply_debug_action(
     state: &mut GameState,
-    _actor: PlayerId,
+    actor: PlayerId,
     action: DebugAction,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
@@ -197,6 +197,81 @@ pub fn apply_debug_action(
             );
             super::effects::reveal_top::resolve(state, &ability, events)
                 .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+        }
+
+        DebugAction::RevealHand { player_id } => {
+            validate_player(state, player_id)?;
+            // CR 701.20a/b: Reveal the player's whole hand via the real
+            // `Effect::RevealHand` resolver. With no card filter and no
+            // optional choice it parks nothing; the cards stay in hand and
+            // become public to every player.
+            let ability = ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Any,
+                    card_filter: TargetFilter::None,
+                    count: None,
+                    selection: Default::default(),
+                    choice_optional: false,
+                    reveal: true,
+                },
+                vec![TargetRef::Player(player_id)],
+                ObjectId(0),
+                actor,
+            );
+            super::effects::reveal_hand::resolve(state, &ability, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+        }
+
+        DebugAction::Discard { object_id } => {
+            validate_object(state, object_id)?;
+            let object = &state.objects[&object_id];
+            if object.zone != Zone::Hand {
+                return Err(EngineError::InvalidAction(
+                    "Only a card in its owner's hand can be discarded".into(),
+                ));
+            }
+            let owner = object.owner;
+            let resolving_source = paused_manual_resolution_source(state);
+            let event_start = events.len();
+            // CR 701.9a: the owner discards the card through the single
+            // discard authority, so replacement effects and discard triggers
+            // apply. Inside a paused manual resolution the discard is one of
+            // the resolving spell's own instructions.
+            match super::effects::discard::discard_caused_by_effect_with_source(
+                state,
+                object_id,
+                owner,
+                resolving_source,
+                events,
+            ) {
+                super::effects::discard::DiscardOutcome::Complete => {
+                    if resolving_source.is_some() {
+                        // CR 603.3: abilities triggered while the spell is
+                        // still resolving wait until a player would next
+                        // receive priority, after the resolution finishes.
+                        super::triggers::collect_triggers_into_deferred(
+                            state,
+                            &events[event_start..],
+                        );
+                    } else {
+                        super::triggers::process_triggers(state, &events[event_start..]);
+                        super::sba::check_state_based_actions(state, events);
+                    }
+                }
+                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(player) => {
+                    if resolving_source.is_some() {
+                        // A replacement choice would open a second resolution
+                        // inside the human-performed one; the boundary rolls
+                        // the whole correction back.
+                        return Err(EngineError::InvalidAction(
+                            "This discard needs a replacement choice; agree on it and move the card instead"
+                                .into(),
+                        ));
+                    }
+                    state.waiting_for =
+                        super::replacement::replacement_choice_waiting_for(player, state);
+                }
+            }
         }
 
         DebugAction::ShuffleLibrary { player_id } => {
@@ -1349,6 +1424,20 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
         )));
     }
     Ok(())
+}
+
+/// The object whose resolution the human is currently performing, if a
+/// manual resolution is paused open.
+#[cfg(feature = "manual_resolution_prototype")]
+fn paused_manual_resolution_source(state: &GameState) -> Option<ObjectId> {
+    state
+        .manual_resolution_open_binding()
+        .map(|binding| binding.source.object_id)
+}
+
+#[cfg(not(feature = "manual_resolution_prototype"))]
+fn paused_manual_resolution_source(_state: &GameState) -> Option<ObjectId> {
+    None
 }
 
 #[cfg(test)]

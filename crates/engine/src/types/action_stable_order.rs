@@ -1270,28 +1270,30 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::DrawCards { .. } => 4,
         DebugAction::Mill { .. } => 5,
         DebugAction::Reveal { .. } => 6,
-        DebugAction::ShuffleLibrary { .. } => 7,
-        DebugAction::Proliferate { .. } => 8,
-        DebugAction::SetBasePowerToughness { .. } => 9,
-        DebugAction::ModifyCounters { .. } => 10,
-        DebugAction::SetTapped { .. } => 11,
-        DebugAction::SetPrepared { .. } => 12,
-        DebugAction::SetController { .. } => 13,
-        DebugAction::SetSummoningSickness { .. } => 14,
-        DebugAction::SetFaceState { .. } => 15,
-        DebugAction::Attach { .. } => 16,
-        DebugAction::Detach { .. } => 17,
-        DebugAction::GrantKeyword { .. } => 18,
-        DebugAction::RemoveKeyword { .. } => 19,
-        DebugAction::SetLife { .. } => 20,
-        DebugAction::ModifyPlayerCounters { .. } => 21,
-        DebugAction::ModifyEnergy { .. } => 22,
-        DebugAction::AddMana { .. } => 23,
-        DebugAction::SetInfiniteMana { .. } => 24,
-        DebugAction::SetPhase { .. } => 25,
-        DebugAction::RunStateBasedActions => 26,
-        DebugAction::CreateToken { .. } => 27,
-        DebugAction::CreateTokenCopy { .. } => 28,
+        DebugAction::RevealHand { .. } => 7,
+        DebugAction::Discard { .. } => 8,
+        DebugAction::ShuffleLibrary { .. } => 9,
+        DebugAction::Proliferate { .. } => 10,
+        DebugAction::SetBasePowerToughness { .. } => 11,
+        DebugAction::ModifyCounters { .. } => 12,
+        DebugAction::SetTapped { .. } => 13,
+        DebugAction::SetPrepared { .. } => 14,
+        DebugAction::SetController { .. } => 15,
+        DebugAction::SetSummoningSickness { .. } => 16,
+        DebugAction::SetFaceState { .. } => 17,
+        DebugAction::Attach { .. } => 18,
+        DebugAction::Detach { .. } => 19,
+        DebugAction::GrantKeyword { .. } => 20,
+        DebugAction::RemoveKeyword { .. } => 21,
+        DebugAction::SetLife { .. } => 22,
+        DebugAction::ModifyPlayerCounters { .. } => 23,
+        DebugAction::ModifyEnergy { .. } => 24,
+        DebugAction::AddMana { .. } => 25,
+        DebugAction::SetInfiniteMana { .. } => 26,
+        DebugAction::SetPhase { .. } => 27,
+        DebugAction::RunStateBasedActions => 28,
+        DebugAction::CreateToken { .. } => 29,
+        DebugAction::CreateTokenCopy { .. } => 30,
     }
 }
 
@@ -1401,6 +1403,18 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
             cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::RevealHand { player_id: a0 } => {
+            let DebugAction::RevealHand { player_id: b0 } = b else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
+        DebugAction::Discard { object_id: a0 } => {
+            let DebugAction::Discard { object_id: b0 } = b else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
         }
         DebugAction::ShuffleLibrary { player_id: a0 } => {
             let DebugAction::ShuffleLibrary { player_id: b0 } = b else {

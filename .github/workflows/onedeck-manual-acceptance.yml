@@ -24,6 +24,14 @@ jobs:
         with:
           shared-key: onedeck-engine-tests
           cache-on-failure: true
+      - name: Verify the CR numbers cited by the manual-correction changes
+        run: |
+          ./scripts/fetch-comp-rules.sh
+          for rule in 701.9a 701.20a 701.20b 603.3 608.2c; do
+            line=$(grep -m1 "^${rule}[ .]" docs/MagicCompRules.txt || true)
+            test -n "$line" || { echo "::error::CR $rule not found"; exit 1; }
+            echo "::notice::CR ${line:0:240}"
+          done
       - name: Format
         run: cargo fmt --all -- --check
       - name: Manual resolution native tests (feature on)
