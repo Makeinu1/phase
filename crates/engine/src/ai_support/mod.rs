@@ -2954,6 +2954,14 @@ pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagn
     {
         return None;
     }
+    // A paused manual resolution is released by its actor's manual commands
+    // (corrections, life loss, Finish), which are offered as interaction
+    // choices rather than enumerated legal actions. Its empty legal-action set
+    // is the intended pause, not a wedge.
+    #[cfg(feature = "manual_resolution_prototype")]
+    if matches!(state.waiting_for, WaitingFor::ManualResolution { .. }) {
+        return None;
+    }
     let submitters = crate::game::turn_control::authorized_submitters(state);
     if submitters.is_empty() {
         return None;

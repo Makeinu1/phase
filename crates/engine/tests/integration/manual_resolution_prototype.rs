@@ -2701,6 +2701,10 @@ mod enabled_baseline_tests {
         let (mut runner, designated, stack_entry_id, stolen, next_spell) =
             manual_correction_board();
         let paused = runner.state().waiting_for.clone();
+        assert!(
+            engine::ai_support::stuck_decision_diagnostic(runner.state()).is_none(),
+            "the intended manual pause is not reported as a stuck decision"
+        );
 
         runner
             .act(GameAction::Debug(DebugAction::Mill {
