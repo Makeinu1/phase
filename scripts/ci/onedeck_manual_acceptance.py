@@ -289,9 +289,6 @@ def boot(page: Page, base_url: str, game_id: str, decks: dict, deck_name: str) -
 def reach_main_phase(j: Journey) -> None:
     ready = j.wait_for("() => window.__phaseAcceptance?.state() != null", 240)
     j.step("game-started", "ui", ready, "local manual-play game booted")
-    # Close the game log as a player on a laptop screen would; it narrows the
-    # board so far that the hand fan's right end sits under the action bar.
-    j.click_text(re.escape(j.strings.get("closeLog", "対戦ログを閉じる")))
     for _ in range(40):
         s = j.summary()
         wf = s and s.get("waitingFor")
@@ -319,6 +316,10 @@ def reach_main_phase(j: Journey) -> None:
         trace(f"full control toggle failed: {exc}")
         enabled = False
     j.step("full-control", "ui", enabled, "コントロール (full control) on")
+    # Close the game log as a player on a laptop screen would; it narrows the
+    # board so far that the hand fan's right end sits under the action bar.
+    closed = j.click_text(re.escape(j.strings.get("closeLog", "対戦ログを閉じる")))
+    trace(f"game log closed: {closed}")
     # Setup: put the human in their precombat main with priority.
     j.debug("SetPhase", {"phase": "PreCombatMain", "active_player": 0})
     j.settle()
