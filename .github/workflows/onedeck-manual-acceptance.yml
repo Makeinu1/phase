@@ -45,6 +45,60 @@ jobs:
           cargo test -p phase-engine --test manual_resolution_prototype 2>&1 | tee "$RUNNER_TEMP/off.log" || {
             grep -E "^test .* FAILED|panicked at|^  left|^ right|assertion|^thread|^error" "$RUNNER_TEMP/off.log" | head -40 | sed 's/^/::error::/'; exit 1; }
 
+  gates:
+    # The upstream quality gates for everything this branch touches.
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+          cache: false
+          rustflags: ''
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: onedeck-gates
+          cache-on-failure: true
+      - name: Clippy (engine, both feature states; server-core; engine-wasm with manual play)
+        run: |
+          set -o pipefail
+          run() { "$@" 2>&1 | tee -a "$RUNNER_TEMP/clippy.log"; }
+          fail=0
+          run cargo clippy -p phase-engine --all-targets -- -D warnings || fail=1
+          run cargo clippy -p phase-engine --all-targets --features manual_resolution_prototype -- -D warnings || fail=1
+          run cargo clippy -p server-core --all-targets -- -D warnings || fail=1
+          run cargo clippy -p engine-wasm --features manual_resolution_local_bootstrap -- -D warnings || fail=1
+          if [ $fail = 1 ]; then grep -E "^(error|warning)|^ +--> " "$RUNNER_TEMP/clippy.log" | head -60 | sed 's/^/::error::/'; exit 1; fi
+      - name: Full engine test suite (feature on)
+        if: always()
+        run: |
+          set -o pipefail
+          cargo test -p phase-engine --features manual_resolution_prototype 2>&1 | tee "$RUNNER_TEMP/all.log" || {
+            grep -E "^test .* FAILED|panicked at|^  left|^ right|^error" "$RUNNER_TEMP/all.log" | head -60 | sed 's/^/::error::/'; exit 1; }
+      - uses: pnpm/action-setup@v4
+        if: always()
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        if: always()
+        with:
+          node-version: 22
+      - name: Client type-check, lint, and full test suite
+        if: always()
+        working-directory: client
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile
+          fail=0
+          pnpm exec tsc -b --noEmit 2>&1 | tee "$RUNNER_TEMP/tsc.log" || fail=1
+          pnpm lint 2>&1 | tee "$RUNNER_TEMP/lint.log" || fail=1
+          pnpm exec vitest run --coverage.enabled=false 2>&1 | tee "$RUNNER_TEMP/vitest.log" || fail=1
+          if [ $fail = 1 ]; then
+            grep -E "error TS|  error |FAIL |✗|×|AssertionError" "$RUNNER_TEMP/tsc.log" "$RUNNER_TEMP/lint.log" "$RUNNER_TEMP/vitest.log" | head -60 | sed 's/^/::error::/'
+            exit 1
+          fi
+
   browser:
     runs-on: ubuntu-latest
     timeout-minutes: 150
