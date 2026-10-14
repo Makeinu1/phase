@@ -422,12 +422,19 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     verify_after_finish(j, before)
     # 6. Undo to before casting (UI).
     undo = j.page.locator('[data-testid="manual-undo"] button')
-    try:
-        undo.first.wait_for(state="visible", timeout=8000)
-        undo.first.click()
-        ok = True
-    except Exception:
-        ok = False
+    ok = False
+    for attempt in range(3):
+        try:
+            undo.first.wait_for(state="visible", timeout=8000)
+            undo.first.click(timeout=5000)
+            ok = True
+            break
+        except Exception as error:
+            # A follow-up prompt (e.g. a trigger choosing its target) can sit
+            # over the board; a player sets it aside with Escape first.
+            trace(f"undo click blocked ({str(error).splitlines()[0][:120]}); pressing Escape")
+            j.page.keyboard.press("Escape")
+            time.sleep(1.0)
     restored = j.wait_for(
         "(c) => { const s = window.__phaseAcceptance.state(); return s && (s.players?.[0]?.hand ?? []).some((id) => s.objects?.[id]?.name === c); }",
         20, card)
