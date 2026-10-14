@@ -153,6 +153,19 @@ class Journey:
         self.wait_for("() => { const s = window.__phaseAcceptance.state(); return s?.waiting_for?.type === 'Priority' && s.waiting_for.data?.player === 0; }", 20)
         time.sleep(seconds)
 
+    def trim_hand(self, keep: int, protect: tuple[str, ...]):
+        """Setup only: return extra opening-hand cards to the library so the
+        whole hand fan fits beside the action bar at this viewport."""
+        for _ in range(12):
+            hand = self.page.evaluate("() => { const s = window.__phaseAcceptance.state(); return (s.players[0].hand ?? []).map((id) => [id, s.objects[id]?.name]); }")
+            if len(hand) <= keep:
+                return
+            spare = next((oid for oid, name in hand if name not in protect), None)
+            if spare is None:
+                return
+            self.settle(0.5)
+            self.debug("MoveToZone", {"object_id": spare, "to_zone": "Library", "simulate": False})
+
     def ensure(self, card: str, owner: int, to_zone: str):
         """Setup only: take the card from the real deck's library, or create it
         when the run uses the synthetic fallback deck. The client drops a queued
@@ -371,6 +384,8 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
     # ordinary play exercised here is a spell through the stack.)
     # Double-click is the desktop hand's ordinary play gesture.
     clicked = j.click_hand_card(next_play, double=True)
+    if not clicked:
+        j.step("next-normal-play", "ui", False, f"{next_play} not reachable in the hand")
     if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
         j.click_text(r"^(支払う|Pay)$")
     for _ in range(6):
@@ -387,6 +402,7 @@ def manual_journey(j: Journey, card: str, corrections, verify_after_finish, next
 def scenario_rejoin(j: Journey) -> None:
     j.ensure("Rejoin the Fight", 0, "Hand")
     j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Rejoin the Fight", "Breach the Multiverse", "Fact or Fiction", "Sol Ring"))
     # Guarantee a creature card in the caster's graveyard after the mill.
     j.ensure("Sun Titan", 0, "Graveyard")
     j.step("setup-cards", "hook(setup)", True, "Rejoin the Fight + Sol Ring to hand, Sun Titan to graveyard")
@@ -410,6 +426,7 @@ def scenario_rejoin(j: Journey) -> None:
 def scenario_breach(j: Journey) -> None:
     j.ensure("Breach the Multiverse", 0, "Hand")
     j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Rejoin the Fight", "Breach the Multiverse", "Fact or Fiction", "Sol Ring"))
     j.step("setup-cards", "hook(setup)", True, "Breach the Multiverse + Sol Ring to hand")
 
     def corrections(j: Journey):
@@ -443,6 +460,7 @@ def scenario_breach(j: Journey) -> None:
 def scenario_fact_or_fiction(j: Journey) -> None:
     j.ensure("Fact or Fiction", 0, "Hand")
     j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Rejoin the Fight", "Breach the Multiverse", "Fact or Fiction", "Sol Ring"))
     j.step("setup-cards", "hook(setup)", True, "Fact or Fiction created in hand + Sol Ring to hand")
 
     def corrections(j: Journey):
