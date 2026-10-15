@@ -1276,30 +1276,31 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::Destroy { .. } => 10,
         DebugAction::PutCards { .. } => 11,
         DebugAction::LoseLife { .. } => 12,
-        DebugAction::GainLife { .. } => 13,
-        DebugAction::DealDamage { .. } => 14,
-        DebugAction::ShuffleLibrary { .. } => 15,
-        DebugAction::Proliferate { .. } => 16,
-        DebugAction::SetBasePowerToughness { .. } => 17,
-        DebugAction::ModifyCounters { .. } => 18,
-        DebugAction::SetTapped { .. } => 19,
-        DebugAction::SetPrepared { .. } => 20,
-        DebugAction::SetController { .. } => 21,
-        DebugAction::SetSummoningSickness { .. } => 22,
-        DebugAction::SetFaceState { .. } => 23,
-        DebugAction::Attach { .. } => 24,
-        DebugAction::Detach { .. } => 25,
-        DebugAction::GrantKeyword { .. } => 26,
-        DebugAction::RemoveKeyword { .. } => 27,
-        DebugAction::SetLife { .. } => 28,
-        DebugAction::ModifyPlayerCounters { .. } => 29,
-        DebugAction::ModifyEnergy { .. } => 30,
-        DebugAction::AddMana { .. } => 31,
-        DebugAction::SetInfiniteMana { .. } => 32,
-        DebugAction::SetPhase { .. } => 33,
-        DebugAction::RunStateBasedActions => 34,
-        DebugAction::CreateToken { .. } => 35,
-        DebugAction::CreateTokenCopy { .. } => 36,
+        DebugAction::GivePlayerCounters { .. } => 13,
+        DebugAction::GainLife { .. } => 14,
+        DebugAction::DealDamage { .. } => 15,
+        DebugAction::ShuffleLibrary { .. } => 16,
+        DebugAction::Proliferate { .. } => 17,
+        DebugAction::SetBasePowerToughness { .. } => 18,
+        DebugAction::ModifyCounters { .. } => 19,
+        DebugAction::SetTapped { .. } => 20,
+        DebugAction::SetPrepared { .. } => 21,
+        DebugAction::SetController { .. } => 22,
+        DebugAction::SetSummoningSickness { .. } => 23,
+        DebugAction::SetFaceState { .. } => 24,
+        DebugAction::Attach { .. } => 25,
+        DebugAction::Detach { .. } => 26,
+        DebugAction::GrantKeyword { .. } => 27,
+        DebugAction::RemoveKeyword { .. } => 28,
+        DebugAction::SetLife { .. } => 29,
+        DebugAction::ModifyPlayerCounters { .. } => 30,
+        DebugAction::ModifyEnergy { .. } => 31,
+        DebugAction::AddMana { .. } => 32,
+        DebugAction::SetInfiniteMana { .. } => 33,
+        DebugAction::SetPhase { .. } => 34,
+        DebugAction::RunStateBasedActions => 35,
+        DebugAction::CreateToken { .. } => 36,
+        DebugAction::CreateTokenCopy { .. } => 37,
     }
 }
 
@@ -1454,6 +1455,23 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
             cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::GivePlayerCounters {
+            player_id: a0,
+            kind: a1,
+            amount: a2,
+        } => {
+            let DebugAction::GivePlayerCounters {
+                player_id: b0,
+                kind: b1,
+                amount: b2,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
         }
         DebugAction::GainLife {
             player_id: a0,

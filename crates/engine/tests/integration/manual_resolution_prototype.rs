@@ -3152,6 +3152,14 @@ mod enabled_baseline_tests {
             .expect("the actor gains life");
         assert_eq!(life(&runner, p0), p0_life + 4);
         runner
+            .act(GameAction::Debug(DebugAction::GivePlayerCounters {
+                player_id: p1,
+                kind: engine::types::player::PlayerCounterKind::Poison,
+                amount: 2,
+            }))
+            .expect("the opponent gets two poison counters");
+        assert_eq!(runner.state().players[p1.0 as usize].poison_counters, 2);
+        runner
             .act(GameAction::Debug(DebugAction::ModifyCounters {
                 object_id: elf,
                 counter_type: CounterType::Plus1Plus1,
@@ -3276,6 +3284,121 @@ mod enabled_baseline_tests {
             .act(GameAction::FinishManualResolution { stack_entry_id })
             .expect("Finish closes the resolution");
         assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+    }
+
+    /// CR 111.2: the resolving spell creates tokens (and token copies) for the
+    /// player it names; their entering triggers wait for the resolution
+    /// (CR 603.3), and the tokens are the spell's own.
+    #[test]
+    fn paused_actor_creates_tokens_and_token_copies() {
+        use engine::types::actions::DebugTokenRequest;
+        use engine::types::card_type::CoreType;
+        use engine::types::mana::ManaColor;
+        use engine::types::proposed_event::TokenCharacteristics;
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut ids = Vec::new();
+        let (mut runner, stack_entry_id) = paused_instruction_board(|scenario| {
+            ids.push(
+                scenario
+                    .add_creature_from_oracle(
+                        p0,
+                        "Entry Watcher",
+                        1,
+                        1,
+                        "Whenever another creature you control enters, you gain 1 life.",
+                    )
+                    .id(),
+            );
+            ids.push(scenario.add_creature(p1, "Copied Bear", 2, 2).id());
+        });
+        let [_, bear] = ids[..] else { unreachable!() };
+        let paused = runner.state().waiting_for.clone();
+        let source = match &paused {
+            WaitingFor::ManualResolution { .. } => runner
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == stack_entry_id)
+                .map(|entry| entry.source_id)
+                .expect("the paused spell is on the stack"),
+            _ => unreachable!(),
+        };
+        let life = runner.state().players[p0.0 as usize].life;
+        let deferred = runner.state().deferred_triggers.len();
+        let soldier = TokenCharacteristics {
+            display_name: "Soldier".into(),
+            power: Some(1),
+            toughness: Some(1),
+            loyalty: None,
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Soldier".into()],
+            supertypes: vec![],
+            colors: vec![ManaColor::White],
+            keywords: vec![],
+        };
+        runner
+            .act(GameAction::Debug(DebugAction::CreateToken {
+                request: DebugTokenRequest::Custom {
+                    owner: p0,
+                    characteristics: soldier,
+                    enter_with_counters: vec![],
+                },
+                count: 2,
+                run_etb: true,
+            }))
+            .expect("the spell creates two Soldier tokens");
+        let tokens = runner.state().last_created_token_ids.clone();
+        assert_eq!(tokens.len(), 2);
+        for token in &tokens {
+            let token = &runner.state().objects[token];
+            assert_eq!(
+                (token.zone, token.owner, token.controller),
+                (Zone::Battlefield, p0, p0)
+            );
+        }
+        assert_eq!(runner.state().waiting_for, paused);
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| entry.source_id == source));
+        assert_eq!(
+            runner.state().players[p0.0 as usize].life,
+            life,
+            "triggers wait"
+        );
+        assert_eq!(runner.state().deferred_triggers.len() - deferred, 2);
+
+        runner
+            .act(GameAction::Debug(DebugAction::CreateTokenCopy {
+                source_id: bear,
+                owner: p0,
+                count: 1,
+                nonlegendary: false,
+            }))
+            .expect("the spell creates a token copy of the bear for the actor");
+        let copy = runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| {
+                let object = &runner.state().objects[id];
+                object.name == "Copied Bear" && object.controller == p0
+            })
+            .expect("the copy is under the actor's control");
+        assert_ne!(copy, bear);
+        assert_eq!(runner.state().deferred_triggers.len() - deferred, 3);
+
+        runner
+            .act(GameAction::FinishManualResolution { stack_entry_id })
+            .expect("Finish closes the resolution");
+        assert_eq!(
+            runner.state().stack.len(),
+            3,
+            "the watcher's three triggers go on the stack once the spell is done"
+        );
     }
 
     /// Outside a manual pause these are ordinary Sandbox tools: a creature

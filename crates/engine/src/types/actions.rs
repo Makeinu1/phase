@@ -1336,6 +1336,15 @@ pub enum DebugAction {
     /// CR 119.3: The player loses this much life through the real
     /// `Effect::LoseLife` resolver.
     LoseLife { player_id: PlayerId, amount: u32 },
+    /// CR 122.1: The player gets this many counters of a player-counter kind
+    /// (poison, experience, rad, ticket) through the real
+    /// `Effect::GivePlayerCounter` resolver, so replacement effects and
+    /// counter triggers apply.
+    GivePlayerCounters {
+        player_id: PlayerId,
+        kind: PlayerCounterKind,
+        amount: u32,
+    },
     /// CR 119.3: The player gains this much life through the real
     /// `Effect::GainLife` resolver.
     GainLife { player_id: PlayerId, amount: u32 },
@@ -1568,6 +1577,7 @@ impl DebugAction {
             | Self::RevealHand { .. }
             | Self::LookAtCards { .. }
             | Self::LoseLife { .. }
+            | Self::GivePlayerCounters { .. }
             | Self::GainLife { .. }
             | Self::ShuffleLibrary { .. }
             | Self::Proliferate { .. }
@@ -1622,21 +1632,22 @@ impl DebugAction {
             | Self::Destroy { .. }
             | Self::PutCards { .. }
             | Self::LoseLife { .. }
+            | Self::GivePlayerCounters { .. }
             | Self::GainLife { .. }
             | Self::DealDamage { .. }
             | Self::ModifyCounters { .. }
             | Self::SetTapped { .. }
             | Self::Sacrifice { .. }
             | Self::DrawCards { .. }
-            | Self::Mill { .. } => Some(ManualCorrectionKind::ResolutionEvent),
+            | Self::Mill { .. }
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => Some(ManualCorrectionKind::ResolutionEvent),
             Self::CreateCard { .. }
             | Self::RemoveObject { .. }
             | Self::Proliferate { .. }
             | Self::SetInfiniteMana { .. }
             | Self::SetPhase { .. }
-            | Self::RunStateBasedActions
-            | Self::CreateToken { .. }
-            | Self::CreateTokenCopy { .. } => None,
+            | Self::RunStateBasedActions => None,
         }
     }
 
@@ -1678,9 +1689,9 @@ impl DebugAction {
             Self::Destroy { object_ids, .. } | Self::PutCards { object_ids, .. } => {
                 distinct(object_ids)
             }
-            Self::LoseLife { amount: value, .. } | Self::GainLife { amount: value, .. } => {
-                amount(*value)
-            }
+            Self::LoseLife { amount: value, .. }
+            | Self::GainLife { amount: value, .. }
+            | Self::GivePlayerCounters { amount: value, .. } => amount(*value),
             Self::DealDamage {
                 object_ids,
                 player_ids,
@@ -1821,6 +1832,16 @@ impl DebugAction {
             DebugAction::GainLife { player_id, amount } => {
                 format!("GainLife ({} gains {})", player_label(*player_id), amount)
             }
+            DebugAction::GivePlayerCounters {
+                player_id,
+                kind,
+                amount,
+            } => format!(
+                "GivePlayerCounters ({} gets {} {})",
+                player_label(*player_id),
+                amount,
+                kind
+            ),
             DebugAction::DealDamage {
                 object_ids,
                 player_ids,

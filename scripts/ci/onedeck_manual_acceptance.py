@@ -748,6 +748,40 @@ def scenario_demonic_tutor(j: Journey) -> None:
     manual_journey(j, "Demonic Tutor", corrections, verify, "Sol Ring")
 
 
+def scenario_raise_the_alarm(j: Journey) -> None:
+    """Tokens: the card's own printed token is offered on the shelf."""
+    j.ensure("Raise the Alarm", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Raise the Alarm", "Sol Ring"))
+    j.step("setup-cards", "hook(setup)", True, "Raise the Alarm in hand")
+    panel = j.strings["panel"]
+    soldiers = "() => Object.values(window.__phaseAcceptance.state().objects).filter((o) => o.zone === 'Battlefield' && o.name.startsWith('Soldier') && o.controller === 0).length"
+
+    def corrections(j: Journey):
+        shelf = j.panel().locator('[data-testid="manual-token-shelf"]')
+        soldier = shelf.get_by_role("button", name=re.compile(r"^Soldier 1/1"))
+        try:
+            soldier.first.wait_for(state="visible", timeout=10000)
+            offered = True
+        except Exception:
+            offered = False
+        j.step("token-offered", "ui", offered, "the card's own Soldier token is offered on the shelf")
+        # "Create two 1/1 white Soldier creature tokens."
+        shelf.get_by_role("button", name="+").first.click(timeout=10000)
+        soldier.first.click(timeout=10000)
+        created = j.wait_for(f"() => ({soldiers})() === 2", 15)
+        j.step("create-tokens", "ui", created, "two Soldier tokens created")
+
+    def verify(j: Journey, before):
+        s = j.summary()
+        count = j.page.evaluate(f"({soldiers})")
+        ok = "Raise the Alarm" in s["players"][0]["graveyard"] and count == 2 \
+            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
+        j.step("verify-after-finish", "state", ok, f"{count} Soldier tokens on the battlefield")
+
+    manual_journey(j, "Raise the Alarm", corrections, verify, "Sol Ring")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
@@ -757,6 +791,7 @@ SCENARIOS = {
     "F-go-for-the-throat": ("Celes", scenario_go_for_the_throat),
     "G-lightning-bolt": ("Celes", scenario_lightning_bolt),
     "H-demonic-tutor": ("Celes", scenario_demonic_tutor),
+    "I-raise-the-alarm": ("Celes", scenario_raise_the_alarm),
 }
 
 

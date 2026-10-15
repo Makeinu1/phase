@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,18 @@ import type { ManualResolutionCommandPort } from "../manual-resolution-ui-contra
 
 const dispatchAction = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("../../../game/dispatch", () => ({ dispatchAction }));
+vi.mock("../../../services/engineRuntime", () => ({
+  listTokenPresets: async () => [
+    { id: "t-treasure-1", category: { PredefinedArtifact: { kind: "Treasure" } }, fidelity: "Full", pt_provenance: "FixedOrAbsent",
+      body: { display_name: "Treasure", power: null, toughness: null, core_types: ["Artifact"], subtypes: ["Treasure"], supertypes: [], colors: [], keywords: [] } },
+    { id: "t-treasure-2", category: { PredefinedArtifact: { kind: "Treasure" } }, fidelity: "Full", pt_provenance: "FixedOrAbsent",
+      body: { display_name: "Treasure", power: null, toughness: null, core_types: ["Artifact"], subtypes: ["Treasure"], supertypes: [], colors: [], keywords: [] } },
+    { id: "t-soldier", category: "Creature", fidelity: "Full", pt_provenance: "FixedOrAbsent", type_line: "Token Creature — Soldier",
+      body: { display_name: "Soldier", power: 1, toughness: 1, core_types: ["Creature"], subtypes: ["Soldier"], supertypes: [], colors: ["White"], keywords: [] } },
+    { id: "t-ooze", category: "Creature", fidelity: "Full", pt_provenance: { SourceDefinedOrDynamic: { power: "X", toughness: "X" } },
+      body: { display_name: "Ooze", power: 0, toughness: 0, core_types: ["Creature"], subtypes: ["Ooze"], supertypes: [], colors: ["Green"], keywords: [] } },
+  ],
+}));
 vi.mock("../../card/CardImage", () => ({ CardImage: ({ cardName }: { cardName: string }) => <span>{cardName}</span> }));
 
 function object(id: number, owner: number, zone: string, name: string, visible = true) {
@@ -105,7 +117,14 @@ describe("ManualResolutionPanel", () => {
     act(() => useManualPickStore.getState().pickObject(10));
     await user.click(screen.getByRole("button", { name: "Put 3 +1/+1 counter(s)" }));
     expect(dispatchAction).toHaveBeenCalledWith(debug({
-      type: "ModifyCounters", data: { object_id: 10, counter_type: "Plus1Plus1", delta: 3 },
+      type: "ModifyCounters", data: { object_id: 10, counter_type: "P1P1", delta: 3 },
+    }));
+    act(() => useManualPickStore.getState().pickObject(10));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Counter kind" }), "custom");
+    await user.type(screen.getByRole("textbox", { name: "Other name" }), "Oil");
+    await user.click(screen.getByRole("button", { name: "Remove 3 Oil counter(s)" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({
+      type: "ModifyCounters", data: { object_id: 10, counter_type: "oil", delta: -3 },
     }));
   });
 
@@ -129,6 +148,9 @@ describe("ManualResolutionPanel", () => {
     await user.click(screen.getByRole("button", { name: "+" }));
     await user.click(screen.getByRole("button", { name: "Lose life" }));
     expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "LoseLife", data: { player_id: 0, amount: 2 } }));
+    act(() => useManualPickStore.getState().pickPlayer(1));
+    await user.click(screen.getByRole("button", { name: "Get 2 poison counter(s)" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "GivePlayerCounters", data: { player_id: 1, kind: "Poison", amount: 2 } }));
   });
 
   it("reveals a hidden hand opened from the board, then discards from it", async () => {
@@ -183,6 +205,38 @@ describe("ManualResolutionPanel", () => {
     await user.type(screen.getByRole("searchbox", { name: "Filter by name" }), "tutor");
     expect(screen.getByRole("button", { name: "Demonic Tutor" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Forest 30" })).toBeNull();
+  });
+
+  it("creates the resolving card's own tokens, common ones, and searched ones", async () => {
+    const user = userEvent.setup();
+    setBoard({ revealed: false });
+    const current = useGameStore.getState().gameState as unknown as { objects: Record<number, unknown> };
+    useGameStore.setState({
+      gameState: { ...current, objects: { ...current.objects, 201: { ...object(201, 0, "Stack", "Thoughtseize"), source_related_token_ids: ["t-soldier"] } } } as never,
+    });
+    renderPanel();
+    const shelf = await screen.findByTestId("manual-token-shelf");
+    expect(await within(shelf).findByRole("button", { name: "Soldier 1/1 (White)" })).toBeInTheDocument();
+    expect(within(shelf).getAllByRole("button", { name: "Treasure" })).toHaveLength(1);
+    await user.click(within(shelf).getByRole("button", { name: "+" }));
+    await user.click(within(shelf).getByRole("button", { name: "Treasure" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({
+      type: "CreateToken",
+      data: { request: { type: "Preset", data: { preset_id: "t-treasure-1", owner: 0, enter_with_counters: [] } }, run_etb: true, count: 2 },
+    }));
+    await user.type(within(shelf).getByRole("searchbox", { name: "Search tokens" }), "ooze");
+    expect(within(shelf).queryByRole("button", { name: /Ooze/ })).toBeNull();
+  });
+
+  it("makes a token copy of a picked permanent", async () => {
+    const user = userEvent.setup();
+    setBoard({ revealed: false });
+    renderPanel();
+    act(() => useManualPickStore.getState().pickObject(10));
+    await user.click(screen.getByRole("button", { name: "Create 1 token copy(ies)" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({
+      type: "CreateTokenCopy", data: { source_id: 10, owner: 0, nonlegendary: false, count: 1 },
+    }));
   });
 
   it("puts an opponent's graveyard card onto the battlefield under the viewer's control", async () => {

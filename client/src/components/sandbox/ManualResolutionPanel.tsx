@@ -7,6 +7,7 @@ import { dispatchAction } from "../../game/dispatch";
 import { useGameStore } from "../../stores/gameStore";
 import { useManualPickStore, type ManualBoardZone } from "../../stores/manualPickStore";
 import { CardImage } from "../card/CardImage";
+import { ManualTokenShelf } from "./ManualTokenShelf";
 import type {
   ManualResolutionCommandPort,
   ManualResolutionRequest,
@@ -36,7 +37,7 @@ export interface ManualResolutionPanelProps {
 type Verb =
   | "destroy" | "sacrifice" | "damage" | "tap" | "untap" | "addCounter" | "removeCounter"
   | "exile" | "toHand" | "toGraveyard" | "discard" | "toBattlefield" | "toBattlefieldMine"
-  | "toLibraryTop" | "toLibraryBottom";
+  | "toLibraryTop" | "toLibraryBottom" | "copyToken";
 
 type CardZone = "Battlefield" | "Hand" | "Graveyard" | "Exile" | "Library";
 
@@ -48,7 +49,7 @@ function verbsFor(zone: CardZone, objects: readonly GameObject[], viewerId: Play
     case "Battlefield":
       return [
         "destroy", "sacrifice", "damage", objects.every((object) => object.tapped) ? "untap" : "tap",
-        "addCounter", "removeCounter", "exile", "toHand", "toGraveyard", ...library,
+        "addCounter", "removeCounter", "copyToken", "exile", "toHand", "toGraveyard", ...library,
       ];
     case "Hand": return ["discard", "exile", "toBattlefield", ...mine, ...library];
     case "Graveyard": return ["toBattlefield", ...mine, "toHand", "exile", ...library];
@@ -58,9 +59,9 @@ function verbsFor(zone: CardZone, objects: readonly GameObject[], viewerId: Play
 }
 
 /** Verbs that use the amount stepper. */
-const AMOUNT_VERBS: ReadonlySet<Verb> = new Set(["damage", "addCounter", "removeCounter"]);
+const AMOUNT_VERBS: ReadonlySet<Verb> = new Set(["damage", "addCounter", "removeCounter", "copyToken"]);
 
-function instructionsFor(verb: Verb, objects: readonly GameObject[], noRegeneration: boolean, amount: number): DebugAction[] {
+function instructionsFor(verb: Verb, objects: readonly GameObject[], noRegeneration: boolean, amount: number, viewerId: PlayerId, counterType: string): DebugAction[] {
   const ids = objects.map((object) => object.id);
   const put = (destination: Extract<DebugAction, { type: "PutCards" }>["data"]["destination"]): DebugAction[] =>
     [{ type: "PutCards", data: { object_ids: ids, destination } }];
@@ -73,9 +74,9 @@ function instructionsFor(verb: Verb, objects: readonly GameObject[], noRegenerat
     case "tap": return each((object_id) => ({ type: "SetTapped", data: { object_id, tapped: true } }));
     case "untap": return each((object_id) => ({ type: "SetTapped", data: { object_id, tapped: false } }));
     case "addCounter":
-      return each((object_id) => ({ type: "ModifyCounters", data: { object_id, counter_type: "Plus1Plus1", delta: amount } }));
+      return each((object_id) => ({ type: "ModifyCounters", data: { object_id, counter_type: counterType, delta: amount } }));
     case "removeCounter":
-      return each((object_id) => ({ type: "ModifyCounters", data: { object_id, counter_type: "Plus1Plus1", delta: -amount } }));
+      return each((object_id) => ({ type: "ModifyCounters", data: { object_id, counter_type: counterType, delta: -amount } }));
     case "discard": return each((object_id) => ({ type: "Discard", data: { object_id } }));
     case "exile": return put({ type: "Exile" });
     case "toHand": return put({ type: "Hand" });
@@ -84,10 +85,16 @@ function instructionsFor(verb: Verb, objects: readonly GameObject[], noRegenerat
     case "toBattlefieldMine": return put({ type: "Battlefield", data: { control: "Actor" } });
     case "toLibraryTop": return put({ type: "Library", data: { end: "Top" } });
     case "toLibraryBottom": return put({ type: "Library", data: { end: "Bottom" } });
+    case "copyToken":
+      return each((source_id) => ({ type: "CreateTokenCopy", data: { source_id, owner: viewerId, nonlegendary: false, count: amount } }));
   }
 }
 
 const ZONES: readonly ManualBoardZone[] = ["hand", "graveyard", "exile", "library"];
+
+/** Counter kinds offered by name; the engine parses the name into its typed
+ *  counter (an unknown single word becomes a named counter, CR 122.1). */
+const COUNTER_KINDS = ["P1P1", "M1M1", "loyalty", "shield", "stun", "lore", "time", "oil"] as const;
 
 export function ManualResolutionPanel({ viewerId, source, operable, finish, playerName, undoControl }: ManualResolutionPanelProps) {
   const { t } = useTranslation("game");
@@ -97,6 +104,8 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
   const openZone = useManualPickStore((s) => s.openZone);
   const [amount, setAmount] = useState(1);
   const [noRegeneration, setNoRegeneration] = useState(false);
+  const [counterChoice, setCounterChoice] = useState<string>("P1P1");
+  const [customCounter, setCustomCounter] = useState("");
   const [nameFilter, setNameFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -185,6 +194,11 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
     }
   };
 
+  const counterType = counterChoice === "custom" ? customCounter.trim().toLowerCase() : counterChoice;
+  const counterLabel = counterChoice === "custom" ? customCounter.trim() : t(`manualResolution.panel.counterKinds.${counterChoice}`);
+  // One amount stepper at a time: the shelf borrows it when nothing else shows it.
+  const stepperShown = Boolean(pickedPlayerState) || pickedZone === "Battlefield"
+    || (openZone?.zone === "library" && hiddenCount > 0);
   const button = "rounded-md border border-white/15 bg-slate-900 px-2.5 py-1 text-xs text-slate-100 hover:bg-slate-800 disabled:opacity-40";
   const stepper = (
     <span className="flex items-center gap-1 text-xs">
@@ -308,6 +322,14 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
                   {t("manualResolution.panel.damage", { count: amount })}
                 </button>
                 <button type="button" disabled={busy} className={button}
+                  onClick={() => void submit([{ type: "GivePlayerCounters", data: { player_id: pickedPlayerState.id, kind: "Poison", amount } }])}>
+                  {t("manualResolution.panel.poison", { count: amount })}
+                </button>
+                <button type="button" disabled={busy} className={button}
+                  onClick={() => void submit([{ type: "GivePlayerCounters", data: { player_id: pickedPlayerState.id, kind: "Experience", amount } }])}>
+                  {t("manualResolution.panel.experience", { count: amount })}
+                </button>
+                <button type="button" disabled={busy} className={button}
                   onClick={() => void submit([{ type: "DrawCards", data: { player_id: pickedPlayerState.id, count: amount } }])}>
                   {t("manualResolution.panel.draw")}
                 </button>
@@ -324,11 +346,27 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
                 <div className="flex flex-wrap items-center gap-1.5">
                   {verbsFor(pickedZone, pickedObjects, viewerId).map((verb) => (
                     <button key={verb} type="button" disabled={busy} className={button}
-                      onClick={() => void submit(instructionsFor(verb, pickedObjects, noRegeneration, amount))}>
-                      {AMOUNT_VERBS.has(verb) ? t(`manualResolution.panel.${verb}`, { count: amount }) : t(`manualResolution.panel.${verb}`)}
+                      onClick={() => void submit(instructionsFor(verb, pickedObjects, noRegeneration, amount, viewerId, counterType))}>
+                      {AMOUNT_VERBS.has(verb) ? t(`manualResolution.panel.${verb}`, { count: amount, kind: counterLabel }) : t(`manualResolution.panel.${verb}`)}
                     </button>
                   ))}
                   {pickedZone === "Battlefield" && stepper}
+                  {pickedZone === "Battlefield" && (
+                    <span className="flex items-center gap-1 text-xs">
+                      <select aria-label={t("manualResolution.panel.counterKind")} value={counterChoice}
+                        onChange={(event) => setCounterChoice(event.target.value)}
+                        className="rounded border border-white/15 bg-slate-900 px-1 py-0.5">
+                        {[...COUNTER_KINDS, "custom"].map((kind) => (
+                          <option key={kind} value={kind}>{t(`manualResolution.panel.counterKinds.${kind}`)}</option>
+                        ))}
+                      </select>
+                      {counterChoice === "custom" && (
+                        <input aria-label={t("manualResolution.panel.customCounter")} value={customCounter}
+                          onChange={(event) => setCustomCounter(event.target.value)}
+                          className="w-20 rounded border border-white/15 bg-slate-900 px-1 py-0.5" />
+                      )}
+                    </span>
+                  )}
                   {pickedZone === "Battlefield" && (
                     <label className="flex items-center gap-1 text-xs text-slate-300">
                       <input type="checkbox" checked={noRegeneration} onChange={(event) => setNoRegeneration(event.target.checked)} />
@@ -344,6 +382,11 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
             <p className="text-xs text-slate-400">{t("manualResolution.panel.pickHint")}</p>
           )}
         </div>
+
+        <ManualTokenShelf owner={pickedPlayerState?.id ?? viewerId} count={amount} disabled={busy}
+          amountControl={stepperShown ? null : stepper}
+          relatedPresetIds={objects[source.sourceObjectId]?.source_related_token_ids ?? []}
+          onCreate={(action) => void submit([action])} />
 
         {error ? <p role="alert" className="text-xs text-rose-300">{error}</p> : null}
 

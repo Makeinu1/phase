@@ -16195,8 +16195,9 @@ fn manual_resolution_keeps_reveals(_state: &GameState) -> bool {
 /// out the spell's instructions with Sandbox corrections. Every other
 /// designation phase, actor, and correction stays closed: a correction may not
 /// touch any object on the stack (including the paused source), move an object
-/// onto the stack, or create objects, rewrite turn structure, or open a second
-/// resolution. A correction that is a real game event (a discard) defers the
+/// onto the stack, create objects other than the tokens the spell makes
+/// (CR 111.2), rewrite turn structure, or open a second resolution. A
+/// correction that is a real game event (a discard) defers the
 /// abilities it triggers until the resolution is finished (CR 603.3).
 #[cfg(feature = "manual_resolution_prototype")]
 fn admit_manual_resolution_correction(

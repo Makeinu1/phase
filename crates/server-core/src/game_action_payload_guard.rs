@@ -424,6 +424,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::LookAtCards { .. }
         | DebugAction::Discard { .. }
         | DebugAction::LoseLife { .. }
+        | DebugAction::GivePlayerCounters { .. }
         | DebugAction::GainLife { .. }
         | DebugAction::DrawCards { .. }
         | DebugAction::Mill { .. }

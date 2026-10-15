@@ -508,6 +508,27 @@ pub fn apply_debug_action(
             )?;
         }
 
+        DebugAction::GivePlayerCounters {
+            player_id,
+            kind,
+            amount,
+        } => {
+            validate_player(state, player_id)?;
+            perform_instruction(
+                state,
+                actor,
+                Effect::GivePlayerCounter {
+                    counter_kind: kind,
+                    count: QuantityExpr::Fixed {
+                        value: instruction_amount(amount)?,
+                    },
+                    target: TargetFilter::Player,
+                },
+                vec![TargetRef::Player(player_id)],
+                events,
+            )?;
+        }
+
         DebugAction::ShuffleLibrary { player_id } => {
             validate_player(state, player_id)?;
             shuffle_library(state, player_id, events);
@@ -989,6 +1010,10 @@ pub fn apply_debug_action(
                 } => (owner, characteristics, enter_with_counters, None),
             };
             validate_player(state, owner)?;
+            // CR 111.2: inside a paused manual resolution the resolving spell
+            // creates the token; the player it names owns and controls it.
+            let resolving_source = paused_manual_resolution_source(state);
+            let event_start = events.len();
             // CR 111.1 + CR 614.1a: Route debug token creation through the real
             // CreateToken pipeline so replacements, predefined-subtype
             // abilities (Treasure/Clue/Food/etc.), and ETB triggers all fire.
@@ -1004,7 +1029,7 @@ pub fn apply_debug_action(
                 tapped: false,
                 enters_attacking: false,
                 sacrifice_at: None,
-                source_id: ObjectId(0),
+                source_id: resolving_source.unwrap_or(ObjectId(0)),
                 controller: owner,
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
@@ -1041,12 +1066,25 @@ pub fn apply_debug_action(
                     // (with its replacement-window counters) but its ETB triggers
                     // and the SBA pass are skipped — mirrors the raw placement of
                     // `MoveToZone { simulate: false }`.
-                    if run_etb {
+                    if resolving_source.is_some() {
+                        // CR 603.3 + CR 704.3: the token's entering triggers
+                        // wait for the resolution to finish, like every other
+                        // instruction the resolving spell performs.
+                        settle_instruction_triggers(state, resolving_source, event_start, events);
+                    } else if run_etb {
                         super::triggers::process_triggers(state, events); // CR 603: Process triggers
                         super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
                     }
                 }
                 super::replacement::ReplacementResult::Prevented => {}
+                super::replacement::ReplacementResult::NeedsChoice(_)
+                    if resolving_source.is_some() =>
+                {
+                    return Err(EngineError::InvalidAction(
+                        "This instruction needs a further choice; agree on the result and perform it in smaller steps"
+                            .into(),
+                    ));
+                }
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);
@@ -1062,33 +1100,46 @@ pub fn apply_debug_action(
         } => {
             validate_object(state, source_id)?;
             validate_player(state, owner)?;
-            let ability = ResolvedAbility::new(
-                Effect::CopyTokenOf {
-                    target: TargetFilter::Any,
-                    owner: TargetFilter::Controller,
-                    source_filter: None,
-                    enters_attacking: false,
-                    tapped: false,
-                    count: QuantityExpr::Fixed {
-                        value: i32::try_from(count)
-                            .expect("debug create count is bounded below i32::MAX"),
-                    },
-                    extra_keywords: vec![],
-                    additional_modifications: nonlegendary
-                        .then_some(ContinuousModification::RemoveSupertype {
-                            supertype: Supertype::Legendary,
-                        })
-                        .into_iter()
-                        .collect(),
+            let copy_effect = Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed {
+                    value: i32::try_from(count)
+                        .expect("debug create count is bounded below i32::MAX"),
                 },
-                vec![TargetRef::Object(source_id)],
-                source_id,
-                owner,
-            );
-            super::effects::token_copy::resolve(state, &ability, events)
-                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
-            super::triggers::process_triggers(state, events);
-            super::sba::check_state_based_actions(state, events);
+                extra_keywords: vec![],
+                additional_modifications: nonlegendary
+                    .then_some(ContinuousModification::RemoveSupertype {
+                        supertype: Supertype::Legendary,
+                    })
+                    .into_iter()
+                    .collect(),
+            };
+            if paused_manual_resolution_source(state).is_some() {
+                // CR 111.2 + CR 707.2: the resolving spell creates the copy for
+                // the player it names; its entering triggers wait (CR 603.3).
+                perform_instruction(
+                    state,
+                    owner,
+                    copy_effect,
+                    vec![TargetRef::Object(source_id)],
+                    events,
+                )?;
+            } else {
+                let ability = ResolvedAbility::new(
+                    copy_effect,
+                    vec![TargetRef::Object(source_id)],
+                    source_id,
+                    owner,
+                );
+                super::effects::token_copy::resolve(state, &ability, events)
+                    .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+                super::triggers::process_triggers(state, events);
+                super::sba::check_state_based_actions(state, events);
+            }
         }
     }
 
