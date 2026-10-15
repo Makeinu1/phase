@@ -3200,6 +3200,84 @@ mod enabled_baseline_tests {
         );
     }
 
+    /// CR 701.20e: a look shows hidden cards to the looker only. A tutor looks
+    /// through its library, takes a card, and the shuffle forgets the rest.
+    #[test]
+    fn paused_actor_looks_privately_searches_and_shuffles() {
+        use engine::types::actions::{CardDestination, LookScope};
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut ids = Vec::new();
+        let (mut runner, stack_entry_id) = paused_instruction_board(|scenario| {
+            // Added bottom-up, so the library reads top-first: tutor, second, third.
+            ids.push(scenario.add_card_to_library_top(p0, "Third Card"));
+            ids.push(scenario.add_card_to_library_top(p0, "Second Card"));
+            ids.push(scenario.add_card_to_library_top(p0, "Top Card"));
+            ids.push(scenario.add_card_to_hand(p1, "Opposing Secret"));
+        });
+        let [third, second, top, secret] = ids[..] else {
+            unreachable!()
+        };
+        let paused = runner.state().waiting_for.clone();
+        let sees = |runner: &GameRunner, viewer: PlayerId, id: ObjectId, name: &str| {
+            engine::game::visibility::filter_state_for_viewer(runner.state(), viewer)
+                .objects
+                .get(&id)
+                .is_some_and(|object| object.name == name)
+        };
+        assert!(!sees(&runner, p0, secret, "Opposing Secret"));
+        assert!(!sees(&runner, p0, top, "Top Card"));
+
+        let look = |runner: &mut GameRunner, player_id, scope| {
+            runner
+                .act(GameAction::Debug(DebugAction::LookAtCards {
+                    player_id,
+                    scope,
+                }))
+                .expect("the paused actor looks");
+            assert_eq!(runner.state().waiting_for, paused, "a look keeps the pause");
+        };
+        look(&mut runner, p1, LookScope::Hand);
+        assert!(sees(&runner, p0, secret, "Opposing Secret"));
+
+        look(&mut runner, p0, LookScope::Library { top: Some(1) });
+        assert!(sees(&runner, p0, top, "Top Card"));
+        assert!(
+            !sees(&runner, p0, second, "Second Card"),
+            "only the top one"
+        );
+
+        look(&mut runner, p0, LookScope::Library { top: None });
+        assert!(sees(&runner, p0, third, "Third Card"));
+        assert!(
+            !sees(&runner, p1, third, "Third Card"),
+            "the opponent learns nothing"
+        );
+
+        runner
+            .act(GameAction::Debug(DebugAction::PutCards {
+                object_ids: vec![second],
+                destination: CardDestination::Hand,
+            }))
+            .expect("the searched card is put into hand");
+        assert!(sees(&runner, p0, third, "Third Card"), "the look lasts");
+        runner
+            .act(GameAction::Debug(DebugAction::ShuffleLibrary {
+                player_id: p0,
+            }))
+            .expect("the library is shuffled");
+        assert!(
+            !sees(&runner, p0, third, "Third Card") && !sees(&runner, p0, top, "Top Card"),
+            "a shuffle forgets the library's order"
+        );
+        assert!(sees(&runner, p0, secret, "Opposing Secret"));
+
+        runner
+            .act(GameAction::FinishManualResolution { stack_entry_id })
+            .expect("Finish closes the resolution");
+        assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+    }
+
     /// Outside a manual pause these are ordinary Sandbox tools: a creature
     /// put onto the battlefield triggers its entering ability exactly once.
     #[test]

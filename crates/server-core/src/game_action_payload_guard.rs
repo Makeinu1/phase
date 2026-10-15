@@ -421,6 +421,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::Sacrifice { .. }
         | DebugAction::Reveal { .. }
         | DebugAction::RevealHand { .. }
+        | DebugAction::LookAtCards { .. }
         | DebugAction::Discard { .. }
         | DebugAction::LoseLife { .. }
         | DebugAction::GainLife { .. }

@@ -702,6 +702,52 @@ def scenario_lightning_bolt(j: Journey) -> None:
     manual_journey(j, "Lightning Bolt", corrections, verify, "Sol Ring")
 
 
+def scenario_demonic_tutor(j: Journey) -> None:
+    """A tutor: look through your own library privately, take one card, shuffle."""
+    j.ensure("Demonic Tutor", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Demonic Tutor", "Sol Ring"))
+    # The library is hidden from its owner, so the placement is verified by size.
+    for _ in range(3):
+        size = j.page.evaluate("() => window.__phaseAcceptance.state().players[0].library.length")
+        j.settle(1.0)
+        j.debug("CreateCard", {"card_name": "Swords to Plowshares", "owner": 0, "zone": "Library", "count": 1})
+        if j.wait_for("(n) => window.__phaseAcceptance.state().players[0].library.length > n", 6, size):
+            break
+    else:
+        raise AssertionError("could not place Swords to Plowshares in the library")
+    j.step("setup-cards", "hook(setup)", True, "Demonic Tutor in hand, Swords to Plowshares somewhere in the library")
+    panel = j.strings["panel"]
+    hidden_library = "() => { const s = window.__phaseAcceptance.state(); return s.players[0].library.every((id) => s.objects[id]?.display_visible_to_viewer !== true); }"
+
+    def corrections(j: Journey):
+        # "Search your library for a card": open the library pile, look through it.
+        j.ui_open_zone(0, "library")
+        j.ui_panel_button(panel["searchLibrary"])
+        shown = j.wait_for("() => document.querySelectorAll('[data-testid=\"manual-zone-strip\"] li').length > 12", 15)
+        j.step("search-library", "ui", shown, "the whole library is shown to its owner in the panel")
+        j.panel().get_by_role("searchbox", name=panel["filter"]).fill("Swords")
+        j.ui_pick_strip("Swords to Plowshares")
+        # "put that card into your hand"
+        j.ui_panel_button(panel["toHand"])
+        in_hand = j.wait_for(
+            "() => { const s = window.__phaseAcceptance.state(); return s.players[0].hand.some((id) => s.objects[id]?.name === 'Swords to Plowshares'); }", 15)
+        j.step("card-to-hand", "ui", in_hand, "Swords to Plowshares put into hand")
+        # "then shuffle."
+        j.ui_panel_button(panel["shuffle"])
+        forgotten = j.wait_for(hidden_library, 15)
+        j.step("shuffle", "ui", forgotten, "after the shuffle the library is hidden again")
+
+    def verify(j: Journey, before):
+        s = j.summary()
+        ok = "Demonic Tutor" in s["players"][0]["graveyard"] \
+            and "Swords to Plowshares" in s["players"][0]["hand"] \
+            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
+        j.step("verify-after-finish", "state", ok, "the searched card is in hand and the tutor resolved")
+
+    manual_journey(j, "Demonic Tutor", corrections, verify, "Sol Ring")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
@@ -710,6 +756,7 @@ SCENARIOS = {
     "E-wrath-of-god": ("Celes", scenario_wrath),
     "F-go-for-the-throat": ("Celes", scenario_go_for_the_throat),
     "G-lightning-bolt": ("Celes", scenario_lightning_bolt),
+    "H-demonic-tutor": ("Celes", scenario_demonic_tutor),
 }
 
 

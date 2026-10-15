@@ -97,6 +97,7 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
   const openZone = useManualPickStore((s) => s.openZone);
   const [amount, setAmount] = useState(1);
   const [noRegeneration, setNoRegeneration] = useState(false);
+  const [nameFilter, setNameFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unresolvedFinish, setUnresolvedFinish] = useState<ManualResolutionRequest | null>(null);
@@ -129,8 +130,15 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
   };
   const stripIds = openZone ? zoneIds(openZone.playerId, openZone.zone) : [];
   // The engine's display-identity flag is the single authority for what this viewer sees.
-  const shown = stripIds.filter((id) => objects[id]?.display_visible_to_viewer === true);
-  const hiddenCount = stripIds.length - shown.length;
+  const visible = stripIds.filter((id) => objects[id]?.display_visible_to_viewer === true);
+  const hiddenCount = stripIds.length - visible.length;
+  // A searched library can hold most of a deck; narrowing by name is a view
+  // convenience over the engine's visible cards, not a game decision.
+  const FILTER_THRESHOLD = 12;
+  const needle = nameFilter.trim().toLowerCase();
+  const shown = visible.length > FILTER_THRESHOLD && needle
+    ? visible.filter((id) => objects[id]?.name.toLowerCase().includes(needle))
+    : visible;
 
   const submit = async (actions: DebugAction[]) => {
     setBusy(true);
@@ -207,6 +215,12 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
                 zone: t(`manualResolution.panel.zones.${openZone.zone}`),
               })}</span>
               <span className="flex gap-1">
+                {openZone.zone === "library" && (
+                  <button type="button" disabled={busy} className={button}
+                    onClick={() => void submit([{ type: "ShuffleLibrary", data: { player_id: openZone.playerId } }])}>
+                    {t("manualResolution.panel.shuffle")}
+                  </button>
+                )}
                 {ZONES.filter((zone) => zone !== openZone.zone).map((zone) => (
                   <button key={zone} type="button" className={button}
                     onClick={() => useManualPickStore.getState().showZone(openZone.playerId, zone)}>
@@ -215,6 +229,11 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
                 ))}
               </span>
             </div>
+            {visible.length > FILTER_THRESHOLD && (
+              <input type="search" value={nameFilter} onChange={(event) => setNameFilter(event.target.value)}
+                aria-label={t("manualResolution.panel.filter")} placeholder={t("manualResolution.panel.filter")}
+                className="mt-2 w-full rounded border border-white/15 bg-slate-900 px-2 py-0.5 text-xs" />
+            )}
             <ul className="mt-2 flex max-h-36 flex-wrap gap-1.5 overflow-auto">
               {shown.map((id) => (
                 <li key={id}>
@@ -228,20 +247,36 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
               ))}
             </ul>
             {hiddenCount > 0 && (
-              <div className="mt-1 flex items-center gap-2 text-xs text-slate-400">
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
                 <span>{t("manualResolution.panel.hidden", { count: hiddenCount })}</span>
                 {openZone.zone === "hand" && openZone.playerId !== viewerId && (
-                  <button type="button" disabled={busy} className={button}
-                    onClick={() => void submit([{ type: "RevealHand", data: { player_id: openZone.playerId } }])}>
-                    {t("manualResolution.panel.revealHand")}
-                  </button>
+                  <>
+                    <button type="button" disabled={busy} className={button}
+                      onClick={() => void submit([{ type: "LookAtCards", data: { player_id: openZone.playerId, scope: { type: "Hand" } } }])}>
+                      {t("manualResolution.panel.lookHand")}
+                    </button>
+                    <button type="button" disabled={busy} className={button}
+                      onClick={() => void submit([{ type: "RevealHand", data: { player_id: openZone.playerId } }])}>
+                      {t("manualResolution.panel.revealHand")}
+                    </button>
+                  </>
                 )}
-                {openZone.zone === "library" && stepper}
                 {openZone.zone === "library" && (
-                  <button type="button" disabled={busy} className={button}
-                    onClick={() => void submit([{ type: "Reveal", data: { player_id: openZone.playerId, count: amount } }])}>
-                    {t("manualResolution.panel.revealTop", { count: amount })}
-                  </button>
+                  <>
+                    <button type="button" disabled={busy} className={button}
+                      onClick={() => void submit([{ type: "LookAtCards", data: { player_id: openZone.playerId, scope: { type: "Library", data: { top: null } } } }])}>
+                      {t("manualResolution.panel.searchLibrary")}
+                    </button>
+                    {stepper}
+                    <button type="button" disabled={busy} className={button}
+                      onClick={() => void submit([{ type: "LookAtCards", data: { player_id: openZone.playerId, scope: { type: "Library", data: { top: amount } } } }])}>
+                      {t("manualResolution.panel.lookTop", { count: amount })}
+                    </button>
+                    <button type="button" disabled={busy} className={button}
+                      onClick={() => void submit([{ type: "Reveal", data: { player_id: openZone.playerId, count: amount } }])}>
+                      {t("manualResolution.panel.revealTop", { count: amount })}
+                    </button>
+                  </>
                 )}
               </div>
             )}

@@ -146,6 +146,45 @@ describe("ManualResolutionPanel", () => {
     expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "Discard", data: { object_id: 11 } }));
   });
 
+  it("looks at a hand privately, searches a library, and shuffles it", async () => {
+    const user = userEvent.setup();
+    setBoard({ revealed: false });
+    renderPanel();
+    act(() => useManualPickStore.getState().showZone(1, "hand"));
+    await user.click(screen.getByRole("button", { name: "Look at hand" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "LookAtCards", data: { player_id: 1, scope: { type: "Hand" } } }));
+
+    act(() => useManualPickStore.getState().showZone(1, "library"));
+    await user.click(screen.getByRole("button", { name: "Search library" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({
+      type: "LookAtCards", data: { player_id: 1, scope: { type: "Library", data: { top: null } } },
+    }));
+    await user.click(screen.getByRole("button", { name: "+" }));
+    await user.click(screen.getByRole("button", { name: "Look at top 2" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({
+      type: "LookAtCards", data: { player_id: 1, scope: { type: "Library", data: { top: 2 } } },
+    }));
+    await user.click(screen.getByRole("button", { name: "Shuffle" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "ShuffleLibrary", data: { player_id: 1 } }));
+  });
+
+  it("narrows a long searched library by name", async () => {
+    const user = userEvent.setup();
+    const library = Array.from({ length: 14 }, (_, index) => 30 + index);
+    useGameStore.setState({
+      gameState: {
+        players: [{ id: 0, life: 40, hand: [], graveyard: [], library }, { id: 1, life: 40, hand: [], graveyard: [], library: [] }],
+        exile: [],
+        objects: Object.fromEntries(library.map((id) => [id, object(id, 0, "Library", id === 40 ? "Demonic Tutor" : `Forest ${id}`)])),
+      } as never,
+    });
+    renderPanel();
+    act(() => useManualPickStore.getState().showZone(0, "library"));
+    await user.type(screen.getByRole("searchbox", { name: "Filter by name" }), "tutor");
+    expect(screen.getByRole("button", { name: "Demonic Tutor" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Forest 30" })).toBeNull();
+  });
+
   it("puts an opponent's graveyard card onto the battlefield under the viewer's control", async () => {
     const user = userEvent.setup();
     setBoard({ revealed: false });

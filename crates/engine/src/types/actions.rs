@@ -1202,6 +1202,17 @@ pub enum CardDestination {
     Library { end: LibraryEnd },
 }
 
+/// The hidden cards a Sandbox look instruction covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum LookScope {
+    Hand,
+    /// The whole library when `top` is `None` (a search), else its top N.
+    Library {
+        top: Option<u32>,
+    },
+}
+
 /// Which end of its owner's library a card is put on (CR 401.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LibraryEnd {
@@ -1297,6 +1308,14 @@ pub enum DebugAction {
     /// CR 701.20a: The player reveals their whole hand through the real
     /// `Effect::RevealHand` resolver; CR 701.20b: the cards stay in hand.
     RevealHand { player_id: PlayerId },
+    /// CR 701.20e: The acting player privately looks at a player's hidden
+    /// cards (a hand, a whole library for a search, or its top N). The cards
+    /// do not move; only the looker learns them, and a library look is
+    /// forgotten when that library is shuffled.
+    LookAtCards {
+        player_id: PlayerId,
+        scope: LookScope,
+    },
     /// CR 701.9a: The card's owner discards it from hand through the single
     /// discard authority, so replacement effects and discard triggers apply.
     Discard { object_id: ObjectId },
@@ -1547,6 +1566,7 @@ impl DebugAction {
             | Self::Mill { .. }
             | Self::Reveal { .. }
             | Self::RevealHand { .. }
+            | Self::LookAtCards { .. }
             | Self::LoseLife { .. }
             | Self::GainLife { .. }
             | Self::ShuffleLibrary { .. }
@@ -1583,6 +1603,7 @@ impl DebugAction {
             Self::MoveToZone { simulate, .. } => (!simulate).then_some(ManualCorrectionKind::Inert),
             Self::Reveal { .. }
             | Self::RevealHand { .. }
+            | Self::LookAtCards { .. }
             | Self::ShuffleLibrary { .. }
             | Self::SetBasePowerToughness { .. }
             | Self::SetPrepared { .. }
@@ -1762,6 +1783,17 @@ impl DebugAction {
             DebugAction::RevealHand { player_id } => {
                 format!("RevealHand ({})", player_label(*player_id))
             }
+            DebugAction::LookAtCards { player_id, scope } => match scope {
+                LookScope::Hand => format!("LookAtCards (hand of {})", player_label(*player_id)),
+                LookScope::Library { top: None } => {
+                    format!("LookAtCards (library of {})", player_label(*player_id))
+                }
+                LookScope::Library { top: Some(count) } => format!(
+                    "LookAtCards (top {} of {})",
+                    count,
+                    player_label(*player_id)
+                ),
+            },
             DebugAction::Discard { object_id } => {
                 format!("Discard ({})", obj(*object_id))
             }

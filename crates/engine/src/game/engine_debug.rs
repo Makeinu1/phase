@@ -7,7 +7,7 @@ use crate::types::ability::{
 use crate::types::action_rejection::ActionRejection;
 use crate::types::actions::{
     BattlefieldEntryControl, CardDestination, DebugAction, DebugCardCreationKind,
-    DebugTokenRequest, GameAction, LibraryEnd, RegenerationPermission,
+    DebugTokenRequest, GameAction, LibraryEnd, LookScope, RegenerationPermission,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
@@ -290,6 +290,16 @@ pub fn apply_debug_action(
             );
             super::effects::reveal_hand::resolve(state, &ability, events)
                 .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+        }
+
+        DebugAction::LookAtCards { player_id, scope } => {
+            validate_player(state, player_id)?;
+            let cards = looked_at_cards(state, player_id, scope);
+            // CR 701.20e: Looking shows the cards to the looker only. They stay
+            // where they are; the looker keeps the knowledge until the cards
+            // change zones, or (for a library) until it is shuffled.
+            let audience = super::turn_control::decision_audience_for_player(state, actor);
+            state.remember_card_identities(audience, &cards);
         }
 
         DebugAction::Discard { object_id } => {
@@ -1706,6 +1716,22 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
         )));
     }
     Ok(())
+}
+
+/// The hidden cards a look instruction covers, in zone order.
+fn looked_at_cards(state: &GameState, player_id: PlayerId, scope: LookScope) -> Vec<ObjectId> {
+    let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
+        return Vec::new();
+    };
+    match scope {
+        LookScope::Hand => player.hand.iter().copied().collect(),
+        LookScope::Library { top } => {
+            let count = top.map_or(player.library.len(), |top| {
+                usize::try_from(top).unwrap_or(usize::MAX)
+            });
+            player.library.iter().take(count).copied().collect()
+        }
+    }
 }
 
 /// An instruction amount as the resolvers' signed quantity; larger values
