@@ -27,7 +27,7 @@ jobs:
       - name: Verify the CR numbers cited by the manual-correction changes
         run: |
           ./scripts/fetch-comp-rules.sh
-          for rule in 701.9a 701.20a 701.20b 603.3 701.8a 400.6 119.3 110.2a 121.1 701.17a 704.3 120.3 401.4 603.10a 603.7 122.1 701.21a 701.26a 701.20e 701.20d 111.2 707.2 117.3b; do
+          for rule in 701.9a 701.20a 701.20b 603.3 701.8a 400.6 119.3 110.2a 121.1 701.17a 704.3 120.3 401.4 603.10a 603.7 122.1 701.21a 701.26a 701.20e 701.20d 111.2 707.2 117.3b 113.7 602.2 608.2c; do
             line=$(grep -m1 "^${rule}[ .]" docs/MagicCompRules.txt || true)
             test -n "$line" || { echo "::error::CR $rule not found"; exit 1; }
             echo "::notice::CR ${line:0:240}"

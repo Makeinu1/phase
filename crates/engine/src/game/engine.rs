@@ -16235,8 +16235,12 @@ fn admit_manual_resolution_correction(
         .related_object_ids()
         .into_iter()
         .any(|id| {
+            // A designated spell is its own source; a designated ability's
+            // source is a permanent (or card) its instructions may act on,
+            // as in "sacrifice it" (CR 113.7).
             id == binding.stack_entry_id
-                || id == binding.source.object_id
+                || (id == binding.source.object_id
+                    && binding.source.object_id == binding.stack_entry_id)
                 || state.stack.iter().any(|entry| entry.id == id)
                 || state
                     .objects

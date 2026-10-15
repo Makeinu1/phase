@@ -3472,6 +3472,130 @@ mod enabled_baseline_tests {
         );
     }
 
+    /// CR 603.3 + CR 608.2c: a triggered ability on the stack can be performed
+    /// by hand like a spell. Its controller designates it, it pauses when it
+    /// would resolve, its printed instructions are suppressed, the human acts
+    /// with the ability's source as the source (and may sacrifice that source),
+    /// and Finish takes the ability off the stack.
+    #[test]
+    fn paused_actor_performs_a_triggered_ability_by_hand() {
+        use engine::types::actions::{BattlefieldEntryControl, CardDestination};
+        let p0 = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let elf = scenario
+            .add_creature_to_hand_from_oracle(
+                p0,
+                "Sandbox Elf",
+                1,
+                1,
+                "When this creature enters, you gain 3 life.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+        runner
+            .act(GameAction::Debug(DebugAction::PutCards {
+                object_ids: vec![elf],
+                destination: CardDestination::Battlefield {
+                    control: BattlefieldEntryControl::Owner,
+                },
+            }))
+            .expect("the creature enters and its ability triggers");
+        let trigger = runner.state().stack.back().expect("the trigger waits").id;
+        assert_ne!(trigger, elf, "the ability is its own stack object");
+        let life = runner.state().players[p0.0 as usize].life;
+
+        runner
+            .act(GameAction::DesignateManualResolution {
+                stack_entry_id: trigger,
+            })
+            .expect("the controller designates the triggered ability");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("controller passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent passes");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ManualResolution { stack_entry_id, .. } if stack_entry_id == trigger
+            ),
+            "the ability pauses where it would resolve"
+        );
+        assert_eq!(
+            runner.state().players[p0.0 as usize].life,
+            life,
+            "the printed instructions are suppressed"
+        );
+
+        runner
+            .act(GameAction::Debug(DebugAction::GainLife {
+                player_id: p0,
+                amount: 1,
+            }))
+            .expect("the controller performs the ability's instruction");
+        runner
+            .act(GameAction::Debug(DebugAction::Sacrifice { object_id: elf }))
+            .expect("the ability's own source may be sacrificed");
+        runner
+            .act(GameAction::FinishManualResolution {
+                stack_entry_id: trigger,
+            })
+            .expect("Finish takes the ability off the stack");
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().players[p0.0 as usize].life, life + 1);
+        assert_eq!(runner.state().objects[&elf].zone, Zone::Graveyard);
+    }
+
+    /// CR 602.2: an activated ability is performed by hand the same way.
+    #[test]
+    fn paused_actor_performs_an_activated_ability_by_hand() {
+        let p0 = PlayerId(0);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let shrine = scenario
+            .add_creature_from_oracle(p0, "Life Shrine", 0, 4, "{T}: You gain 2 life.")
+            .id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: shrine,
+                ability_index: 0,
+            })
+            .expect("the ability is activated");
+        let ability = runner.state().stack.back().expect("on the stack").id;
+        let life = runner.state().players[p0.0 as usize].life;
+        runner
+            .act(GameAction::DesignateManualResolution {
+                stack_entry_id: ability,
+            })
+            .expect("the controller designates the activated ability");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("controller passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent passes");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManualResolution { .. }
+        ));
+        runner
+            .act(GameAction::FinishManualResolution {
+                stack_entry_id: ability,
+            })
+            .expect("Finish takes the ability off the stack");
+        assert!(runner.state().stack.is_empty());
+        assert_eq!(runner.state().players[p0.0 as usize].life, life);
+    }
+
     #[test]
     fn paused_resolution_refuses_unsafe_corrections_atomically() {
         let p0 = PlayerId(0);

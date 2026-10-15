@@ -1177,7 +1177,11 @@ pub struct ManualResolutionBinding {
     pub actor: PlayerId,
     pub stack_entry_id: ObjectId,
     pub source: ObjectIncarnationRef,
-    pub cast_occurrence: CastOccurrence,
+    /// CR 601.2i: the finalized cast a designated spell came from. `None` for
+    /// an activated or triggered ability, which is put onto the stack without
+    /// being cast (CR 602.2 / CR 603.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_occurrence: Option<CastOccurrence>,
 }
 
 /// Begin's validated instruction input, latched before the automatic body.
@@ -13387,7 +13391,32 @@ impl GameState {
         actor: PlayerId,
         entry: &StackEntry,
     ) -> bool {
-        self.manual_resolution_source_is_supported_in_zone(actor, entry, Zone::Stack)
+        match &entry.kind {
+            StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. } => {
+                self.manual_ability_is_supported(actor, entry)
+            }
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => {
+                self.manual_resolution_source_is_supported_in_zone(actor, entry, Zone::Stack)
+            }
+        }
+    }
+
+    /// CR 602.2 + CR 603.3: an activated or triggered ability its controller
+    /// performs by hand. CR 608.2c: the controller follows its instructions,
+    /// so only the ability's own controller may designate it, once it is a
+    /// finished stack object (no target or mode is still being chosen) whose
+    /// source object the instructions can name.
+    #[cfg(feature = "manual_resolution_prototype")]
+    fn manual_ability_is_supported(&self, actor: PlayerId, entry: &StackEntry) -> bool {
+        crate::game::turn_control::live_authorized_submitter_for_player(self, actor) == actor
+            && entry.controller == actor
+            && self.pending_trigger_entry != Some(entry.id)
+            && entry.ability().is_some_and(|ability| {
+                ability.controller == actor && ability.source_id == entry.source_id
+            })
+            && self.objects.contains_key(&entry.source_id)
     }
 
     #[cfg(feature = "manual_resolution_prototype")]
@@ -13567,12 +13596,29 @@ impl GameState {
         if !self.manual_resolution_source_is_supported(actor, entry) {
             return None;
         }
-        let object = self.objects.get(&entry.id)?;
+        // A spell is its own card on the stack. An ability's source is the
+        // object it came from (CR 113.7), in the incarnation the ability
+        // already names (CR 400.7) when it latched one.
+        let (incarnation, cast_occurrence) = match &entry.kind {
+            StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. } => {
+                let source = self.objects.get(&entry.source_id)?;
+                let latched = entry
+                    .ability()
+                    .and_then(|ability| ability.source_incarnation);
+                (latched.unwrap_or(source.incarnation), None)
+            }
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => {
+                let object = self.objects.get(&entry.id)?;
+                (object.incarnation, Some(object.cast_occurrence?))
+            }
+        };
         Some(ManualResolutionBinding {
             actor,
             stack_entry_id: entry.id,
-            source: ObjectIncarnationRef::of(entry.source_id, object.incarnation),
-            cast_occurrence: object.cast_occurrence?,
+            source: ObjectIncarnationRef::of(entry.source_id, incarnation),
+            cast_occurrence,
         })
     }
 
@@ -13667,41 +13713,53 @@ impl GameState {
                     .resolving_stack_entry
                     .as_ref()
                     .ok_or("Manual active carrier is missing")?;
+                // A designated spell is the exact paid, hand-cast occurrence
+                // in its caster's journal; a designated ability has no cast.
+                let occurrence_matches = match (&entry.kind, binding.cast_occurrence) {
+                    (
+                        StackEntryKind::Spell {
+                            casting_variant: CastingVariant::Normal,
+                            ..
+                        },
+                        Some(cast),
+                    ) => {
+                        entry.ability().map(|ability| ability.cast_occurrence)
+                            == begin
+                                .ability
+                                .as_deref()
+                                .map(|ability| ability.cast_occurrence)
+                            && entry
+                                .ability()
+                                .is_none_or(|ability| ability.cast_occurrence == Some(cast))
+                            && cast.caster == binding.actor
+                            && self
+                                .spells_cast_this_turn_by_player
+                                .get(&cast.caster)
+                                .and_then(|journal| journal.get(cast.turn_journal_index as usize))
+                                .is_some_and(|record| {
+                                    record.spell_object_id == Some(binding.source.object_id)
+                                        && record.from_zone == Zone::Hand
+                                        && record.cast_variant.is_normal()
+                                })
+                    }
+                    (
+                        StackEntryKind::ActivatedAbility { .. }
+                        | StackEntryKind::TriggeredAbility { .. },
+                        None,
+                    ) => true,
+                    _ => false,
+                };
                 if entry.id != binding.stack_entry_id
                     || entry.source_id != binding.source.object_id
                     || entry.controller != binding.actor
                     || begin.owner != binding.actor
                     || begin.source != binding.source
                     || self.stack.iter().any(|stacked| stacked.id == entry.id)
-                    || !matches!(
-                        entry.kind,
-                        StackEntryKind::Spell {
-                            casting_variant: CastingVariant::Normal,
-                            ..
-                        }
-                    )
-                    || entry.ability().map(|ability| ability.cast_occurrence)
-                        != begin
-                            .ability
-                            .as_deref()
-                            .map(|ability| ability.cast_occurrence)
+                    || !occurrence_matches
                     || entry.ability().is_some_and(|ability| {
-                        ability.cast_occurrence != Some(binding.cast_occurrence)
-                            || ability.source_incarnation != Some(binding.source.incarnation)
+                        ability.source_incarnation != Some(binding.source.incarnation)
                     })
                     || entry.ability() != begin.ability.as_deref()
-                    || binding.cast_occurrence.caster != binding.actor
-                    || self
-                        .spells_cast_this_turn_by_player
-                        .get(&binding.cast_occurrence.caster)
-                        .and_then(|journal| {
-                            journal.get(binding.cast_occurrence.turn_journal_index as usize)
-                        })
-                        .is_none_or(|record| {
-                            record.spell_object_id != Some(binding.source.object_id)
-                                || record.from_zone != Zone::Hand
-                                || !record.cast_variant.is_normal()
-                        })
                 {
                     return Err("Manual Begin latch does not match its sole carrier".into());
                 }

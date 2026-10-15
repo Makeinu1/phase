@@ -6913,9 +6913,9 @@ fn exact_choices(
                                 source_id: binding.source.object_id.0,
                                 source_incarnation: binding.source.incarnation,
                                 stack_entry_id: Some(binding.stack_entry_id.0),
-                                cast_turn_journal_index: Some(
-                                    binding.cast_occurrence.turn_journal_index,
-                                ),
+                                cast_turn_journal_index: binding
+                                    .cast_occurrence
+                                    .map(|cast| cast.turn_journal_index),
                                 card_id: object.card_id.0,
                                 name: object.name.clone(),
                             },
@@ -11856,7 +11856,9 @@ pub fn manual_interaction_source(
                 source_id: binding.source.object_id.0,
                 source_incarnation: binding.source.incarnation,
                 stack_entry_id: Some(binding.stack_entry_id.0),
-                cast_turn_journal_index: Some(binding.cast_occurrence.turn_journal_index),
+                cast_turn_journal_index: binding
+                    .cast_occurrence
+                    .map(|cast| cast.turn_journal_index),
                 card_id: object.card_id.0,
                 name: object.name.clone(),
             }

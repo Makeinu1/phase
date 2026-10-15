@@ -2239,24 +2239,38 @@ pub(crate) fn manual_resolution_source(
                         .iter()
                         .find(|entry| entry.id == binding.stack_entry_id)
                 })?;
-            let StackEntryKind::Spell { card_id, .. } = &entry.kind else {
-                return None;
+            let (card_id, name) = match (&entry.kind, binding.cast_occurrence) {
+                (StackEntryKind::Spell { card_id, .. }, Some(cast)) => {
+                    let record = state
+                        .spells_cast_this_turn_by_player
+                        .get(&cast.caster)?
+                        .get(cast.turn_journal_index as usize)?;
+                    if record.spell_object_id != Some(binding.source.object_id) {
+                        return None;
+                    }
+                    (*card_id, record.name.clone())
+                }
+                // CR 113.7: an ability is shown as its source object.
+                (
+                    StackEntryKind::ActivatedAbility { .. }
+                    | StackEntryKind::TriggeredAbility { .. },
+                    None,
+                ) => {
+                    let source = state.objects.get(&binding.source.object_id)?;
+                    (source.card_id, source.name.clone())
+                }
+                _ => return None,
             };
-            let record = state
-                .spells_cast_this_turn_by_player
-                .get(&binding.cast_occurrence.caster)?
-                .get(binding.cast_occurrence.turn_journal_index as usize)?;
-            if record.spell_object_id != Some(binding.source.object_id) {
-                return None;
-            }
             Some(ManualResolutionSource {
                 actor: binding.actor.0,
                 source_id: binding.source.object_id.0,
                 source_incarnation: binding.source.incarnation,
                 stack_entry_id: Some(binding.stack_entry_id.0),
-                cast_turn_journal_index: Some(binding.cast_occurrence.turn_journal_index),
+                cast_turn_journal_index: binding
+                    .cast_occurrence
+                    .map(|cast| cast.turn_journal_index),
                 card_id: card_id.0,
-                name: record.name.clone(),
+                name,
             })
         }
     }
@@ -2357,7 +2371,8 @@ pub fn manual_resolution_view_for_source(
             && binding.source.object_id.0 == captured.source_id
             && binding.source.incarnation == captured.source_incarnation
             && Some(binding.stack_entry_id.0) == captured.stack_entry_id
-            && Some(binding.cast_occurrence.turn_journal_index) == captured.cast_turn_journal_index
+            && binding.cast_occurrence.map(|cast| cast.turn_journal_index)
+                == captured.cast_turn_journal_index
         {
             use crate::types::game_state::{ManualResolutionActivePhase, ManualResolutionState};
             use crate::types::interaction::ManualResolutionPhase;

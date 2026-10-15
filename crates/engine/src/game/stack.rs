@@ -73,6 +73,13 @@ pub(super) fn finish_resolving_stack_entry(
     #[cfg(feature = "manual_resolution_prototype")]
     if let Some(entry) = entry.as_ref() {
         state.clear_manual_resolution_source(entry.id);
+        // A designated ability's occurrence is its stack entry, not its source.
+        if state
+            .manual_resolution_binding()
+            .is_some_and(|binding| binding.stack_entry_id == entry.id)
+        {
+            state.manual_resolution_state = None;
+        }
     }
     let firing = state.resolving_trigger_firing.take();
     // CR 608.2c: the resolving stack entry owns every nested instruction-result
@@ -651,19 +658,29 @@ fn begin_manual_resolution(
         return false;
     };
     // CR 608.2b: this seam is reached only after the existing target check.
-    let begin_source = state
-        .objects
-        .get(&entry.id)
-        .filter(|_| state.manual_resolution_source_is_supported(binding.actor, entry))
-        .map(|object| {
-            (
-                object.owner,
-                crate::types::identifiers::ObjectIncarnationRef::of(
-                    entry.source_id,
-                    object.incarnation,
-                ),
-            )
-        });
+    // A spell is begun by its owner from its own card; an ability by its
+    // controller, from the source the designation latched (CR 113.7).
+    let begin_source = match &entry.kind {
+        StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. } => (state
+            .manual_resolution_source_is_supported(binding.actor, entry)
+            && state.objects.contains_key(&entry.source_id))
+        .then_some((binding.actor, binding.source)),
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => state
+            .objects
+            .get(&entry.id)
+            .filter(|_| state.manual_resolution_source_is_supported(binding.actor, entry))
+            .map(|object| {
+                (
+                    object.owner,
+                    crate::types::identifiers::ObjectIncarnationRef::of(
+                        entry.source_id,
+                        object.incarnation,
+                    ),
+                )
+            }),
+    };
     // A recognized intent always intercepts. Invalid Begin evidence is rejected
     // atomically by the existing outer boundary, never allowed into Auto.
     let (owner, source) = begin_source.unwrap_or((
@@ -677,8 +694,15 @@ fn begin_manual_resolution(
     }
     if let Some(carrier) = state.resolving_stack_entry.as_mut() {
         carrier.controller = controller;
-        if let StackEntryKind::Spell { ability, .. } = &mut carrier.kind {
-            *ability = latched.clone().map(Box::new);
+        match &mut carrier.kind {
+            StackEntryKind::Spell { ability, .. } => *ability = latched.clone().map(Box::new),
+            StackEntryKind::ActivatedAbility { ability, .. }
+            | StackEntryKind::TriggeredAbility { ability, .. } => {
+                if let Some(latched) = latched.clone() {
+                    **ability = latched;
+                }
+            }
+            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. } => {}
         }
     }
     state.manual_resolution_state = Some(crate::types::game_state::ManualResolutionState::Active {
