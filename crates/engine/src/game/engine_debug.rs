@@ -1855,6 +1855,16 @@ fn perform_instruction(
     let event_start = events.len();
     super::effects::resolve_ability_chain(state, &ability, events, 0)
         .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+    // Some resolvers mark "nothing left to decide" by handing priority back
+    // (they assume they ran from a priority boundary). Inside a paused
+    // resolution priority comes only after it resolves (CR 117.3b), so that
+    // marker means the instruction finished and the pause stays open.
+    if resolving_source.is_some()
+        && state.waiting_for != waiting_before
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        state.waiting_for = waiting_before.clone();
+    }
     if state.waiting_for != waiting_before {
         if resolving_source.is_some() {
             // A further choice would open a second resolution inside the
