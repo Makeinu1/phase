@@ -37,7 +37,7 @@ export interface ManualResolutionPanelProps {
 type Verb =
   | "destroy" | "sacrifice" | "damage" | "tap" | "untap" | "addCounter" | "removeCounter"
   | "exile" | "toHand" | "toGraveyard" | "discard" | "toBattlefield" | "toBattlefieldMine"
-  | "toLibraryTop" | "toLibraryBottom" | "copyToken";
+  | "toLibraryTop" | "toLibraryBottom" | "copyToken" | "arrangeTop" | "arrangeBottom";
 
 type CardZone = "Battlefield" | "Hand" | "Graveyard" | "Exile" | "Library";
 
@@ -54,7 +54,7 @@ function verbsFor(zone: CardZone, objects: readonly GameObject[], viewerId: Play
     case "Hand": return ["discard", "exile", "toBattlefield", ...mine, ...library];
     case "Graveyard": return ["toBattlefield", ...mine, "toHand", "exile", ...library];
     case "Exile": return ["toBattlefield", ...mine, "toHand", "toGraveyard", ...library];
-    case "Library": return ["toHand", "toGraveyard", "exile", "toBattlefield", ...mine, "toLibraryBottom"];
+    case "Library": return ["toHand", "toGraveyard", "exile", "toBattlefield", ...mine, "arrangeTop", "arrangeBottom"];
   }
 }
 
@@ -85,6 +85,11 @@ function instructionsFor(verb: Verb, objects: readonly GameObject[], noRegenerat
     case "toBattlefieldMine": return put({ type: "Battlefield", data: { control: "Actor" } });
     case "toLibraryTop": return put({ type: "Library", data: { end: "Top" } });
     case "toLibraryBottom": return put({ type: "Library", data: { end: "Bottom" } });
+    // CR 401.4: cards that stay in the library are rearranged in picked order.
+    case "arrangeTop":
+      return [{ type: "ArrangeLibrary", data: { player_id: objects[0].owner, top: ids, bottom: [] } }];
+    case "arrangeBottom":
+      return [{ type: "ArrangeLibrary", data: { player_id: objects[0].owner, top: [], bottom: ids } }];
     case "copyToken":
       return each((source_id) => ({ type: "CreateTokenCopy", data: { source_id, owner: viewerId, nonlegendary: false, count: amount } }));
   }
@@ -254,7 +259,14 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
                   <button type="button" aria-pressed={picked.includes(id)} aria-label={objects[id]?.name}
                     onClick={() => useManualPickStore.getState().pickObject(id)}
                     className={`block w-14 overflow-hidden rounded-md ring-2 ${picked.includes(id) ? "ring-fuchsia-300" : "ring-transparent hover:ring-white/40"}`}>
-                    <CardImage cardName={objects[id]?.name ?? ""} size="small" className="w-full" />
+                    <span className="relative block">
+                      <CardImage cardName={objects[id]?.name ?? ""} size="small" className="w-full" />
+                      {picked.includes(id) && (
+                        <span aria-hidden className="absolute left-0.5 top-0.5 rounded-full bg-fuchsia-600 px-1.5 text-[10px] font-bold text-white">
+                          {picked.indexOf(id) + 1}
+                        </span>
+                      )}
+                    </span>
                     <span className="block truncate bg-slate-900 px-0.5 text-[9px] leading-tight text-slate-200">{objects[id]?.name}</span>
                   </button>
                 </li>

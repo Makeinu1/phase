@@ -3024,6 +3024,7 @@ export type DebugAction =
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
   | { type: "Reveal"; data: { player_id: PlayerId; count: number } }
   | { type: "RevealHand"; data: { player_id: PlayerId } }
+  | { type: "ArrangeLibrary"; data: { player_id: PlayerId; top: ObjectId[]; bottom: ObjectId[] } }
   | { type: "LookAtCards"; data: { player_id: PlayerId; scope: { type: "Hand" } | { type: "Library"; data: { top: number | null } } } }
   | { type: "Discard"; data: { object_id: ObjectId } }
   | { type: "Destroy"; data: { object_ids: ObjectId[]; regeneration: "Allowed" | "Forbidden" } }

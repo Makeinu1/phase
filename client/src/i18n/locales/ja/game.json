@@ -123,6 +123,8 @@
       "copyToken": "コピーのトークンを{{count}}体作る",
       "tokens": "トークンを{{count}}体作る",
       "tokenSearch": "トークンを検索",
+      "arrangeTop": "選んだ順に一番上へ（1が一番上）",
+      "arrangeBottom": "選んだ順に一番下へ",
       "toLibraryBottom": "ライブラリーの一番下へ",
       "gainLife": "ライフを得る",
       "clear": "選択を解除"

@@ -123,6 +123,8 @@
       "copyToken": "Create {{count}} token copy(ies)",
       "tokens": "Create {{count}} token(s)",
       "tokenSearch": "Search tokens",
+      "arrangeTop": "Put on top in picked order (1 is topmost)",
+      "arrangeBottom": "Put on bottom in picked order",
       "toLibraryBottom": "Put on bottom of library",
       "gainLife": "Gain life",
       "clear": "Clear selection"

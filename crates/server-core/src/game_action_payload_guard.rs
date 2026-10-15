@@ -408,6 +408,10 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         DebugAction::PutCards { object_ids, .. } => {
             bound_serialized_json("Debug.PutCards.object_ids", object_ids)?;
         }
+        DebugAction::ArrangeLibrary { top, bottom, .. } => {
+            bound_serialized_json("Debug.ArrangeLibrary.top", top)?;
+            bound_serialized_json("Debug.ArrangeLibrary.bottom", bottom)?;
+        }
         DebugAction::DealDamage {
             object_ids,
             player_ids,

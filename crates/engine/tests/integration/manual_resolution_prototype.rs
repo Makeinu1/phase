@@ -3286,6 +3286,58 @@ mod enabled_baseline_tests {
         assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
     }
 
+    /// CR 401.4: looked-at cards are put back in any order, on top or on the
+    /// bottom, without leaving the library; the arranger still knows them.
+    #[test]
+    fn paused_actor_arranges_the_top_of_a_library() {
+        use engine::types::actions::LookScope;
+        let p0 = PlayerId(0);
+        let mut ids = Vec::new();
+        let (mut runner, _) = paused_instruction_board(|scenario| {
+            ids.push(scenario.add_card_to_library_top(p0, "Deep Card"));
+            ids.push(scenario.add_card_to_library_top(p0, "Third Card"));
+            ids.push(scenario.add_card_to_library_top(p0, "Second Card"));
+            ids.push(scenario.add_card_to_library_top(p0, "Top Card"));
+        });
+        let [_, third, second, top] = ids[..] else {
+            unreachable!()
+        };
+        let paused = runner.state().waiting_for.clone();
+        runner
+            .act(GameAction::Debug(DebugAction::LookAtCards {
+                player_id: p0,
+                scope: LookScope::Library { top: Some(3) },
+            }))
+            .expect("the actor looks at the top three");
+        assert_rejected_unchanged(
+            &mut runner,
+            p0,
+            DebugAction::ArrangeLibrary {
+                player_id: p0,
+                top: vec![third],
+                bottom: vec![third],
+            },
+        );
+        runner
+            .act(GameAction::Debug(DebugAction::ArrangeLibrary {
+                player_id: p0,
+                top: vec![third, top],
+                bottom: vec![second],
+            }))
+            .expect("the actor puts two back on top in a new order, one on the bottom");
+        assert_eq!(runner.state().waiting_for, paused);
+        let library = &runner.state().players[p0.0 as usize].library;
+        assert_eq!(library.front(), Some(&third));
+        assert_eq!(library.get(1), Some(&top));
+        assert_eq!(library.back(), Some(&second));
+        let view = engine::game::visibility::filter_state_for_viewer(runner.state(), p0);
+        assert_eq!(
+            view.objects[&second].name, "Second Card",
+            "the arranger remembers"
+        );
+        assert_eq!(view.objects[&third].name, "Third Card");
+    }
+
     /// CR 111.2: the resolving spell creates tokens (and token copies) for the
     /// player it names; their entering triggers wait for the resolution
     /// (CR 603.3), and the tokens are the spell's own.

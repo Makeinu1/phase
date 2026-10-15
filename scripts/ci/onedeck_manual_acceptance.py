@@ -782,6 +782,47 @@ def scenario_raise_the_alarm(j: Journey) -> None:
     manual_journey(j, "Raise the Alarm", corrections, verify, "Sol Ring")
 
 
+def scenario_ponder(j: Journey) -> None:
+    """Look at the top three privately, put them back in a chosen order, draw."""
+    j.ensure("Ponder", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Ponder", "Sol Ring"))
+    j.step("setup-cards", "hook(setup)", True, "Ponder in hand")
+    panel = j.strings["panel"]
+    top_ids = "() => window.__phaseAcceptance.state().players[0].library.slice(0, 3)"
+
+    def corrections(j: Journey):
+        # "Look at the top three cards of your library"
+        j.ui_open_zone(0, "library")
+        j.ui_amount(3)
+        j.ui_panel_button(panel["lookTop"].replace("{{count}}", "3"))
+        shown = j.wait_for("() => document.querySelectorAll('[data-testid=\"manual-zone-strip\"] li').length === 3", 15)
+        j.step("look-top-three", "ui", shown, "the top three are shown to their owner only")
+        before = j.page.evaluate(top_ids)
+        # "then put them back in any order": pick bottom-most first so the order flips.
+        cards = j.ui_strip_cards()
+        for index in (2, 1, 0):
+            cards.nth(index).click(timeout=10000)
+        j.ui_panel_button(panel["arrangeTop"])
+        flipped = j.wait_for("(b) => JSON.stringify(window.__phaseAcceptance.state().players[0].library.slice(0, 3)) === JSON.stringify([...b].reverse())", 15, before)
+        j.step("arrange-top", "ui", flipped, f"top three put back in reverse order")
+        # "Draw a card."
+        hand = len(j.summary()["players"][0]["hand"])
+        j.ui_pick_player(0)
+        j.ui_amount(1)
+        j.ui_panel_button(panel["draw"])
+        drew = j.wait_for("(n) => window.__phaseAcceptance.state().players[0].hand.length === n + 1", 15, hand)
+        j.step("draw", "ui", drew, "drew the card that was put on top")
+
+    def verify(j: Journey, before):
+        s = j.summary()
+        ok = "Ponder" in s["players"][0]["graveyard"] \
+            and s["waitingFor"] == "Priority" and s["manualUndo"] is not None
+        j.step("verify-after-finish", "state", ok, "Ponder resolved")
+
+    manual_journey(j, "Ponder", corrections, verify, "Sol Ring")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
@@ -792,6 +833,7 @@ SCENARIOS = {
     "G-lightning-bolt": ("Celes", scenario_lightning_bolt),
     "H-demonic-tutor": ("Celes", scenario_demonic_tutor),
     "I-raise-the-alarm": ("Celes", scenario_raise_the_alarm),
+    "J-ponder": ("Celes", scenario_ponder),
 }
 
 

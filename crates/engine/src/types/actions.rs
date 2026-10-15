@@ -1316,6 +1316,15 @@ pub enum DebugAction {
         player_id: PlayerId,
         scope: LookScope,
     },
+    /// CR 401.4: Arrange cards that stay in a player's library: `top` goes
+    /// on top in the listed order (first is topmost) and `bottom` goes to
+    /// the bottom in the listed order. No card changes zones; the acting
+    /// player knows the cards they placed.
+    ArrangeLibrary {
+        player_id: PlayerId,
+        top: Vec<ObjectId>,
+        bottom: Vec<ObjectId>,
+    },
     /// CR 701.9a: The card's owner discards it from hand through the single
     /// discard authority, so replacement effects and discard triggers apply.
     Discard { object_id: ObjectId },
@@ -1559,6 +1568,11 @@ impl DebugAction {
                     push_related_object_id(ids, *object_id);
                 }
             }
+            Self::ArrangeLibrary { top, bottom, .. } => {
+                for object_id in top.iter().chain(bottom) {
+                    push_related_object_id(ids, *object_id);
+                }
+            }
             Self::CreateCard { attach_to, .. } => {
                 if let Some(AttachTarget::Object(object_id)) = attach_to {
                     push_related_object_id(ids, *object_id);
@@ -1614,6 +1628,7 @@ impl DebugAction {
             Self::Reveal { .. }
             | Self::RevealHand { .. }
             | Self::LookAtCards { .. }
+            | Self::ArrangeLibrary { .. }
             | Self::ShuffleLibrary { .. }
             | Self::SetBasePowerToughness { .. }
             | Self::SetPrepared { .. }
@@ -1688,6 +1703,9 @@ impl DebugAction {
         match self {
             Self::Destroy { object_ids, .. } | Self::PutCards { object_ids, .. } => {
                 distinct(object_ids)
+            }
+            Self::ArrangeLibrary { top, bottom, .. } => {
+                distinct(&top.iter().chain(bottom).collect::<Vec<_>>())
             }
             Self::LoseLife { amount: value, .. }
             | Self::GainLife { amount: value, .. }
@@ -1794,6 +1812,16 @@ impl DebugAction {
             DebugAction::RevealHand { player_id } => {
                 format!("RevealHand ({})", player_label(*player_id))
             }
+            DebugAction::ArrangeLibrary {
+                player_id,
+                top,
+                bottom,
+            } => format!(
+                "ArrangeLibrary ({}: {} on top, {} on bottom)",
+                player_label(*player_id),
+                top.len(),
+                bottom.len()
+            ),
             DebugAction::LookAtCards { player_id, scope } => match scope {
                 LookScope::Hand => format!("LookAtCards (hand of {})", player_label(*player_id)),
                 LookScope::Library { top: None } => {

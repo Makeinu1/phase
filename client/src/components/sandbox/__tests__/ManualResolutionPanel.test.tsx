@@ -186,6 +186,11 @@ describe("ManualResolutionPanel", () => {
     expect(dispatchAction).toHaveBeenCalledWith(debug({
       type: "LookAtCards", data: { player_id: 1, scope: { type: "Library", data: { top: 2 } } },
     }));
+    act(() => {
+      useManualPickStore.getState().pickObject(14);
+    });
+    await user.click(screen.getByRole("button", { name: "Put on top in picked order (1 is topmost)" }));
+    expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "ArrangeLibrary", data: { player_id: 1, top: [14], bottom: [] } }));
     await user.click(screen.getByRole("button", { name: "Shuffle" }));
     expect(dispatchAction).toHaveBeenCalledWith(debug({ type: "ShuffleLibrary", data: { player_id: 1 } }));
   });

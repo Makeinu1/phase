@@ -302,6 +302,33 @@ pub fn apply_debug_action(
             state.remember_card_identities(audience, &cards);
         }
 
+        DebugAction::ArrangeLibrary {
+            player_id,
+            top,
+            bottom,
+        } => {
+            validate_player(state, player_id)?;
+            let library = &state
+                .players
+                .iter()
+                .find(|p| p.id == player_id)
+                .expect("validated player")
+                .library;
+            if !top.iter().chain(&bottom).all(|id| library.contains(id)) {
+                return Err(EngineError::InvalidAction(
+                    "Only cards in that player's library can be arranged".into(),
+                ));
+            }
+            // CR 401.4: the cards stay in the library; only their order changes.
+            zones::reorder_within_library(state, player_id, &top, Some(0));
+            zones::reorder_within_library(state, player_id, &bottom, None);
+            // CR 701.20e: reordering forgets what was known about the library;
+            // the acting player still knows the cards they just placed.
+            let placed: Vec<ObjectId> = top.iter().chain(&bottom).copied().collect();
+            let audience = super::turn_control::decision_audience_for_player(state, actor);
+            state.remember_card_identities(audience, &placed);
+        }
+
         DebugAction::Discard { object_id } => {
             validate_object(state, object_id)?;
             let object = &state.objects[&object_id];
