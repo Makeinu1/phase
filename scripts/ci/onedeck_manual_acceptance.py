@@ -759,15 +759,11 @@ def scenario_raise_the_alarm(j: Journey) -> None:
 
     def corrections(j: Journey):
         shelf = j.panel().locator('[data-testid="manual-token-shelf"]')
-        soldier = shelf.get_by_role("button", name=re.compile(r"^Soldier 1/1"))
-        try:
-            soldier.first.wait_for(state="visible", timeout=10000)
-            offered = True
-        except Exception:
-            offered = False
+        offered = j.wait_for("() => [...document.querySelectorAll('[data-testid=\"manual-token-shelf\"] button')].some((b) => b.textContent.startsWith('Soldier 1/1'))", 15)
+        soldier = shelf.locator("button", has_text="Soldier 1/1")
         j.step("token-offered", "ui", offered, "the card's own Soldier token is offered on the shelf")
         # "Create two 1/1 white Soldier creature tokens."
-        shelf.get_by_role("button", name="+").first.click(timeout=10000)
+        shelf.get_by_role("button", name="+", exact=True).locator("visible=true").first.click(timeout=10000)
         soldier.first.click(timeout=10000)
         created = j.wait_for(f"() => ({soldiers})() === 2", 15)
         j.step("create-tokens", "ui", created, "two Soldier tokens created")
