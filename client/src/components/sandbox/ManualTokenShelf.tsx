@@ -11,6 +11,8 @@ interface ManualTokenShelfProps {
   readonly disabled: boolean;
   /** Catalog ids the engine links to the resolving card (its printed tokens). */
   readonly relatedPresetIds: readonly string[];
+  /** The resolving card's name; the catalog records which cards make each token. */
+  readonly sourceName: string;
   readonly onCreate: (action: DebugAction) => void;
   /** The panel's amount stepper, when no other part of the panel shows it. */
   readonly amountControl?: ReactNode;
@@ -49,7 +51,7 @@ function label(preset: TokenPreset): string {
 
 /** Tokens the resolving spell creates: its own printed tokens first, the
  *  common predefined artifacts, and a name search over the engine catalog. */
-export function ManualTokenShelf({ owner, count, disabled, relatedPresetIds, onCreate, amountControl }: ManualTokenShelfProps) {
+export function ManualTokenShelf({ owner, count, disabled, relatedPresetIds, sourceName, onCreate, amountControl }: ManualTokenShelfProps) {
   const { t } = useTranslation("game");
   const [presets, setPresets] = useState<TokenPreset[] | null>(null);
   const [query, setQuery] = useState("");
@@ -64,8 +66,10 @@ export function ManualTokenShelf({ owner, count, disabled, relatedPresetIds, onC
 
   const usable = useMemo(() => (presets ?? []).filter(hasFixedPt), [presets]);
   const related = useMemo(
-    () => distinct(usable.filter((preset) => relatedPresetIds.includes(preset.id))),
-    [usable, relatedPresetIds],
+    () => distinct(usable.filter((preset) => relatedPresetIds.includes(preset.id)
+      || preset.source_card_names?.includes(sourceName)
+      || preset.source_card_refs?.some((ref) => ref.card_name === sourceName))),
+    [usable, relatedPresetIds, sourceName],
   );
   const common = useMemo(
     () => distinct(usable.filter((preset) => typeof preset.category === "object" && "PredefinedArtifact" in preset.category)),

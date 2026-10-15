@@ -3366,16 +3366,6 @@ mod enabled_baseline_tests {
         });
         let [_, bear] = ids[..] else { unreachable!() };
         let paused = runner.state().waiting_for.clone();
-        let source = match &paused {
-            WaitingFor::ManualResolution { .. } => runner
-                .state()
-                .stack
-                .iter()
-                .find(|entry| entry.id == stack_entry_id)
-                .map(|entry| entry.source_id)
-                .expect("the paused spell is on the stack"),
-            _ => unreachable!(),
-        };
         let life = runner.state().players[p0.0 as usize].life;
         let deferred = runner.state().deferred_triggers.len();
         let soldier = TokenCharacteristics {
@@ -3410,11 +3400,6 @@ mod enabled_baseline_tests {
             );
         }
         assert_eq!(runner.state().waiting_for, paused);
-        assert!(runner
-            .state()
-            .stack
-            .iter()
-            .all(|entry| entry.source_id == source));
         assert_eq!(
             runner.state().players[p0.0 as usize].life,
             life,

@@ -398,6 +398,7 @@ export function ManualResolutionPanel({ viewerId, source, operable, finish, play
         <ManualTokenShelf owner={pickedPlayerState?.id ?? viewerId} count={amount} disabled={busy}
           amountControl={stepperShown ? null : stepper}
           relatedPresetIds={objects[source.sourceObjectId]?.source_related_token_ids ?? []}
+          sourceName={source.name}
           onCreate={(action) => void submit([action])} />
 
         {error ? <p role="alert" className="text-xs text-rose-300">{error}</p> : null}

@@ -17,6 +17,8 @@ vi.mock("../../../services/engineRuntime", () => ({
       body: { display_name: "Treasure", power: null, toughness: null, core_types: ["Artifact"], subtypes: ["Treasure"], supertypes: [], colors: [], keywords: [] } },
     { id: "t-soldier", category: "Creature", fidelity: "Full", pt_provenance: "FixedOrAbsent", type_line: "Token Creature — Soldier",
       body: { display_name: "Soldier", power: 1, toughness: 1, core_types: ["Creature"], subtypes: ["Soldier"], supertypes: [], colors: ["White"], keywords: [] } },
+    { id: "t-thopter", category: "Creature", fidelity: "Full", pt_provenance: "FixedOrAbsent", source_card_names: ["Thoughtseize"],
+      body: { display_name: "Thopter", power: 1, toughness: 1, core_types: ["Artifact", "Creature"], subtypes: ["Thopter"], supertypes: [], colors: [], keywords: ["Flying"] } },
     { id: "t-ooze", category: "Creature", fidelity: "Full", pt_provenance: { SourceDefinedOrDynamic: { power: "X", toughness: "X" } },
       body: { display_name: "Ooze", power: 0, toughness: 0, core_types: ["Creature"], subtypes: ["Ooze"], supertypes: [], colors: ["Green"], keywords: [] } },
   ],
@@ -222,6 +224,7 @@ describe("ManualResolutionPanel", () => {
     renderPanel();
     const shelf = await screen.findByTestId("manual-token-shelf");
     expect(await within(shelf).findByRole("button", { name: "Soldier 1/1 (White)" })).toBeInTheDocument();
+    expect(within(shelf).getByRole("button", { name: "Thopter 1/1" })).toBeInTheDocument();
     expect(within(shelf).getAllByRole("button", { name: "Treasure" })).toHaveLength(1);
     await user.click(within(shelf).getByRole("button", { name: "+" }));
     await user.click(within(shelf).getByRole("button", { name: "Treasure" }));
