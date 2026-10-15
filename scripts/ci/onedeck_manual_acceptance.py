@@ -889,6 +889,67 @@ def scenario_triggered_ability(j: Journey) -> None:
     j.step("next-normal-play", "ui", drew_normally, "the ability resolved by itself and drew a card")
 
 
+def scenario_unrecognized_trigger(j: Journey) -> None:
+    """A trigger the engine did not recognize: the player says "it triggered"
+    from the permanent, then performs it by hand from the stack."""
+    j.ensure("Grizzly Bears", 0, "Battlefield")
+    j.step("setup-cards", "hook(setup)", True, "Grizzly Bears on the battlefield")
+    panel = j.strings["panel"]
+    has_trigger = "() => (window.__phaseAcceptance.state()?.stack ?? []).some((e) => e.kind?.type === 'TriggeredAbility')"
+    life = "() => window.__phaseAcceptance.state().players[0].life"
+
+    # Select the permanent, then "it triggered".
+    j.ui_click_permanent("Grizzly Bears", 0)
+    chip = j.page.locator('[data-testid="manual-put-trigger"]').locator("visible=true")
+    try:
+        chip.first.click(timeout=10000)
+        put = j.wait_for(has_trigger, 15)
+    except Exception as error:
+        trace(f"put trigger failed: {str(error).splitlines()[0][:200]}")
+        put = False
+    j.step("put-trigger", "ui", put, "the triggered ability is on the stack")
+
+    designate = j.page.locator('[data-testid="manual-designate"]').locator("visible=true")
+    try:
+        designate.first.click(timeout=10000)
+        designated = j.wait_for("() => window.__phaseAcceptance.state()?.derived?.manual_resolution?.phase === 'armed'", 15)
+    except Exception as error:
+        trace(f"designate failed: {str(error).splitlines()[0][:200]}")
+        designated = False
+    j.step("designate-ability", "ui", designated, "performed by hand from the stack")
+    for _ in range(6):
+        if j.summary().get("waitingFor") == "ManualResolution":
+            break
+        j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
+        time.sleep(1.5)
+    j.step("paused-for-manual", "ui", j.summary().get("waitingFor") == "ManualResolution", "paused")
+
+    before = j.page.evaluate(life)
+    j.ui_pick_player(0)
+    j.ui_amount(2)
+    j.ui_panel_button(panel["gainLife"])
+    gained = j.wait_for("(n) => window.__phaseAcceptance.state().players[0].life === n + 2", 15, before)
+    j.step("gain-life", "ui", gained, f"{before} -> {before + 2}")
+    ok = j.click_text(re.escape(j.strings["finish"]))
+    finished = j.wait_for(f"() => !({has_trigger})() && (m => m == null || m.phase === 'closed')(window.__phaseAcceptance.state()?.derived?.manual_resolution)", 15)
+    j.step("finish", "ui", ok and finished, "the ability left the stack")
+
+    undo = j.page.locator('[data-testid="manual-undo"] button').locator("visible=true")
+    try:
+        undo.first.click(timeout=8000)
+        restored = j.wait_for(f"(n) => ({has_trigger})() && window.__phaseAcceptance.state().players[0].life === n", 20, before)
+    except Exception as error:
+        trace(f"undo failed: {str(error).splitlines()[0][:200]}")
+        restored = False
+    j.step("undo-before-manual", "ui", restored, "back to the ability waiting on the stack")
+    for _ in range(4):
+        if not j.wait_for(has_trigger, 1):
+            break
+        j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
+        time.sleep(1.5)
+    j.step("next-normal-play", "ui", not j.wait_for(has_trigger, 2), "left alone, the ability resolves with no recognized effect")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
@@ -901,6 +962,7 @@ SCENARIOS = {
     "I-raise-the-alarm": ("Celes", scenario_raise_the_alarm),
     "J-ponder": ("Celes", scenario_ponder),
     "K-triggered-ability": ("Celes", scenario_triggered_ability),
+    "L-unrecognized-trigger": ("Celes", scenario_unrecognized_trigger),
 }
 
 

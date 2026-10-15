@@ -63,6 +63,8 @@
     "startupInvalidFixture": "手動解決 fixture の形式が正しくありません。",
     "startupAdmissionUnavailable": "認証済みの Local 継続を利用できません。",
     "displayOnly": "発生源を閲覧しています。手動操作は、この Local 解決の担当者だけが行えます。",
+    "putTrigger": "誘発させる",
+    "putTriggerHint": "このカードの誘発型能力をスタックに乗せます（エンジンが認識していない能力向け）。",
     "undoBeforeManual": "《{{card}}》の手動処理を始める前に戻す",
     "designate": "手動で処理",
     "designateHint": "この能力（呪文）を手で処理します。解決するときに止まります。",

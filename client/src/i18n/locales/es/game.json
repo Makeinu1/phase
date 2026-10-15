@@ -63,6 +63,8 @@
     "startupInvalidFixture": "The manual fixture bundle is invalid.",
     "startupAdmissionUnavailable": "Authenticated Local continuation is unavailable.",
     "displayOnly": "Viewing this source. Manual operations are available only to its Local owner.",
+    "putTrigger": "It triggered",
+    "putTriggerHint": "Put this card's triggered ability on the stack (for abilities the engine does not recognize).",
     "undoBeforeManual": "Undo to before performing {{card}} by hand",
     "designate": "Perform by hand",
     "designateHint": "Perform this by hand; it pauses when it would resolve.",

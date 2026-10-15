@@ -1,6 +1,6 @@
 import { motion, useReducedMotion } from "framer-motion";
 import type React from "react";
-import { memo, useCallback, useId, useMemo, useRef } from "react";
+import { memo, useCallback, useContext, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
@@ -31,6 +31,7 @@ import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { useManualPickStore } from "../../stores/manualPickStore.ts";
+import { ManualTriggerContext } from "./ManualTriggerContext.ts";
 import { KeywordStrip } from "./KeywordStrip.tsx";
 import {
   boardChoiceMaxSelection,
@@ -354,6 +355,7 @@ export const PermanentCard = memo(function PermanentCard({
     validTargetObjectIds,
   } = useBoardInteractionState();
   const manualPickActive = useManualPickStore((s) => s.active);
+  const manualTrigger = useContext(ManualTriggerContext);
   const isManualPicked = useManualPickStore((s) => s.selectedObjectIds.includes(objectId));
 
   const selectedObjectId = useUiStore((s) => s.selectedObjectId);
@@ -515,6 +517,8 @@ export const PermanentCard = memo(function PermanentCard({
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
+  // Offered on a selected permanent of the viewer's; the engine decides.
+  const offerManualTrigger = manualTrigger !== null && isSelected && !manualPickActive && obj.controller === playerId;
   // The viewer-scoped engine projection owns both the attachment relationship
   // and whether one is actionable for this interaction. The board must not
   // rediscover either fact from the raw snapshot. "Actionable" is per card:
@@ -835,6 +839,23 @@ export const PermanentCard = memo(function PermanentCard({
       onPointerLeave={handlePointerLeave}
     >
       {isAttacking && <AttackArrow upward={attacksUpward} />}
+      {offerManualTrigger && (
+        <button
+          type="button"
+          data-testid="manual-put-trigger"
+          disabled={manualTrigger?.busy}
+          title={t("manualResolution.putTriggerHint")}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            manualTrigger?.put(objectId);
+            selectObject(null);
+          }}
+          className="absolute -top-3 left-1/2 z-[80] -translate-x-1/2 whitespace-nowrap rounded-full bg-fuchsia-700/95 px-2 py-0.5 text-[10px] font-semibold text-white shadow-md ring-1 ring-fuchsia-300/60 hover:bg-fuchsia-600 disabled:opacity-50"
+        >
+          {t("manualResolution.putTrigger")}
+        </button>
+      )}
       {isManaPaymentPreviewSource && (
         <div
           aria-hidden

@@ -3075,7 +3075,8 @@ export type DebugAction =
   | {
       type: "CreateTokenCopy";
       data: { source_id: ObjectId; owner: PlayerId; nonlegendary: boolean; count: number };
-    };
+    }
+  | { type: "PutTriggeredAbility"; data: { source_id: ObjectId } };
 
 // CR 117.3d: priority-yield preference types, mirroring the engine's
 // `YieldScope` / `YieldTarget` / `PriorityYieldOp` / `PriorityYield`. The

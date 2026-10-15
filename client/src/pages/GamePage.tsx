@@ -37,6 +37,7 @@ import type {
   ManualResolutionSource,
 } from "../adapter/generated/interaction";
 import { ManualDesignationContext, type ManualDesignation } from "../components/stack/ManualDesignationContext.ts";
+import { ManualTriggerContext, type ManualTrigger } from "../components/board/ManualTriggerContext.ts";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -190,7 +191,7 @@ import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { dispatchInteraction } from "../game/dispatch.ts";
+import { dispatchAction, dispatchInteraction } from "../game/dispatch.ts";
 import { ABILITY_BLOCK_REASON_KEY } from "../viewmodel/abilityBlockReason.ts";
 import {
   abilityChoiceLabel,
@@ -1175,6 +1176,20 @@ function GamePageContent({
     designate: (stackEntryId) => void designateManually(stackEntryId),
     busy: manualDesignationBusy,
   };
+  // CR 603.3: "this triggered" — the player puts an ability the engine did not
+  // recognize on the stack; it is then performed by hand from the stack.
+  const [manualTriggerBusy, setManualTriggerBusy] = useState(false);
+  const manualTrigger: ManualTrigger | null = continuation && perspectivePlayerId === getPlayerId() ? {
+    put: (sourceId) => {
+      if (manualTriggerBusy) return;
+      setManualTriggerBusy(true);
+      setManualCastMessage(null);
+      void dispatchAction({ type: "Debug", data: { type: "PutTriggeredAbility", data: { source_id: sourceId } } })
+        .catch((error: unknown) => setManualCastMessage(error instanceof Error ? error.message : String(error)))
+        .finally(() => setManualTriggerBusy(false));
+    },
+    busy: manualTriggerBusy,
+  } : null;
   const manualUndo = useManualUndoStore((s) => s.checkpoint);
   const [manualUndoBusy, setManualUndoBusy] = useState(false);
   const [manualUndoMessage, setManualUndoMessage] = useState<string | null>(null);
@@ -1824,14 +1839,16 @@ function GamePageContent({
 
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
-          <GameBoard
-            effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
-            oppHud={oppHud}
-            playerHud={playerHud}
-            showOpponentCards={showAiHand}
-            onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
-            onViewZone={handleViewZone}
-          />
+          <ManualTriggerContext.Provider value={manualTrigger}>
+            <GameBoard
+              effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
+              oppHud={oppHud}
+              playerHud={playerHud}
+              showOpponentCards={showAiHand}
+              onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
+              onViewZone={handleViewZone}
+            />
+          </ManualTriggerContext.Provider>
           {/* A closed view only records the last source; the board shows the
               result, so the panel gives way and only the Undo offer stays. */}
           {manualView && manualView.phase !== "closed" && localContext && manualStackEntryId != null && (
