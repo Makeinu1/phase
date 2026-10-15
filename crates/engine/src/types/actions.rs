@@ -1500,6 +1500,11 @@ pub enum DebugAction {
         #[serde(default)]
         nonlegendary: bool,
     },
+    /// CR 603.3 + CR 603.3a: The acting player says one of their objects
+    /// triggered (an ability the engine did not recognize) and puts that
+    /// triggered ability on the stack. Its instructions are left to be
+    /// performed by hand, so it carries no recognized effect.
+    PutTriggeredAbility { source_id: ObjectId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1584,7 +1589,9 @@ impl DebugAction {
                     push_related_object_id(ids, *target_id);
                 }
             }
-            Self::CreateTokenCopy { source_id, .. } => push_related_object_id(ids, *source_id),
+            Self::CreateTokenCopy { source_id, .. } | Self::PutTriggeredAbility { source_id } => {
+                push_related_object_id(ids, *source_id)
+            }
             Self::DrawCards { .. }
             | Self::Mill { .. }
             | Self::Reveal { .. }
@@ -1662,7 +1669,8 @@ impl DebugAction {
             | Self::Proliferate { .. }
             | Self::SetInfiniteMana { .. }
             | Self::SetPhase { .. }
-            | Self::RunStateBasedActions => None,
+            | Self::RunStateBasedActions
+            | Self::PutTriggeredAbility { .. } => None,
         }
     }
 
@@ -2053,6 +2061,9 @@ impl DebugAction {
                 player_label(*owner),
                 if *nonlegendary { " (nonlegendary)" } else { "" },
             ),
+            DebugAction::PutTriggeredAbility { source_id } => {
+                format!("PutTriggeredAbility ({})", obj(*source_id))
+            }
         }
     }
 }

@@ -1302,6 +1302,7 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::RunStateBasedActions => 36,
         DebugAction::CreateToken { .. } => 37,
         DebugAction::CreateTokenCopy { .. } => 38,
+        DebugAction::PutTriggeredAbility { .. } => 39,
     }
 }
 
@@ -1827,6 +1828,12 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 .then_with(|| cmp_val(a1, b1))
                 .then_with(|| cmp_val(a2, b2))
                 .then_with(|| cmp_val(a3, b3))
+        }
+        DebugAction::PutTriggeredAbility { source_id: a0 } => {
+            let DebugAction::PutTriggeredAbility { source_id: b0 } = b else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
         }
     }
 }

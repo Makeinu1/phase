@@ -3553,6 +3553,75 @@ mod enabled_baseline_tests {
         assert_eq!(runner.state().objects[&elf].zone, Zone::Graveyard);
     }
 
+    /// CR 603.3 + CR 603.3a: an ability the engine did not recognize is put on
+    /// the stack by the player who controls its source, then performed by hand.
+    #[test]
+    fn a_player_puts_an_unrecognized_trigger_on_the_stack_and_performs_it() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mine = scenario.add_creature(p0, "Unparsed Watcher", 2, 2).id();
+        let theirs = scenario.add_creature(p1, "Opposing Watcher", 2, 2).id();
+        let mut runner = scenario.build();
+        enable_debug(&mut runner, p0);
+
+        assert!(
+            apply(
+                runner.state_mut(),
+                p0,
+                GameAction::Debug(DebugAction::PutTriggeredAbility { source_id: theirs })
+            )
+            .is_err(),
+            "only the source's controller puts its trigger on the stack"
+        );
+        runner
+            .act(GameAction::Debug(DebugAction::PutTriggeredAbility {
+                source_id: mine,
+            }))
+            .expect("the controller puts the trigger on the stack");
+        let entry = runner.state().stack.back().expect("on the stack").clone();
+        assert_eq!((entry.source_id, entry.controller), (mine, p0));
+        assert!(matches!(
+            entry.kind,
+            engine::types::game_state::StackEntryKind::TriggeredAbility { .. }
+        ));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+
+        let life = runner.state().players[p0.0 as usize].life;
+        runner
+            .act(GameAction::DesignateManualResolution {
+                stack_entry_id: entry.id,
+            })
+            .expect("it is performed by hand");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("controller passes");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("opponent passes");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManualResolution { .. }
+        ));
+        runner
+            .act(GameAction::Debug(DebugAction::GainLife {
+                player_id: p0,
+                amount: 2,
+            }))
+            .expect("the controller performs it");
+        runner
+            .act(GameAction::FinishManualResolution {
+                stack_entry_id: entry.id,
+            })
+            .expect("Finish takes it off the stack");
+        assert!(runner.state().stack.is_empty());
+        assert_eq!(runner.state().players[p0.0 as usize].life, life + 2);
+    }
+
     /// CR 602.2: an activated ability is performed by hand the same way.
     #[test]
     fn paused_actor_performs_an_activated_ability_by_hand() {

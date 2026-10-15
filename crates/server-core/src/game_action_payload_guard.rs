@@ -420,6 +420,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
             bound_serialized_json("Debug.DealDamage.object_ids", object_ids)?;
             bound_serialized_json("Debug.DealDamage.player_ids", player_ids)?;
         }
+        DebugAction::PutTriggeredAbility { .. } => {}
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
         | DebugAction::Sacrifice { .. }

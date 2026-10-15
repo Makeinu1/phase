@@ -1119,6 +1119,10 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::PutTriggeredAbility { source_id } => {
+            put_triggered_ability_by_hand(state, actor, source_id, events)?;
+        }
+
         DebugAction::CreateTokenCopy {
             source_id,
             owner,
@@ -1793,6 +1797,67 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
             player_id.0
         )));
     }
+    Ok(())
+}
+
+/// CR 603.3 + CR 603.3a: the acting player's object triggered in a way the
+/// engine did not recognize, so they put the triggered ability on the stack
+/// themselves, the next time a player would receive priority. It is theirs
+/// because they control its source (or own it, where it has no controller),
+/// and it carries no recognized instructions; it is performed by hand.
+fn put_triggered_ability_by_hand(
+    state: &mut GameState,
+    actor: PlayerId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return Err(EngineError::InvalidAction(
+            "A triggered ability goes on the stack only when a player would receive priority"
+                .into(),
+        ));
+    }
+    validate_object(state, source_id)?;
+    let source = &state.objects[&source_id];
+    let controls = if source.zone == Zone::Battlefield || source.zone == Zone::Stack {
+        source.controller == actor
+    } else {
+        source.owner == actor
+    };
+    if !controls {
+        return Err(EngineError::InvalidAction(
+            "Only the player who controls a source puts its triggered ability on the stack".into(),
+        ));
+    }
+    let source_name = source.name.clone();
+    let description = format!("{source_name}'s triggered ability, performed by hand");
+    let ability = ResolvedAbility::new(
+        Effect::unimplemented("ManualTrigger", description.clone()),
+        Vec::new(),
+        source_id,
+        actor,
+    );
+    let entry_id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    let entry = crate::types::game_state::StackEntry {
+        id: entry_id,
+        source_id,
+        controller: actor,
+        kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+            source_id,
+            ability: Box::new(ability),
+            condition: None,
+            trigger_event: None,
+            description: Some(description),
+            source_name,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    };
+    super::stack::push_to_stack(state, entry, events);
+    // CR 117.4: passes count only "in succession"; a new stack object resets them.
+    super::priority::clear_priority_passes(state);
     Ok(())
 }
 
