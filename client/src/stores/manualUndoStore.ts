@@ -14,6 +14,8 @@ import { create } from "zustand";
 export interface ManualUndoCheckpoint {
   readonly checkpoint: string;
   readonly cardName: string;
+  /** Whether the checkpoint precedes a manual cast or a later designation. */
+  readonly kind: "cast" | "designation";
   /** The episode was observed in the engine-provided derived view. */
   readonly episodeSeen: boolean;
   /** The episode has ended (finished, countered, or fizzled). */
@@ -22,7 +24,7 @@ export interface ManualUndoCheckpoint {
 
 interface ManualUndoState {
   checkpoint: ManualUndoCheckpoint | null;
-  capture: (checkpoint: string, cardName: string) => void;
+  capture: (checkpoint: string, cardName: string, kind: "cast" | "designation") => void;
   /** Track the engine's derived manual episode for the held checkpoint. */
   observeEpisode: (episodeActive: boolean) => void;
   /** Called at every action/interaction submission boundary. */
@@ -32,8 +34,8 @@ interface ManualUndoState {
 
 export const useManualUndoStore = create<ManualUndoState>()((set, get) => ({
   checkpoint: null,
-  capture: (checkpoint, cardName) =>
-    set({ checkpoint: { checkpoint, cardName, episodeSeen: false, episodeEnded: false } }),
+  capture: (checkpoint, cardName, kind) =>
+    set({ checkpoint: { checkpoint, cardName, kind, episodeSeen: false, episodeEnded: false } }),
   observeEpisode: (episodeActive) => {
     const current = get().checkpoint;
     if (!current || current.episodeEnded) return;

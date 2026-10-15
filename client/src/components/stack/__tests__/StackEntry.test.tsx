@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { StackEntry } from "../StackEntry.tsx";
+import { ManualDesignationContext } from "../ManualDesignationContext.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -122,6 +123,21 @@ describe("StackEntry", () => {
     expect(screen.getByAltText("X")).toBeInTheDocument();
     expect(screen.getAllByAltText("R")).toHaveLength(2);
     expect(screen.queryByAltText("2")).not.toBeInTheDocument();
+  });
+
+  it("offers to perform an entry by hand only when the engine offers it", () => {
+    const designate = vi.fn();
+    const entry = buildStackEntry({ id: 77, source_id: 42 });
+    render(
+      <ManualDesignationContext.Provider value={{ canDesignate: (id) => id === 77, designate, busy: false }}>
+        <StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />
+        <StackEntry entry={buildStackEntry({ id: 78, source_id: 43 })} index={1} isTop={false} cardSize={{ width: 120, height: 168 }} />
+      </ManualDesignationContext.Provider>,
+    );
+    const offers = screen.getAllByTestId("manual-designate");
+    expect(offers).toHaveLength(1);
+    fireEvent.click(offers[0]);
+    expect(designate).toHaveBeenCalledWith(77);
   });
 
   it("raises its entry after a long press", () => {

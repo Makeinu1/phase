@@ -7,7 +7,7 @@ describe("manualUndoStore", () => {
 
   it("keeps the pre-cast checkpoint through the episode and releases it on the next action after it ends", () => {
     const store = useManualUndoStore.getState();
-    store.capture("{\"state\":{}}", "Rejoin the Fight");
+    store.capture("{\"state\":{}}", "Rejoin the Fight", "cast");
 
     // Actions inside the episode (board corrections, Finish) keep it.
     store.observeEpisode(true);
@@ -24,7 +24,7 @@ describe("manualUndoStore", () => {
 
   it("does not treat the pre-publication gap as an ended episode", () => {
     const store = useManualUndoStore.getState();
-    store.capture("{\"state\":{}}", "Fact or Fiction");
+    store.capture("{\"state\":{}}", "Fact or Fiction", "cast");
 
     // The derived view has not shown the episode yet.
     store.observeEpisode(false);

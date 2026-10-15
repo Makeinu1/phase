@@ -819,6 +819,76 @@ def scenario_ponder(j: Journey) -> None:
     manual_journey(j, "Ponder", corrections, verify, "Sol Ring")
 
 
+def scenario_triggered_ability(j: Journey) -> None:
+    """A triggered ability performed by hand from the stack, then undone and
+    left to resolve normally."""
+    j.ensure("Elvish Visionary", 0, "Hand")
+    j.ensure("Sol Ring", 0, "Hand")
+    j.trim_hand(7, ("Elvish Visionary", "Sol Ring"))
+    j.step("setup-cards", "hook(setup)", True, "Elvish Visionary in hand")
+    panel = j.strings["panel"]
+    has_trigger = "() => (window.__phaseAcceptance.state()?.stack ?? []).some((e) => e.kind?.type === 'TriggeredAbility')"
+    hand_size = "() => window.__phaseAcceptance.state().players[0].hand.length"
+
+    # Cast the creature normally; its entering ability goes on the stack.
+    clicked = j.click_hand_card("Elvish Visionary", double=True)
+    if j.wait_for("() => window.__phaseAcceptance.state()?.waiting_for?.type === 'ManaPayment'", 4):
+        j.click_text(r"^(支払う|Pay)$")
+    for _ in range(6):
+        if j.wait_for(has_trigger, 2):
+            break
+        j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
+    triggered = j.wait_for(has_trigger, 10)
+    j.step("trigger-on-stack", "ui", clicked and triggered, "Elvish Visionary's entering ability waits on the stack")
+
+    # Perform it by hand: the chip on the stack entry.
+    chip = j.page.locator('[data-testid="manual-designate"]').locator("visible=true")
+    try:
+        chip.first.click(timeout=10000)
+        designated = j.wait_for("() => window.__phaseAcceptance.state()?.derived?.manual_resolution?.phase === 'armed'", 15)
+    except Exception as error:
+        trace(f"designate failed: {str(error).splitlines()[0][:200]}")
+        designated = False
+    j.step("designate-ability", "ui", designated, "the ability is designated from the stack")
+    for _ in range(6):
+        if j.summary().get("waitingFor") == "ManualResolution":
+            break
+        j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
+        time.sleep(1.5)
+    paused = j.summary().get("waitingFor") == "ManualResolution"
+    j.step("paused-for-manual", "ui", paused, "the ability pauses where it would resolve")
+
+    # "draw a card", by hand.
+    before = j.page.evaluate(hand_size)
+    j.ui_pick_player(0)
+    j.ui_amount(1)
+    j.ui_panel_button(panel["draw"])
+    drew = j.wait_for("(n) => window.__phaseAcceptance.state().players[0].hand.length === n + 1", 15, before)
+    j.step("draw", "ui", drew, "drew a card for the ability")
+    ok = j.click_text(re.escape(j.strings["finish"]))
+    finished = j.wait_for(f"() => !({has_trigger})() && (m => m == null || m.phase === 'closed')(window.__phaseAcceptance.state()?.derived?.manual_resolution)", 15)
+    j.step("finish", "ui", ok and finished, "the ability left the stack")
+
+    # Undo returns to just before the designation: the ability waits again.
+    undo = j.page.locator('[data-testid="manual-undo"] button').locator("visible=true")
+    try:
+        undo.first.click(timeout=8000)
+        restored = j.wait_for(f"(n) => ({has_trigger})() && window.__phaseAcceptance.state().players[0].hand.length === n", 20, before)
+    except Exception as error:
+        trace(f"undo failed: {str(error).splitlines()[0][:200]}")
+        restored = False
+    j.step("undo-before-manual", "ui", restored, "the ability is back on the stack, the draw undone")
+
+    # Next ordinary play: let the ability resolve on its own.
+    for _ in range(4):
+        if not j.wait_for(has_trigger, 1):
+            break
+        j.click_text(r"^(解決|パス|Resolve|Pass)( →)?$")
+        time.sleep(1.5)
+    drew_normally = j.wait_for("(n) => window.__phaseAcceptance.state().players[0].hand.length === n + 1", 15, before)
+    j.step("next-normal-play", "ui", drew_normally, "the ability resolved by itself and drew a card")
+
+
 SCENARIOS = {
     "A-rejoin-the-fight": ("Celes", scenario_rejoin),
     "B-breach-the-multiverse": ("Muldrotha", scenario_breach),
@@ -830,6 +900,7 @@ SCENARIOS = {
     "H-demonic-tutor": ("Celes", scenario_demonic_tutor),
     "I-raise-the-alarm": ("Celes", scenario_raise_the_alarm),
     "J-ponder": ("Celes", scenario_ponder),
+    "K-triggered-ability": ("Celes", scenario_triggered_ability),
 }
 
 

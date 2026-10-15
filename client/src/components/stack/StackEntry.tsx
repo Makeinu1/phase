@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useContext, type CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -22,6 +22,7 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
+import { ManualDesignationContext } from "./ManualDesignationContext.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import type {
   ObjectId,
@@ -91,6 +92,8 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
     onHoverChange?.(true);
   });
 
+  const manualDesignation = useContext(ManualDesignationContext);
+  const offerManual = manualDesignation?.canDesignate(entry.id) ?? false;
   const sourceObj = objects?.[entry.source_id];
   // Prefer the engine-pre-resolved source name on triggered abilities (so the
   // display layer doesn't dereference ObjectId -> GameObject -> name itself).
@@ -558,6 +561,24 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
             </>
           )}
         </PopoverMenu>
+      )}
+
+      {/* Perform by hand: the engine offers this entry for manual resolution. */}
+      {offerManual && (
+        <button
+          type="button"
+          data-testid="manual-designate"
+          disabled={manualDesignation?.busy}
+          title={t("manualResolution.designateHint")}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            manualDesignation?.designate(entry.id);
+          }}
+          className="absolute left-1 top-1 z-30 rounded-full bg-fuchsia-700/95 px-2 py-0.5 text-[10px] font-semibold text-white shadow-md ring-1 ring-fuchsia-300/60 hover:bg-fuchsia-600 disabled:opacity-50"
+        >
+          {t("manualResolution.designate")}
+        </button>
       )}
 
       {/* Controller seat avatar — colored initial anchors identity to every surface

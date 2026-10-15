@@ -30,10 +30,13 @@ import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
   ViewerInteraction,
+  InteractionChoiceId,
   InteractionId,
   InteractionSubmission,
   ManualCastAvailability,
+  ManualResolutionSource,
 } from "../adapter/generated/interaction";
+import { ManualDesignationContext, type ManualDesignation } from "../components/stack/ManualDesignationContext.ts";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -1089,7 +1092,7 @@ function GamePageContent({
       if (!next) manualCastOriginalRef.current = null;
       setManualCastAttempt(next);
       if (status === "not-applied") setManualCastMessage(t("manualResolution.notAppliedRetry"));
-      if (status === "completed" && undoCheckpoint) useManualUndoStore.getState().capture(undoCheckpoint, source.name);
+      if (status === "completed" && undoCheckpoint) useManualUndoStore.getState().capture(undoCheckpoint, source.name, "cast");
     } catch (error) {
       // Missing terminal evidence keeps the adapter's captured original intact.
       const next = { ...attempt, status: "indeterminate" as const };
@@ -1128,6 +1131,50 @@ function GamePageContent({
     lookupBusy: manualLookupBusy,
     checkStatus: checkManualCast,
   } : null;
+  // CR 602.2 + CR 603.3: an ability (or a spell already on the stack) the
+  // engine offers for manual resolution. The engine's designation choice is
+  // the sole authority; the stack only shows it.
+  const manualDesignationOfferFor = useCallback((stackEntryId: number): { interactionId: InteractionId; choiceId: InteractionChoiceId; source: ManualResolutionSource } | null => {
+    if (!continuation || perspectivePlayerId !== getPlayerId() || !viewerInteraction?.canSubmit) return null;
+    for (const opportunity of viewerInteraction.opportunities) {
+      if (opportunity.response.type !== "exactChoices") continue;
+      for (const choice of opportunity.response.data.choices) {
+        if (choice.status.type !== "available" || !choice.surfaces.some((surface) =>
+          surface.type === "action" && surface.data.code === "designateManualResolution")) continue;
+        const surface = choice.surfaces.find((candidate) => candidate.type === "manualSource");
+        if (surface?.type === "manualSource" && surface.data.source.stackEntryId === stackEntryId) {
+          return { interactionId: opportunity.interactionId, choiceId: choice.id, source: surface.data.source };
+        }
+      }
+    }
+    return null;
+  }, [continuation, perspectivePlayerId, viewerInteraction]);
+  const [manualDesignationBusy, setManualDesignationBusy] = useState(false);
+  const designateManually = async (stackEntryId: number) => {
+    const offer = manualDesignationOfferFor(stackEntryId);
+    if (!offer || manualDesignationBusy) return;
+    setManualDesignationBusy(true);
+    setManualCastMessage(null);
+    try {
+      // The undo point is the board just before the designation.
+      const undoCheckpoint = await adapter?.exportPersistenceState?.().catch(() => null) ?? null;
+      const publication = await dispatchInteraction({ interactionId: offer.interactionId,
+        response: { type: "choose", data: { choiceId: offer.choiceId } } }, getPlayerId(), offer.source);
+      const status = publication?.receipt?.status;
+      if (status === "completed" && undoCheckpoint) {
+        useManualUndoStore.getState().capture(undoCheckpoint, offer.source.name, "designation");
+      } else if (status === "not-applied") setManualCastMessage(t("manualResolution.notAppliedRetry"));
+    } catch (error) {
+      setManualCastMessage(error instanceof Error ? error.message : t("manualResolution.deliveryUnknown"));
+    } finally {
+      setManualDesignationBusy(false);
+    }
+  };
+  const manualDesignation: ManualDesignation = {
+    canDesignate: (stackEntryId) => manualDesignationOfferFor(stackEntryId) !== null,
+    designate: (stackEntryId) => void designateManually(stackEntryId),
+    busy: manualDesignationBusy,
+  };
   const manualUndo = useManualUndoStore((s) => s.checkpoint);
   const [manualUndoBusy, setManualUndoBusy] = useState(false);
   const [manualUndoMessage, setManualUndoMessage] = useState<string | null>(null);
@@ -1159,7 +1206,7 @@ function GamePageContent({
     <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="manual-undo">
       <button type="button" disabled={manualUndoBusy} onClick={() => void undoManualPlay()}
         className="rounded-md border border-amber-400/60 bg-slate-900/90 px-3 py-1.5 text-sm text-amber-100 hover:bg-slate-800">
-        {t("manualResolution.undoBeforeCast", { card: manualUndo.cardName })}
+        {t(manualUndo.kind === "designation" ? "manualResolution.undoBeforeManual" : "manualResolution.undoBeforeCast", { card: manualUndo.cardName })}
       </button>
       {manualUndoMessage ? <span role="alert" className="text-xs text-rose-300">{manualUndoMessage}</span> : null}
     </div>
@@ -1671,7 +1718,9 @@ function GamePageContent({
     >
       <SpectatorChrome />
       <BattlefieldBackground key={`${boardBackground}-${playerId}`} />
-      <StackDisplay effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
+      <ManualDesignationContext.Provider value={manualDesignation}>
+        <StackDisplay effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
+      </ManualDesignationContext.Provider>
 
       {/* Persistent Sandbox banner — visible to all players whenever the
           game's format_config has debug actions enabled. Not dismissible. */}
