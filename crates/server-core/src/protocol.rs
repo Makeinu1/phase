@@ -255,6 +255,10 @@ pub struct CurrentTerminalDelivery {
     pub delivery_id: TerminalDeliveryId,
     pub credential: TerminalCredential,
     pub display: TerminalMatchDisplay,
+    /// Recipient-filtered final Full state with its server-derived projection.
+    /// Raw JSON preserves object-key order across durable delivery retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_view: Option<Box<serde_json::value::RawValue>>,
 }
 
 /// Bootstrap proof held by a reconnecting player before the regular Full
@@ -1571,9 +1575,21 @@ mod tests {
                     reason: "Match conceded".to_string(),
                     ranked_result: None,
                 },
+                final_view: Some(
+                    serde_json::value::RawValue::from_string(
+                        r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                ),
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""terminalRevision":9"#));
+        assert!(json.contains(r#""deliveryId":"delivery-0""#));
+        assert!(json.contains(
+            r#""finalView":{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+        ));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::TerminalBootstrapResult {
@@ -1582,6 +1598,10 @@ mod tests {
                 assert_eq!(delivery.key.generation, 4);
                 assert_eq!(delivery.terminal_revision, 9);
                 assert_eq!(delivery.delivery_id.0, "delivery-0");
+                assert_eq!(
+                    delivery.final_view.as_ref().unwrap().get(),
+                    r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -3346,6 +3366,12 @@ mod tests {
         }
     }
 
+    /// v146: `CurrentTerminalDelivery` gains an optional recipient-filtered
+    /// `final_view` (#9409) on `TerminalBootstrapResult` / `TerminalResult`, so
+    /// a reconnecting player can recover the final Full view and finish
+    /// terminal cleanup before ACK; a v145 peer would drop it. Full-only: P2P
+    /// stays at wire 127; lobby messages unchanged.
+    ///
     /// v145: `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
     /// serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
     /// peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
@@ -3569,8 +3595,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_145_for_search_missing_referent() {
-        assert_eq!(PROTOCOL_VERSION, 145);
+    fn protocol_version_is_146_for_terminal_final_view() {
+        assert_eq!(PROTOCOL_VERSION, 146);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3581,7 +3607,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_145_for_search_missing_referent` stays
+    /// `protocol_version_is_146_for_terminal_final_view` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
