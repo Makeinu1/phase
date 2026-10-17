@@ -163,16 +163,16 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
       ? y.target.ThisObject.source_id === entry.source_id && descMatches
       : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
   });
-  // Translate only the engine's known UI label templates, preserving the
-  // supplied number. Ability descriptions below remain in their original text.
-  const activatedNumber = details?.kind_label?.match(/^Activated ability (\d+)$/)?.[1];
-  const abilityLabel = details?.kind_label === "Triggered ability"
+  // Localize from the engine's typed `ability_kind`, never by parsing the
+  // English `kind_label`. Ability descriptions below remain in their original text.
+  const abilityKind = details?.ability_kind;
+  const abilityLabel = abilityKind?.type === "Triggered"
     ? t("stack.triggeredAbility")
-    : details?.kind_label === "Activated ability"
-      ? t("stack.activatedAbility")
-      : activatedNumber
-        ? t("stack.activatedAbilityNumber", { number: activatedNumber })
-        : details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
+    : abilityKind?.type === "Activated"
+      ? abilityKind.data.number != null
+        ? t("stack.activatedAbilityNumber", { number: abilityKind.data.number })
+        : t("stack.activatedAbility")
+      : details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
     ? t("stack.activated")
     : isTriggered && triggerSourceName
       ? t("stack.triggeredFrom", { source: displaySourceName })
@@ -384,16 +384,20 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
             }
           }}
           renderTrigger={({ ref, open, toggle }) => (
+            // 44px touch target on the left edge, mirroring the yield control on
+            // the right edge, so it never covers the bottom-right controller
+            // avatar and a near-miss tap does not fall through to ChooseTarget.
             <button
               ref={ref}
               type="button"
+              data-testid="stack-read-ability"
               aria-label={t("stack.readAbility")}
               aria-haspopup="dialog"
               aria-expanded={open}
               title={t("stack.readAbility")}
               onPointerDown={(event) => event.stopPropagation()}
               onClick={toggle}
-              className="absolute bottom-1 right-1 z-30 flex min-h-9 min-w-9 items-center justify-center rounded-lg bg-slate-800 text-slate-100 ring-1 ring-white/25 hover:bg-slate-700"
+              className="absolute left-1 top-1/2 z-30 flex min-h-11 min-w-11 -translate-y-1/2 items-center justify-center rounded-full bg-slate-800/90 text-slate-100 shadow-md ring-1 ring-white/25 hover:bg-slate-700"
             >
               <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true" className="h-4 w-4">
                 <path d="M3 3h5l2 2 2-2h5v13h-5l-2 2-2-2H3V3Zm7 2v13" />

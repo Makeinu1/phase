@@ -5,7 +5,12 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ensureCardLocale, type LocalizedFace } from "../../../services/engineRuntime.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
-import { buildStackEntry } from "../../../test/factories/gameStateFactory.ts";
+import {
+  buildGameState,
+  buildStackEntry,
+  buildTargetSelectionProgress,
+  targetSelectionWaitingForFactory,
+} from "../../../test/factories/gameStateFactory.ts";
 import japanese from "../../../i18n/locales/ja/game.json";
 import { StackEntry } from "../../stack/StackEntry.tsx";
 import { TriggerOrderModal } from "../TriggerOrderModal.tsx";
@@ -14,6 +19,8 @@ vi.mock("../../../services/engineRuntime.ts", async (original) => ({
   ...await original<typeof import("../../../services/engineRuntime.ts")>(),
   ensureCardLocale: vi.fn(),
 }));
+const { dispatchActionMock } = vi.hoisted(() => ({ dispatchActionMock: vi.fn() }));
+vi.mock("../../../game/dispatch.ts", () => ({ dispatchAction: dispatchActionMock }));
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: () => ({ src: "/test-card.png", isLoading: false }),
 }));
@@ -86,6 +93,7 @@ it("shows the full Japanese reference beside the original ability and preserves 
   const details = {
     source_name: "Spirited Companion",
     kind_label: "Triggered ability",
+    ability_kind: { type: "Triggered" as const },
     ability_description: "When ~ enters, draw a card.",
   };
   const stack = render(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} details={details} />);
@@ -98,8 +106,42 @@ it("shows the full Japanese reference beside the original ability and preserves 
   fireEvent.keyDown(dialog, { key: "Escape" });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   const activated = buildStackEntry({ kind: { type: "ActivatedAbility", data: { source_id: 2, ability: { targets: [] } } } });
-  stack.rerender(<StackEntry entry={activated} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ ...details, kind_label: "Activated ability 3" }} />);
+  // The label comes from the engine's typed `ability_kind`, so any change to
+  // the English `kind_label` wording cannot drop the localized template.
+  stack.rerender(<StackEntry entry={activated} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ ...details, kind_label: "activated ABILITY #3", ability_kind: { type: "Activated", data: { number: 3 } } }} />);
   expect(screen.getByText("起動型能力 3")).toBeInTheDocument();
+  stack.rerender(<StackEntry entry={activated} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ ...details, kind_label: "Activated ability", ability_kind: { type: "Activated", data: {} } }} />);
+  expect(screen.getByText(japanese.stack.activatedAbility)).toBeInTheDocument();
+});
+
+it("keeps the printed-text button a 44px target clear of the controller avatar and of ChooseTarget", async () => {
+  const entry = buildStackEntry({
+    id: 7,
+    kind: {
+      type: "TriggeredAbility",
+      data: { source_id: 2, source_name: "Spirited Companion", ability: { targets: [] } },
+    },
+  });
+  const waitingFor = targetSelectionWaitingForFactory
+    .withData({ selection: buildTargetSelectionProgress({ current_legal_targets: [{ Object: 7 }] }) })
+    .build();
+  const gameState = buildGameState({ stack: [entry], waiting_for: waitingFor });
+  act(() => {
+    useGameStore.setState({ gameState, waitingFor });
+  });
+  render(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} details={{ source_name: "Spirited Companion", kind_label: "Triggered ability", ability_kind: { type: "Triggered" } }} />);
+  const button = await screen.findByTestId("stack-read-ability");
+  // Reach guard: the entry really is an eligible target in this scenario.
+  expect(document.querySelector('[data-stack-entry="7"] div.overflow-hidden')!.className).toContain("ring-cyan-300");
+  expect(button.className).toMatch(/\bmin-h-11\b/);
+  expect(button.className).toMatch(/\bmin-w-11\b/);
+  // The non-spell controller avatar sits at bottom-1 right-1; the button must not share that corner.
+  expect(button.className).not.toMatch(/\bbottom-1\b|\bright-1\b/);
+  const avatar = screen.getByTitle(new RegExp(`^(${japanese.stack.controllerYou}|${japanese.stack.controllerOpp})$`));
+  expect(avatar.className).toMatch(/\bbottom-1 right-1\b/);
+  fireEvent.click(button);
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(dispatchActionMock).not.toHaveBeenCalled();
 });
 
 it("keeps the original when content is absent and never shows a previous card or language's reference", async () => {
