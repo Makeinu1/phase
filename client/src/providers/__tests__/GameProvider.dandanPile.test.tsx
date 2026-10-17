@@ -110,6 +110,14 @@ vi.mock("../../services/fullTerminalResult", () => ({
   replaceFullTerminalDelivery: vi.fn(async () => true),
 }));
 
+// The P2P host start reads its durable Full terminal cleanup owner (#9409)
+// before the deck gate; no owner is pending on these fresh routes.
+vi.mock("../../services/gamePersistence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/gamePersistence")>()),
+  clearFullTerminalCleanupStrict: vi.fn(async () => {}),
+  loadFullTerminalCleanupStrict: vi.fn(async () => null),
+}));
+
 vi.mock("../../services/nativeEngine", () => ({
   canAttemptNativeEngine: () => native.enabled,
   ensureNativeEngine: vi.fn(async () => {}),
