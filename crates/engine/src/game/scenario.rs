@@ -261,6 +261,21 @@ impl GameScenario {
         self
     }
 
+    /// Engine convention: `library[0]` is the top. `create_object` appends
+    /// to the bottom, so re-seat a staged card at index 0 for deterministic
+    /// top tests. Single authority for library-top placement, shared by the
+    /// card/spell/land staging helpers.
+    fn place_on_library_top(&mut self, player: PlayerId, id: ObjectId) {
+        let player_state = self
+            .state
+            .players
+            .iter_mut()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        player_state.library.retain(|&oid| oid != id);
+        player_state.library.insert(0, id);
+    }
+
     /// Add one generic named card to the top of a player's library.
     pub fn add_card_to_library_top(&mut self, player: PlayerId, name: &str) -> ObjectId {
         let card_id = CardId(self.state.next_object_id);
@@ -271,17 +286,7 @@ impl GameScenario {
             name.to_string(),
             Zone::Library,
         );
-        // Engine convention: `library[0]` is the top. `create_object` appends
-        // to the bottom, so re-seat this card at index 0 for deterministic top
-        // tests.
-        let player_state = self
-            .state
-            .players
-            .iter_mut()
-            .find(|p| p.id == player)
-            .expect("player exists");
-        player_state.library.retain(|&oid| oid != id);
-        player_state.library.insert(0, id);
+        self.place_on_library_top(player, id);
         id
     }
 
@@ -303,7 +308,7 @@ impl GameScenario {
     /// Replace a player's mana pool for deterministic payment tests.
     ///
     /// CR 118.3a: routes each unit through `add_mana_to_pool` so every seeded
-    /// unit receives a distinct `ManaPipId` (a direct `mana_pool.mana = mana`
+    /// unit receives a distinct `ManaPipId` (a pool built directly from `mana`
     /// would leave all units at the `ManaPipId(0)` sentinel, so pins would
     /// collide). All callers seed a fresh pool exactly once per player, so
     /// appending is equivalent to replacing.
@@ -945,6 +950,30 @@ impl GameScenario {
         self.add_spell_to_zone(player, name, is_instant, Zone::Library)
     }
 
+    /// Add a land to the top of a player's library. Mirrors
+    /// `add_spell_to_library_top`/`add_land_to_hand`; used to stage a
+    /// non-spell library top (a land has no spell face, so exile-then-cast
+    /// windows must exclude it while still offering sibling spells).
+    pub fn add_land_to_library_top(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        self.place_on_library_top(player, id);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add an instant or sorcery to a player's graveyard without Oracle text.
     ///
     /// Use `is_instant: true` for instants, `false` for sorceries.
@@ -992,14 +1021,7 @@ impl GameScenario {
         obj.base_card_types = obj.card_types.clone();
 
         if zone == Zone::Library {
-            let player_state = self
-                .state
-                .players
-                .iter_mut()
-                .find(|p| p.id == player)
-                .expect("player exists");
-            player_state.library.retain(|&oid| oid != id);
-            player_state.library.insert(0, id);
+            self.place_on_library_top(player, id);
         }
 
         CardBuilder {
@@ -1264,6 +1286,32 @@ impl<'a> CardBuilder<'a> {
             .core_types
             .retain(|t| *t != CoreType::Creature);
         obj.card_types.core_types.push(CoreType::Artifact);
+        self.sync_base_card_types();
+        self
+    }
+
+    /// Make this card an artifact creature.
+    pub fn as_artifact_creature(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.core_types.contains(&CoreType::Artifact) {
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        if !obj.card_types.core_types.contains(&CoreType::Creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
+    /// Make this card an artifact land.
+    pub fn as_artifact_land(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.core_types.contains(&CoreType::Artifact) {
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            obj.card_types.core_types.push(CoreType::Land);
+        }
         self.sync_base_card_types();
         self
     }
@@ -2018,6 +2066,7 @@ impl GameRunner {
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
+            WaitingFor::ChooseTokenHost { .. } => "ChooseTokenHost",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
@@ -2037,6 +2086,7 @@ impl GameRunner {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
+            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -2138,6 +2188,7 @@ impl GameRunner {
             WaitingFor::PayCost { .. } => "PayCost",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+            WaitingFor::ManaAbilityManaPayment { .. } => "ManaAbilityManaPayment",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
             WaitingFor::CastOffer {
@@ -2301,6 +2352,7 @@ pub struct SpellCast<'a> {
     effect_zone_cards: Vec<ObjectId>,
     copy_target: Option<ObjectId>,
     spellbook_pick: Option<String>,
+    payment_mode: CastPaymentMode,
 }
 
 impl<'a> SpellCast<'a> {
@@ -2330,7 +2382,16 @@ impl<'a> SpellCast<'a> {
             effect_zone_cards: Vec::new(),
             copy_target: None,
             spellbook_pick: None,
+            payment_mode: CastPaymentMode::Auto,
         }
+    }
+
+    /// CR 601.2g-h: announce the cast with `mode` — `Auto` pays from the pool at
+    /// announcement; `Manual` surfaces the interactive mana-payment window, which
+    /// the driver finalizes. Default `Auto`.
+    pub fn payment_mode(mut self, mode: CastPaymentMode) -> Self {
+        self.payment_mode = mode;
+        self
     }
 
     /// Submit the first legal candidates at any `SearchChoice` during
@@ -2562,6 +2623,7 @@ impl<'a> SpellCast<'a> {
             effect_zone_cards,
             copy_target,
             spellbook_pick,
+            payment_mode,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -2582,7 +2644,7 @@ impl<'a> SpellCast<'a> {
                 card_id,
                 targets: vec![],
 
-                payment_mode: CastPaymentMode::Auto,
+                payment_mode,
             },
             &mut events,
         )?;
@@ -4767,7 +4829,7 @@ mod tests {
             .expect("pay reduced cost");
         assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
         assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
-        assert!(runner.state().players[0].mana_pool.mana.is_empty());
+        assert!(runner.state().players[0].mana_pool.is_empty());
     }
 
     #[test]
